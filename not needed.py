@@ -1,0 +1,36 @@
+# --- Attackers (filled in) ---
+
+{"name": "Ace", "side": 1, "ctu": "Nighthaven", "ability_name": "S.E.L.M.A. Aqua Breacher", "ability_max_count": 3},  # three SELMAs [1](https://siege.gg/news/1747-operation-steel-wave-reveal-two-new-ops-proximity-mines-ranked-and-balance-changes)
+{"name": "Blackbeard", "side": 1, "ctu": "SEALs", "ability_name": "H.U.L.L. Adaptable Shield (Breaching Dash)", "ability_max_count": 4},  # 4 shield-breach charges [2](https://siege.gg/news/operation-collision-point-blackbeard-rework)
+{"name": "Blitz", "side": 1, "ctu": "GSG 9", "ability_name": "G52 Tactical Shield (flash array)", "ability_max_count": None},  # flash uses aren’t a fixed ‘stack’ on Ubisoft page [3](https://www.ubisoft.com/en-us/game/rainbow-six/siege/game-info/operators/blitz)
+{"name": "Buck", "side": 1, "ctu": "JTF2", "ability_name": "Skeleton Key (UBS-E shotgun)", "ability_max_count": 4},  # 4-round underbarrel mag capacity [4](https://www.ubisoft.com/en-us/game/rainbow-six/siege/game-info/operators/buck)
+{"name": "Capitão", "side": 1, "ctu": "BOPE", "ability_name": "TAC Crossbow (Asphyxiating/Smoke bolts)", "ability_max_count": 4},  # 2+2 bolts total [5](https://siege.gg/news/rainbow-six-siege-operator-guide-capitao)
+{"name": "Deimos", "side": 1, "ctu": "Keres Legion", "ability_name": "Deathmark Tracker", "ability_max_count": 3},  # three trackers per round [6](https://esports.gg/guides/rainbow-six-siege/deimos-guide/)
+{"name": "Dokkaebi", "side": 1, "ctu": "707th SMB", "ability_name": "Logic Bomb", "ability_max_count": 2},  # two calls [7](https://game8.co/games/Rainbow-Six-Mobile/archives/582548)
+{"name": "Fuze", "side": 1, "ctu": "Spetsnaz", "ability_name": "APM-6 Cluster Charge", "ability_max_count": 4},  # 4 charges; each fires 5 grenades [8](https://r6siegecenter.com/guides/operators/attackers/fuze/)
+{"name": "Grim", "side": 1, "ctu": "Nighthaven", "ability_name": "Kawan Hive Launcher", "ability_max_count": 5},  # five canisters [9](https://siege.gg/operators/grim)
+{"name": "Hibana", "side": 1, "ctu": "SAT", "ability_name": "X-KAIROS", "ability_max_count": 18},  # 18 pellets total (3x6) [10](https://theglobalgaming.com/gaming/how-to-detonate-hibana-rainbow-six-siege)
+{"name": "Iana", "side": 1, "ctu": "REU", "ability_name": "Gemini Replicator", "ability_max_count": None},  # cooldown-based hologram, not a fixed stack [11](https://www.supercheats.com/rainbow-six-siege/walkthrough/iq)
+{"name": "IQ", "side": 1, "ctu": "GSG 9", "ability_name": "RED Mk III ‘Electronics Detector’", "ability_max_count": None},  # continuous detector (range-based), not a stack [12](https://r6siegecenter.com/guides/operators/attackers/iq/)
+{"name": "Jackal", "side": 1, "ctu": "GEO", "ability_name": "Eyenox Model III", "ability_max_count": 3},  # 3 scans (each scan pings multiple times) [13](https://www.ign.com/wikis/rainbow-six-siege/Jackal)
+{"name": "Kali", "side": 1, "ctu": "Nighthaven", "ability_name": "LV Explosive Lance", "ability_max_count": 3},  # three lances [14](https://siege.gg/news/rainbow-six-siege-operator-guide-kali)
+{"name": "Maverick", "side": 1, "ctu": "GSUTR", "ability_name": "D.I.Y. Breaching Torch", "ability_max_count": None},  # fuel pool (no discrete count on Ubisoft page) [15](https://www.ubisoft.com/en-us/game/rainbow-six/siege/game-info/operators/maverick)
+{"name": "Osa", "side": 1, "ctu": "Nighthaven", "ability_name": "Talon-8 Clear Shield", "ability_max_count": 2},  # two shields [16](https://siege.gg/news/rainbow-six-siege-osa-operator-guide)
+{"name": "Ram", "side": 1, "ctu": "ROKA (Redhammer)", "ability_name": "BU‑GI Auto Breacher", "ability_max_count": 4},  # four BU‑GI breachers [17](https://siege.gg/news/y8s3-operation-heavy-mettle-ram-is-sieges-new-attacker-lesion-buffed-quick-match-changes-new-arcade-game-mode-and-more)
+{"name": "Rauora", "side": 1, "ctu": "NZSAS (Viperstrike)", "ability_name": "D.O.M. Panel Launcher", "ability_max_count": 4},  # four door panels [18](https://siege.gg/news/rainbow-six-siege-rauora-operator-guide)
+{"name": "Sens", "side": 1, "ctu": "Wolfguard", "ability_name": "R.O.U. Projector System", "ability_max_count": 7},  # 7 projectors after Y9S4 changes [19](https://siege.gg/news/y9s4-designers-notes-operation-collision-point)
+{"name": "Solid Snake", "side": 1, "ctu": "Ghosteyes (Guest)", "ability_name": "Soliton Radar Mk. III (+ Scavenge Gadgets)", "ability_max_count": None},  # radar + scavenge; no fixed count [20](https://www.ign.com/wikis/rainbow-six-siege/Rainbow_6_Siege_Operation_Silent_Hunt_Y11S1_Patch_Notes)
+{"name": "Striker", "side": 1, "ctu": "Recruit", "ability_name": "Extra Secondary Gadget (Attacker Recruit)", "ability_max_count": None},  # pick-two secondary gadgets; not a stack [21](https://www.ubisoft.com/en-us/game/rainbow-six/siege/game-info/operators/striker)
+
+# --- Defenders (filled in) ---
+
+{"name": "Fenrir", "side": 2, "ctu": "Redhammer", "ability_name": "F‑NATT Dread Mine", "ability_max_count": 5},  # 5 mines (3 active limit) [22](https://www.ubisoft.com/en-us/game/rainbow-six/siege/game-info/operators/fenrir)
+{"name": "Mira", "side": 2, "ctu": "GEO", "ability_name": "Black Mirror", "ability_max_count": 2},  # two one‑way mirrors [23](https://r6siegecenter.com/guides/operators/defenders/mira/)
+{"name": "Mozzie", "side": 2, "ctu": "SASR (Ghosteyes)", "ability_name": "Pest Launcher", "ability_max_count": 3},  # three Pests [24](https://bo3.gg/r6siege/articles/rainbow-six-siege-mozzie-full-guide)
+{"name": "Oryx", "side": 2, "ctu": "GIGR (Redhammer)", "ability_name": "Remah Dash", "ability_max_count": 3},  # 3 charges (≈8s recharge) [25](https://liquipedia.net/rainbowsix/Oryx)
+{"name": "Sentry", "side": 2, "ctu": "Recruit", "ability_name": "Extra Secondary Gadget (Defender Recruit)", "ability_max_count": None},  # pick-two secondary gadgets; not a stack [26](https://www.ubisoft.com/en-us/game/rainbow-six/siege/game-info/operators/sentry)
+{"name": "Skopós", "side": 2, "ctu": "Wolfguard", "ability_name": "V10 Pantheon Shells", "ability_max_count": 2},  # two shells (one active at a time) [27](https://www.ubisoft.com/en-us/game/rainbow-six/siege/game-info/operators/skopos)
+{"name": "Solis", "side": 2, "ctu": "Ghosteyes", "ability_name": "SPEC‑IO Electro‑Sensor", "ability_max_count": None},  # continuous scan device, not count‑limited [28](https://www.ubisoft.com/en-gb/game/rainbow-six/siege/game-info/operators/solis)
+{"name": "Tachanka", "side": 2, "ctu": "Spetsnaz (Redhammer)", "ability_name": "Shumikha Grenade Launcher", "ability_max_count": 10},  # 10 incendiary grenades total [29](https://www.ubisoft.com/en-us/game/rainbow-six/siege/game-info/operators/tachanka)
+{"name": "Tubarão", "side": 2, "ctu": "Wolfguard", "ability_name": "Zoto Canister", "ability_max_count": 3},  # reduced from 4 to 3 in Y8S4.2 notes [30](https://www.reddit.com/r/Rainbow6/comments/19czjj4/y8s42_designers_notes/)
+{"name": "Warden", "side": 2, "ctu": "Secret Service (Ghosteyes)", "ability_name": "Glance Smart Glasses", "ability_max_count": None},
