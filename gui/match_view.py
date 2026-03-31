@@ -68,14 +68,14 @@ class MatchView(QWidget):
         # inside MatchView follow the same rules.
         self.setStyleSheet("""
             /* Global settings for all children */
-            * {
-                font-size: 13px;
+            QWidget {
+                /* font-size: 13px; */ /* Removed to rely on global font set in main.py */
             }
 
             /* Table specific styling */
             QTableWidget { 
                 gridline-color: #444;
-                font-size: 14px;
+                /* font-size: 14px; */
             }
 
             QTableWidget::item { 
@@ -86,7 +86,7 @@ class MatchView(QWidget):
             QHeaderView::section { 
                 padding: 8px; 
                 font-weight: bold;
-                font-size: 12px;
+                /* font-size: 12px; */
                 background-color: #333; /* Optional: makes headers stand out */
                 color: white;
             }
@@ -205,6 +205,13 @@ class MatchView(QWidget):
         self.current_match_id = self.match_selector.currentData()
         self.populate_tables()
 
+    def clear_table_widgets(self, table):
+        for row in range(table.rowCount()):
+            for col in range(table.columnCount()):
+                widget = table.cellWidget(row, col)
+                if widget:
+                    widget.deleteLater()
+                    table.setCellWidget(row, col, None)
     # ============================================================
     # TABLE POPULATION
     # ============================================================
@@ -212,14 +219,16 @@ class MatchView(QWidget):
     def populate_tables(self):
         self.team_table.blockSignals(True)
         self.enemy_table.blockSignals(True)
+        print("Rebuilding tables...")
+        # 🔥 CLEAR OLD WIDGETS FIRST
+        self.clear_table_widgets(self.team_table)
+        self.clear_table_widgets(self.enemy_table)
 
         self.populate_team_table()
         self.populate_enemy_table()
 
         self.team_table.blockSignals(False)
         self.enemy_table.blockSignals(False)
-
-        
 
         self.refresh_operator_dropdowns(self.team_table)
         self.refresh_operator_dropdowns(self.enemy_table)

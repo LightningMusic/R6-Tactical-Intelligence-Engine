@@ -46,12 +46,7 @@ def main():
     from PySide6.QtGui import QFontInfo
 
     f = app.font()
-    print("Global font size:", QFontInfo(f).pointSize())
-
-    # 🔥 GLOBAL FONT FIX (stops the Qt leak entirely)
-    font = QFont()
-    font.setPixelSize(14)   # 🔥 use pixels instead
-    app.setFont(font)
+    app.setFont(QFont("Segoe UI", 10))
     window = MainWindow()
     window.show()
 

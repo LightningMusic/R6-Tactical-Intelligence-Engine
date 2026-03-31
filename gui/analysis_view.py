@@ -1,154 +1,94 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+    QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QHeaderView
+)
+from PySide6.QtCore import Qt
 
-
-class AnalysisView(ttk.Frame):
-    """
-    Analysis Dashboard
-
-    Allows the user to:
-    - Select a match
-    - Run full analytics
-    - View intelligence metrics
-    """
-
+class AnalysisView(QWidget):
     def __init__(self, parent, controller):
         super().__init__(parent)
-
         self.controller = controller
-
-        self.match_var = tk.StringVar()
-
         self._build_layout()
-
         self.load_matches()
 
-    # --------------------------------------------------
-    # Layout
-    # --------------------------------------------------
-
     def _build_layout(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
 
-        header = ttk.Label(self, text="Match Analysis", font=("Arial", 18))
-        header.pack(pady=10)
+        # Header
+        header = QLabel("Match Analysis")
+        header.setStyleSheet("font-size: 24px; font-weight: bold;")
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(header)
 
-        # Match selection
-        selection_frame = ttk.Frame(self)
-        selection_frame.pack(pady=10)
+        # Match selection row
+        selection_layout = QHBoxLayout()
+        selection_layout.addWidget(QLabel("Select Match:"))
 
-        ttk.Label(selection_frame, text="Select Match:").pack(side="left", padx=5)
+        self.match_dropdown = QComboBox()
+        self.match_dropdown.setMinimumWidth(300)
+        selection_layout.addWidget(self.match_dropdown)
 
-        self.match_dropdown = ttk.Combobox(
-            selection_frame,
-            textvariable=self.match_var,
-            state="readonly",
-            width=40
-        )
-        self.match_dropdown.pack(side="left", padx=5)
+        run_button = QPushButton("Run Analysis")
+        run_button.clicked.connect(self.run_analysis)
+        selection_layout.addWidget(run_button)
+        
+        layout.addLayout(selection_layout)
 
-        run_button = ttk.Button(
-            selection_frame,
-            text="Run Analysis",
-            command=self.run_analysis
-        )
-        run_button.pack(side="left", padx=10)
-
-        # Results table
-        self.results_table = ttk.Treeview(
-            self,
-            columns=("metric", "value"),
-            show="headings",
-            height=15
-        )
-
-        self.results_table.heading("metric", text="Metric")
-        self.results_table.heading("value", text="Value")
-
-        self.results_table.column("metric", width=250)
-        self.results_table.column("value", width=200)
-
-        self.results_table.pack(pady=15, fill="both", expand=True)
+        # Results table (Replacing Treeview)
+        self.results_table = QTableWidget(0, 2)
+        self.results_table.setHorizontalHeaderLabels(["Metric", "Value"])
+        self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.results_table.setAlternatingRowColors(True)
+        self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.results_table)
 
         # Export button
-        export_button = ttk.Button(
-            self,
-            text="Generate Report",
-            command=self.generate_report
-        )
-        export_button.pack(pady=10)
-
-    # --------------------------------------------------
-    # Load Matches
-    # --------------------------------------------------
+        export_button = QPushButton("Generate Report")
+        export_button.setMinimumHeight(40)
+        export_button.clicked.connect(self.generate_report)
+        layout.addWidget(export_button)
 
     def load_matches(self):
-
         try:
             matches = self.controller.get_all_matches()
-
-            values = [
-                f"{m.match_id} - {m.map_name} vs {m.enemy_team}"
-                for m in matches
-            ]
-
-            self.match_dropdown["values"] = values
-
+            self.match_dropdown.clear()
+            for m in matches:
+                # We store the match_id in the UserData for easy retrieval
+                text = f"{m.match_id} - {m.map_name} vs {m.enemy_team}"
+                self.match_dropdown.addItem(text, m.match_id)
         except Exception as e:
-            messagebox.showerror("Error", str(e))
-
-    # --------------------------------------------------
-    # Run Analysis
-    # --------------------------------------------------
+            QMessageBox.critical(self, "Error", str(e))
 
     def run_analysis(self):
-
-        if not self.match_var.get():
-            messagebox.showwarning("Warning", "Select a match first.")
+        match_id = self.match_dropdown.currentData()
+        if match_id is None:
+            QMessageBox.warning(self, "Warning", "Select a match first.")
             return
 
-        match_id = int(self.match_var.get().split(" - ")[0])
-
         try:
-
             metrics = self.controller.analyze_match(match_id)
-
             self.display_metrics(metrics)
-
         except Exception as e:
-            messagebox.showerror("Analysis Error", str(e))
-
-    # --------------------------------------------------
-    # Display Results
-    # --------------------------------------------------
+            QMessageBox.critical(self, "Analysis Error", str(e))
 
     def display_metrics(self, metrics):
-
-        for row in self.results_table.get_children():
-            self.results_table.delete(row)
-
+        self.results_table.setRowCount(0)
         for key, value in metrics.items():
-            self.results_table.insert("", "end", values=(key, value))
-
-    # --------------------------------------------------
-    # Generate Report
-    # --------------------------------------------------
+            row = self.results_table.rowCount()
+            self.results_table.insertRow(row)
+            self.results_table.setItem(row, 0, QTableWidgetItem(str(key)))
+            self.results_table.setItem(row, 1, QTableWidgetItem(str(value)))
 
     def generate_report(self):
-
-        if not self.match_var.get():
-            messagebox.showwarning("Warning", "Select a match first.")
+        match_id = self.match_dropdown.currentData()
+        if match_id is None:
+            QMessageBox.warning(self, "Warning", "Select a match first.")
             return
 
-        match_id = int(self.match_var.get().split(" - ")[0])
-
         try:
-
             path = self.controller.generate_match_report(match_id)
-
-            messagebox.showinfo(
-                "Report Generated",
-                f"Report saved to:\n{path}"
-            )
-
+            QMessageBox.information(self, "Report Generated", f"Report saved to:\n{path}")
         except Exception as e:
-            messagebox.showerror("Report Error", str(e))
+            QMessageBox.critical(self, "Report Error", str(e))
