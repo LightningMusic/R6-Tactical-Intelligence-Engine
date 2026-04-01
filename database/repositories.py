@@ -63,7 +63,7 @@ class Repository:
         with self.db.get_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT g.*
+                SELECT g.*, ogo.max_count
                 FROM gadgets g
                 JOIN operator_gadget_options ogo
                 ON g.gadget_id = ogo.gadget_id
@@ -77,6 +77,7 @@ class Repository:
                     gadget_id=row["gadget_id"],
                     name=row["name"],
                     category=row["category"],
+                    max_count=row["max_count"],
                 )
                 for row in rows
             ]

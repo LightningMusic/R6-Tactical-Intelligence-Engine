@@ -6,7 +6,7 @@ from database.db_manager import DatabaseManager
 # Format: (name, side, ability_name, ability_max_count)
 OPERATORS = [
     ("Ash", "attack", "Breaching Round", 3),
-    ("Thermite", "attack", "Exothermic Charge", 2),
+    ("Thermite", "attack", "Exothermic Charge", 3),
     ("Twitch", "attack", "Shock Drone", 2),
     ("Sledge", "attack", "Sledgehammer", 25),
     ("Montagne", "attack", "Le Roc Shield", 1),
@@ -20,7 +20,7 @@ OPERATORS = [
     ("Jäger", "defense", "Active Defense System", 3),
     ("Valkyrie", "defense", "Black Eye Cameras", 3),
     ("Caveira", "defense", "Silent Step", 1),
-    ("Echo", "defense", "Yokai Drone", 2),
+    ("Echo", "defense", "Yokai Drone", 3),
     ("Frost", "defense", "Welcome Mat", 3),
     ("Kapkan", "defense", "Entry Denial Device", 5),
     ("Lesion", "defense", "Gu Mine", 8),

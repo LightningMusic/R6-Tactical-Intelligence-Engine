@@ -1,5 +1,7 @@
+from email import header
+
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+    QAbstractItemView, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QTableWidget, QTableWidgetItem, QPushButton, QSpinBox,
     QCheckBox, QMessageBox, QHeaderView, QTabWidget, QAbstractScrollArea
 )
@@ -7,6 +9,7 @@ from PySide6.QtCore import QTimer, Qt
 from typing import cast
 
 from app.app_controller import AppController
+from database.db_manager import DatabaseManager
 from database.repositories import Repository
 
 
@@ -35,34 +38,46 @@ class MatchView(QWidget):
             return widget_class()
     
     def setup_table(self, table: QTableWidget, is_team: bool):
-        table.setColumnCount(12)
+        table.setColumnCount(13)
+        
+        # NEW: Hide the numbers on the left side
+        table.verticalHeader().setVisible(False)
         table.verticalHeader().setDefaultSectionSize(42)
+
+        # NEW: Enable smooth, pixel-based scrolling
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 
         headers = [
             "Player", "Operator", "Kills", "Deaths", "Assists",
             "Eng Taken", "Eng Won",
-            "Ability Used", "Secondary", "Secondary Used",
+            "Ability", "Ability Uses", "Secondary", "Secondary Used",
             "Plant Attempted", "Plant Successful"
         ]
 
         table.setHorizontalHeaderLabels(headers)
-
         header = table.horizontalHeader()
+        
+        # Prevent columns from squishing too much
+        header.setMinimumSectionSize(100)
 
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        Fixed_width_cols = [1, 7]  # Operator and Ability
+        for col in Fixed_width_cols:
+            table.setColumnWidth(col, 200)
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
 
-        table.setColumnWidth(0, 140)  # Player
-        table.setColumnWidth(1, 180)  # Operator (BIG FIX)
-        table.setColumnWidth(8, 180)  # Secondary (BIG FIX)
-
-        for col in range(12):
-            if col not in (0, 1, 8):
-                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+        header.setStretchLastSection(True)
+        
+        content_cols = [0, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]
+        for col in content_cols:
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
 
         table.setAlternatingRowColors(True)
-
         table.setRowCount(5)
-
+        
+        # Scrollbar visibility settings
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
     def init_ui(self):
         # Using a wildcard '*' ensures all sub-widgets (labels, combo boxes) 
         # inside MatchView follow the same rules.
@@ -85,6 +100,8 @@ class MatchView(QWidget):
             /* Header styling */
             QHeaderView::section { 
                 padding: 8px; 
+                padding-left: 12px;
+                padding-right: 12px;
                 font-weight: bold;
                 /* font-size: 12px; */
                 background-color: #333; /* Optional: makes headers stand out */
@@ -104,6 +121,34 @@ class MatchView(QWidget):
             /* Tab styling to match the dark grid */
             QTabWidget::pane { 
                 border: 1px solid #444;
+            }
+            /* This removes the up/down arrows from all SpinBoxes */
+            QSpinBox::up-button, QSpinBox::down-button {
+                width: 0px;
+                border: none;
+            }
+
+            /* Optional: Center the text since the arrows are gone */
+            QSpinBox {
+                padding-right: 2px;
+                alignment: Qt.AlignCenter;
+            }
+            /* Custom Scrollbar Styling */
+            QScrollBar:horizontal {
+                border: none;
+                background: #222;
+                height: 12px; /* Slightly taller for easier clicking */
+                margin: 0px;
+            }
+
+            QScrollBar::handle:horizontal {
+                background: #444; /* Dimmer by default */
+                min-width: 30px;
+                border-radius: 6px;
+            }
+
+            QScrollBar::handle:horizontal:hover {
+                background: #666; /* Brightens when you hover */
             }
         """)
 
@@ -180,10 +225,10 @@ class MatchView(QWidget):
         self.populate_tables()
         self.update_resource_label()
 
-    def refresh_all_gadgets(self):
+    def refresh_all_loadouts(self):
         for table in (self.team_table, self.enemy_table):
             for row in range(table.rowCount()):
-                self.update_gadgets(table, row)
+                self.update_loadout(table, row)
     # ============================================================
     # MATCH
     # ============================================================
@@ -232,6 +277,8 @@ class MatchView(QWidget):
 
         self.refresh_operator_dropdowns(self.team_table)
         self.refresh_operator_dropdowns(self.enemy_table)
+
+        self.refresh_all_loadouts()
     def populate_team_table(self):
         self.team_table.setRowCount(5)
 
@@ -261,12 +308,12 @@ class MatchView(QWidget):
 
             # Set them into the table FIRST so the refresh logic can find them
             table.setCellWidget(row, 1, op_selector)
-            table.setCellWidget(row, 8, sec_selector)
+            table.setCellWidget(row, 9, sec_selector)
 
             # The Signal: When one changes, refresh everyone else to hide that operator
             def on_change():
                 if self._updating: return
-                self.update_gadgets(table, row)
+                self.update_loadout(table, row)
                 self.refresh_operator_dropdowns(table)
 
             op_selector.currentIndexChanged.connect(on_change)
@@ -277,41 +324,103 @@ class MatchView(QWidget):
                 spin.setRange(0, 50)
                 table.setCellWidget(row, col, spin)
 
-            ability_spin = self.create_safe_widget(QSpinBox)
-            ability_spin.setRange(0, 10)
-            table.setCellWidget(row, 7, ability_spin)
 
-            sec_used = self.create_safe_widget(QSpinBox)
-            sec_used.setRange(0, 10)
-            table.setCellWidget(row, 9, sec_used)
+            # Ability NAME (column 7)
+            ability_label = QLabel("Ability")
+            ability_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setCellWidget(row, 7, ability_label)
 
-            table.setCellWidget(row, 10, QCheckBox())
+            # Ability USES (column 8)
+            ability_dropdown = self.create_safe_widget(QComboBox)
+            table.setCellWidget(row, 8, ability_dropdown)
+
+            sec_used_dropdown = self.create_safe_widget(QComboBox)
+            table.setCellWidget(row, 10, sec_used_dropdown)
+
             table.setCellWidget(row, 11, QCheckBox())
+            table.setCellWidget(row, 12, QCheckBox())
 
             # Final step: Force a refresh to hide already-picked ops from this new row
-            self.update_gadgets(table, row)
+            self.update_loadout(table, row)
             self.refresh_operator_dropdowns(table)
-    def update_gadgets(self, table, row):
+    def update_loadout(self, table, row):
         op_widget = cast(QComboBox, table.cellWidget(row, 1))
-        sec_widget = cast(QComboBox, table.cellWidget(row, 8))
+        sec_widget = cast(QComboBox, table.cellWidget(row, 9))
+
+        ability_label = cast(QLabel, table.cellWidget(row, 7))
+        ability_dropdown = cast(QComboBox, table.cellWidget(row, 8))
+        sec_used_dropdown = cast(QComboBox, table.cellWidget(row, 10))
 
         if not op_widget or not sec_widget:
             return
 
         operator_id = op_widget.currentData()
 
+        # -------------------------
+        # RESET EVERYTHING
+        # -------------------------
         sec_widget.blockSignals(True)
         sec_widget.clear()
         sec_widget.addItem("None", None)
 
+        if ability_label and ability_dropdown:
+            ability_label.setText("Ability")
+            ability_dropdown.clear()
+
+        if sec_used_dropdown:
+            sec_used_dropdown.clear()
+
+        # -------------------------
+        # LOAD OPERATOR DATA
+        # -------------------------
         if operator_id is not None:
+            operator = self.repo.get_operator_by_id(operator_id)
+
+            if operator and ability_label and ability_dropdown:
+                ability_label.setText(operator.ability_name)
+
+                ability_dropdown.blockSignals(True)
+                for i in range(operator.ability_max_count + 1):
+                    ability_dropdown.addItem(str(i), i)
+                ability_dropdown.setCurrentIndex(0)
+                ability_dropdown.blockSignals(False)
+
+            # -------------------------
+            # SECONDARY GADGETS
+            # -------------------------
+            gadget_map = {}
+
             gadgets = self.repo.get_gadgets_for_operator(operator_id)
 
             for g in gadgets:
                 sec_widget.addItem(g.name, g.gadget_id)
+                gadget_map[g.gadget_id] = g.max_count
+
+            # -------------------------
+            # CONNECT SECONDARY USAGE
+            # -------------------------
+            def update_secondary_uses():
+                if not sec_used_dropdown:
+                    return
+
+                sec_used_dropdown.blockSignals(True)
+                sec_used_dropdown.clear()
+
+                selected_id = sec_widget.currentData()
+                max_count = gadget_map.get(selected_id, 0)
+
+                for i in range(max_count + 1):
+                    sec_used_dropdown.addItem(str(i), i)
+
+                sec_used_dropdown.setCurrentIndex(0)
+                sec_used_dropdown.blockSignals(False)
+
+            sec_widget.currentIndexChanged.connect(update_secondary_uses)
+
+            # Run once immediately
+            update_secondary_uses()
 
         sec_widget.blockSignals(False)
-
     def update_resource_label(self):
         if self.side_selector.currentText() == "attack":
             self.resource_label.setText("Team Drones Lost (Start = 10)")
@@ -385,6 +494,10 @@ class MatchView(QWidget):
             op_widget.blockSignals(False)
 
         self._updating = False
+
+        # After rebuilding all dropdowns
+        for row in range(table.rowCount()):
+            self.update_loadout(table, row)
     # ============================================================
     # SAVE
     # ============================================================
@@ -416,13 +529,13 @@ class MatchView(QWidget):
             eng_taken = cast(QSpinBox, table.cellWidget(row, 5))
             eng_won = cast(QSpinBox, table.cellWidget(row, 6))
 
-            ability = cast(QSpinBox, table.cellWidget(row, 7))
+            ability_dropdown = cast(QComboBox, table.cellWidget(row, 8))
 
-            sec_box = cast(QComboBox, table.cellWidget(row, 8))
-            sec_used = cast(QSpinBox, table.cellWidget(row, 9))
+            sec_box = cast(QComboBox, table.cellWidget(row, 9))
+            sec_used = cast(QComboBox, table.cellWidget(row, 10))
 
-            plant_attempt = cast(QCheckBox, table.cellWidget(row, 10))
-            plant_success = cast(QCheckBox, table.cellWidget(row, 11))
+            plant_attempt = cast(QCheckBox, table.cellWidget(row, 11))
+            plant_success = cast(QCheckBox, table.cellWidget(row, 12))
 
             stats = {
                 "player_id": player.player_id,
@@ -435,10 +548,10 @@ class MatchView(QWidget):
                 "engagements_taken": eng_taken.value(),
                 "engagements_won": eng_won.value(),
 
-                "ability_used": ability.value(),
+                "ability_used": ability_dropdown.currentData() if ability_dropdown else 0,
 
                 "secondary_gadget_id": sec_box.currentData(),
-                "secondary_used": sec_used.value(),
+                "secondary_used": sec_used.currentData() if sec_used else 0,
 
                 "plant_attempted": plant_attempt.isChecked(),
                 "plant_successful": plant_success.isChecked(),
