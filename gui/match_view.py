@@ -24,6 +24,8 @@ class MatchView(QWidget):
         self.current_match_id = None
         self.players = self.repo.get_team_players()[:5]
         self.operators = self.repo.get_all_operators()
+        self._secondary_handlers = {}  # Maps id(sec_widget) -> handler function
+        self._row_operator_cache = {}
         self._updating = False
         self.init_ui()
 
@@ -161,10 +163,11 @@ class MatchView(QWidget):
         # Match selector
         match_layout = QHBoxLayout()
         match_layout.addWidget(QLabel("Select Match:"))
-
         self.match_selector = QComboBox()
-        self.load_matches()
+        self.match_selector.addItem("Select a match...", None)
         self.match_selector.currentIndexChanged.connect(self.on_match_selected)
+        self.load_matches()
+
 
         match_layout.addWidget(self.match_selector)
         layout.addLayout(match_layout)
@@ -239,22 +242,33 @@ class MatchView(QWidget):
 
         for m in matches:
             self.match_selector.addItem(
-                f"{m.match_id}: {m.opponent_name} ({m.map_name})",
+                f"{m.match_id}: {m.opponent_name} ({m.map})",  # FIXED map_name → map
                 m.match_id
             )
 
         if matches:
-            self.current_match_id = matches[0].match_id
+            self.match_selector.setCurrentIndex(0)  # 🔥 THIS IS CRITICAL
+            self.on_match_selected(0)               # 🔥 FORCE LOAD
 
     def on_match_selected(self, index):
         self.current_match_id = self.match_selector.currentData()
+
+        if self.current_match_id is None:
+            return
+
+        # Reset round number (optional but clean UX)
+        self.round_number_spin.setValue(1)
+
+        # Refresh UI
         self.populate_tables()
+        self.update_resource_label()
 
     def clear_table_widgets(self, table):
         for row in range(table.rowCount()):
             for col in range(table.columnCount()):
                 widget = table.cellWidget(row, col)
                 if widget:
+                    self._secondary_handlers.pop(id(widget), None)  # clean up stale entries
                     widget.deleteLater()
                     table.setCellWidget(row, col, None)
     # ============================================================
@@ -346,7 +360,6 @@ class MatchView(QWidget):
     def update_loadout(self, table, row):
         op_widget = cast(QComboBox, table.cellWidget(row, 1))
         sec_widget = cast(QComboBox, table.cellWidget(row, 9))
-
         ability_label = cast(QLabel, table.cellWidget(row, 7))
         ability_dropdown = cast(QComboBox, table.cellWidget(row, 8))
         sec_used_dropdown = cast(QComboBox, table.cellWidget(row, 10))
@@ -355,69 +368,71 @@ class MatchView(QWidget):
             return
 
         operator_id = op_widget.currentData()
+        row_key = (id(table), row)
+        previous_operator = self._row_operator_cache.get(row_key)
+        operator_changed = operator_id != previous_operator
+        self._row_operator_cache[row_key] = operator_id
 
-        # -------------------------
-        # RESET EVERYTHING
-        # -------------------------
+        # ✅ Only do ANYTHING if operator actually changed
+        if not operator_changed:
+            return
+
+        # Reset
         sec_widget.blockSignals(True)
         sec_widget.clear()
         sec_widget.addItem("None", None)
 
         if ability_label and ability_dropdown:
             ability_label.setText("Ability")
+            ability_dropdown.blockSignals(True)
             ability_dropdown.clear()
+            ability_dropdown.blockSignals(False)
 
         if sec_used_dropdown:
+            sec_used_dropdown.blockSignals(True)
             sec_used_dropdown.clear()
+            sec_used_dropdown.blockSignals(False)
 
-        # -------------------------
-        # LOAD OPERATOR DATA
-        # -------------------------
+        # Populate if an operator is selected
         if operator_id is not None:
             operator = self.repo.get_operator_by_id(operator_id)
 
             if operator and ability_label and ability_dropdown:
                 ability_label.setText(operator.ability_name)
-
                 ability_dropdown.blockSignals(True)
                 for i in range(operator.ability_max_count + 1):
                     ability_dropdown.addItem(str(i), i)
                 ability_dropdown.setCurrentIndex(0)
                 ability_dropdown.blockSignals(False)
 
-            # -------------------------
-            # SECONDARY GADGETS
-            # -------------------------
             gadget_map = {}
-
             gadgets = self.repo.get_gadgets_for_operator(operator_id)
-
             for g in gadgets:
                 sec_widget.addItem(g.name, g.gadget_id)
                 gadget_map[g.gadget_id] = g.max_count
 
-            # -------------------------
-            # CONNECT SECONDARY USAGE
-            # -------------------------
             def update_secondary_uses():
                 if not sec_used_dropdown:
                     return
-
                 sec_used_dropdown.blockSignals(True)
                 sec_used_dropdown.clear()
-
                 selected_id = sec_widget.currentData()
                 max_count = gadget_map.get(selected_id, 0)
-
                 for i in range(max_count + 1):
                     sec_used_dropdown.addItem(str(i), i)
-
                 sec_used_dropdown.setCurrentIndex(0)
                 sec_used_dropdown.blockSignals(False)
 
-            sec_widget.currentIndexChanged.connect(update_secondary_uses)
+            # Disconnect previous handler if one exists
+            existing = self._secondary_handlers.get(id(sec_widget))
+            if existing is not None:
+                try:
+                    sec_widget.currentIndexChanged.disconnect(existing)
+                except Exception:
+                    pass
 
-            # Run once immediately
+            self._secondary_handlers[id(sec_widget)] = update_secondary_uses
+            sec_widget.currentIndexChanged.connect(update_secondary_uses)
             update_secondary_uses()
 
         sec_widget.blockSignals(False)
@@ -431,7 +446,6 @@ class MatchView(QWidget):
     def refresh_operator_dropdowns(self, table):
         if self._updating:
             return
-
         self._updating = True
 
         # 🔥 STEP 1: Build a FULL snapshot (do NOT mutate this later)
@@ -472,7 +486,9 @@ class MatchView(QWidget):
             if table is self.enemy_table:
                 side = "defense" if side == "attack" else "attack"
 
-            for op in self.operators:
+            operators = self.repo.get_all_operators()
+
+            for op in operators:
                 if op.side != side:
                     continue
 
@@ -495,16 +511,13 @@ class MatchView(QWidget):
 
         self._updating = False
 
-        # After rebuilding all dropdowns
-        for row in range(table.rowCount()):
-            self.update_loadout(table, row)
     # ============================================================
     # SAVE
     # ============================================================
 
     def save_round(self):
 
-        if not self.current_match_id:
+        if self.current_match_id is None:
             QMessageBox.warning(self, "Error", "No match selected.")
             return
 

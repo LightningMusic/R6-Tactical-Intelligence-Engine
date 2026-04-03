@@ -10,9 +10,9 @@ OPERATORS = [
     ("Twitch", "attack", "Shock Drone", 2),
     ("Sledge", "attack", "Sledgehammer", 25),
     ("Montagne", "attack", "Le Roc Shield", 1),
-    ("Mute", "defense", "Signal Disruptor", 3),
+    ("Mute", "defense", "Signal Disruptor", 4),
     ("Smoke", "defense", "Remote Gas Grenade", 3),
-    ("Castle", "defense", "Armor Panels", 3),
+    ("Castle", "defense", "Armor Panels", 4),
     ("Pulse", "defense", "Heartbeat Sensor", 1),
     ("Rook", "defense", "Armor Pack", 1),
     ("Doc", "defense", "Stim Pistol", 3),
@@ -404,8 +404,11 @@ def seed_database(db: DatabaseManager):
         for op in OPERATORS:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO operators (name, side, ability_name, ability_max_count)
+                INSERT INTO operators (name, side, ability_name, ability_max_count)
                 VALUES (?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    ability_name = excluded.ability_name,
+                    ability_max_count = excluded.ability_max_count
                 """,
                 op
             )

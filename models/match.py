@@ -25,7 +25,7 @@ class Match:
     match_id: Optional[int]
     datetime_played: datetime
     opponent_name: str
-    map_name: str
+    map: str
     result: str  # "win" or "loss"
     recording_path: Optional[str]
 

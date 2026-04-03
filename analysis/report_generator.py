@@ -7,35 +7,22 @@ from analysis.intel_engine import IntelEngine
 
 
 class ReportGenerator:
-    """
-    Generates formatted HTML reports from stored match data
-    and derived intelligence.
-    """
-
     def __init__(self):
         self.repo = Repository()
         self.intel = IntelEngine()
 
     # ============================================================
-    # PUBLIC ENTRY POINT
+    # ENTRY POINT
     # ============================================================
 
     def generate_match_report(self, match_id: int) -> str:
-        """
-        Generates and saves an HTML report.
-        Returns file path.
-        """
-
         match = self.repo.get_match_full(match_id)
         if match is None:
             raise ValueError("Match not found.")
 
-        # Ensure metrics are up to date
-        derived = self.intel.analyze_match(match_id)
-        player_intel = self.intel.get_player_intel(match_id)
+        intel_bundle = self.intel.analyze_match(match_id)
 
-        html = self._build_html(match, derived, player_intel)
-
+        html = self._build_html(match, intel_bundle)
         path = self._save_report(match_id, html)
 
         return str(path)
@@ -44,78 +31,145 @@ class ReportGenerator:
     # HTML BUILDER
     # ============================================================
 
-    def _build_html(
-        self,
-        match,
-        derived: Dict[str, float],
-        player_intel: Dict,
-    ) -> str:
+    def _build_html(self, match, intel: Dict) -> str:
 
-        summary = player_intel["summary"]
-        consistency = player_intel["consistency"]
-        tactical_scores = player_intel["tactical_score"]
+        team = intel["team_metrics"]
+        players = intel["player_intel"]["summary"]
+        consistency = intel["player_intel"]["consistency"]
+        scores = intel["player_intel"]["tactical_score"]
+        roles = intel["player_roles"]
+        insights = intel["team_insights"]
+
+        def pct(v): return f"{v:.1%}"
+        def num(v): return f"{v:.2f}"
+
+        # --------------------------------------------
+        # COLOR HELPERS
+        # --------------------------------------------
+        def color_scale(value, good=0.6, bad=0.4):
+            if value >= good:
+                return "#4CAF50"
+            elif value <= bad:
+                return "#f44336"
+            return "#FFC107"
 
         html = f"""
         <html>
         <head>
-            <title>Match Report</title>
+            <title>R6 Tactical Report</title>
             <style>
-                body {{ font-family: Arial; background: #111; color: #eee; }}
-                h1, h2 {{ color: #4CAF50; }}
-                table {{ border-collapse: collapse; width: 100%; }}
-                th, td {{ border: 1px solid #444; padding: 8px; text-align: center; }}
-                th {{ background-color: #222; }}
+                body {{
+                    font-family: Arial;
+                    background: #0f1116;
+                    color: #eee;
+                    padding: 20px;
+                }}
+
+                h1, h2 {{
+                    color: #4CAF50;
+                }}
+
+                .card {{
+                    background: #1a1d25;
+                    padding: 15px;
+                    border-radius: 10px;
+                    margin-bottom: 20px;
+                }}
+
+                table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                }}
+
+                th, td {{
+                    padding: 10px;
+                    border-bottom: 1px solid #333;
+                    text-align: center;
+                }}
+
+                th {{
+                    background: #222;
+                }}
+
+                .good {{ color: #4CAF50; }}
+                .bad {{ color: #f44336; }}
+                .mid {{ color: #FFC107; }}
             </style>
         </head>
+
         <body>
 
         <h1>R6 Tactical Intelligence Report</h1>
 
-        <h2>Match Overview</h2>
-        <p><b>Date:</b> {match.datetime}</p>
-        <p><b>Opponent:</b> {match.opponent_name}</p>
-        <p><b>Map:</b> {match.map}</p>
-        <p><b>Result:</b> {match.result}</p>
+        <div class="card">
+            <h2>Match Overview</h2>
+            <p><b>Date:</b> {match.datetime}</p>
+            <p><b>Opponent:</b> {match.opponent_name}</p>
+            <p><b>Map:</b> {match.map}</p>
+            <p><b>Result:</b> {match.result}</p>
+        </div>
 
-        <h2>Team Metrics</h2>
-        <ul>
-            <li>Win Rate: {derived['win_rate']:.2%}</li>
-            <li>Attack Win Rate: {derived['attack_win_rate']:.2%}</li>
-            <li>Defense Win Rate: {derived['defense_win_rate']:.2%}</li>
-            <li>Engagement Win Rate: {derived['avg_engagement_win_rate']:.2%}</li>
-            <li>Drone Efficiency: {derived['drone_efficiency']:.2%}</li>
-            <li>Reinforcement Usage Rate: {derived['reinforcement_usage_rate']:.2%}</li>
-            <li>Opening Kill Conversion: {derived['opening_kill_impact']:.2%}</li>
-            <li>Man Advantage Conversion: {derived['man_advantage_conversion']:.2%}</li>
-            <li>Clutch Rate: {derived['clutch_rate']:.2%}</li>
-        </ul>
+        <div class="card">
+            <h2>Team Metrics</h2>
+            <ul>
+                <li>Win Rate: {pct(team['win_rate'])}</li>
+                <li>Attack Win Rate: {pct(team['attack_win_rate'])}</li>
+                <li>Defense Win Rate: {pct(team['defense_win_rate'])}</li>
+                <li>Engagement Win Rate: {pct(team['engagement_win_rate'])}</li>
+                <li>Drone Efficiency: {pct(team['drone_efficiency'])}</li>
+                <li>Reinforcement Usage: {pct(team['reinforcement_usage_rate'])}</li>
+                <li>Man Advantage Conversion: {pct(team['man_advantage_conversion'])}</li>
+                <li>Clutch Rate: {pct(team['clutch_rate'])}</li>
+            </ul>
+        </div>
 
-        <h2>Player Performance</h2>
-        <table>
-            <tr>
-                <th>Player</th>
-                <th>KD</th>
-                <th>Engagement %</th>
-                <th>Plant %</th>
-                <th>Consistency (σ)</th>
-                <th>Tactical Score</th>
-            </tr>
+        <div class="card">
+            <h2>Team Insights</h2>
+            <ul>
+                <li><b>Strong Side:</b> {insights.get("strong_side")}</li>
+                <li><b>Gunfights:</b> {insights.get("gunfight_performance")}</li>
+                <li><b>Drone Usage:</b> {insights.get("drone_usage")}</li>
+                <li><b>Setup Quality:</b> {insights.get("setup_quality")}</li>
+                <li><b>Closing Power:</b> {insights.get("closing_power")}</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>Player Performance</h2>
+            <table>
+                <tr>
+                    <th>Player</th>
+                    <th>Role</th>
+                    <th>KD</th>
+                    <th>Eng%</th>
+                    <th>Survival%</th>
+                    <th>Utility%</th>
+                    <th>Plant%</th>
+                    <th>Consistency</th>
+                    <th>Score</th>
+                </tr>
         """
 
-        for pid, data in summary.items():
+        for pid, data in players.items():
             html += f"""
             <tr>
                 <td>{data['player'].name}</td>
-                <td>{data['kd_ratio']:.2f}</td>
-                <td>{data['engagement_win_rate']:.2%}</td>
-                <td>{data['plant_success_rate']:.2%}</td>
-                <td>{consistency.get(pid, 0):.2f}</td>
-                <td>{tactical_scores.get(pid, 0):.2f}</td>
+                <td>{roles.get(pid, "Unknown")}</td>
+                <td>{num(data['kd_ratio'])}</td>
+                <td style="color:{color_scale(data['engagement_win_rate'])}">
+                    {pct(data['engagement_win_rate'])}
+                </td>
+                <td>{pct(data['survival_rate'])}</td>
+                <td>{pct(data['utility_efficiency'])}</td>
+                <td>{pct(data['plant_success_rate'])}</td>
+                <td>{num(consistency.get(pid, 0))}</td>
+                <td><b>{num(scores.get(pid, 0))}</b></td>
             </tr>
             """
 
         html += """
-        </table>
+            </table>
+        </div>
 
         </body>
         </html>
@@ -128,12 +182,10 @@ class ReportGenerator:
     # ============================================================
 
     def _save_report(self, match_id: int, html: str) -> Path:
-
         reports_dir = Path("data/reports")
         reports_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"match_{match_id}_report.html"
-        path = reports_dir / filename
+        path = reports_dir / f"match_{match_id}_report.html"
 
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)

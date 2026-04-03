@@ -1,295 +1,225 @@
 from typing import Dict, List
-from models.match import Match
-from models.round import Round
-from models.player import Player
-from models.player_round_stats import PlayerRoundStats
 import statistics
+
+from models.match import Match
 
 
 class MetricsEngine:
-    """
-    Core analytics brain of the R6 Tactical Intelligence Engine.
-
-    Consumes validated domain models and produces tactical intelligence.
-    """
-
     def __init__(self, match: Match):
         self.match = match
+
+    # ============================================================
+    # INTERNAL HELPERS (SCALABILITY CORE)
+    # ============================================================
+
+    @staticmethod
+    def _safe_div(numerator: float, denominator: float) -> float:
+        return numerator / denominator if denominator > 0 else 0.0
+
+    def _all_player_stats(self):
+        for r in self.match.rounds:
+            for p in r.player_stats:
+                yield r, p
 
     # ============================================================
     # MATCH LEVEL METRICS
     # ============================================================
 
     def win_rate(self) -> float:
-        if not self.match.rounds:
-            return 0.0
-
+        total = len(self.match.rounds)
         wins = sum(1 for r in self.match.rounds if r.outcome == "win")
-        return wins / len(self.match.rounds)
+        return self._safe_div(wins, total)
 
     def attack_win_rate(self) -> float:
-        attack_rounds = [r for r in self.match.rounds if r.side == "attack"]
-        if not attack_rounds:
-            return 0.0
-
-        wins = sum(1 for r in attack_rounds if r.outcome == "win")
-        return wins / len(attack_rounds)
+        rounds = [r for r in self.match.rounds if r.side == "attack"]
+        wins = sum(1 for r in rounds if r.outcome == "win")
+        return self._safe_div(wins, len(rounds))
 
     def defense_win_rate(self) -> float:
-        defense_rounds = [r for r in self.match.rounds if r.side == "defense"]
-        if not defense_rounds:
-            return 0.0
-
-        wins = sum(1 for r in defense_rounds if r.outcome == "win")
-        return wins / len(defense_rounds)
+        rounds = [r for r in self.match.rounds if r.side == "defense"]
+        wins = sum(1 for r in rounds if r.outcome == "win")
+        return self._safe_div(wins, len(rounds))
 
     def average_team_engagement_win_rate(self) -> float:
-        if not self.match.rounds:
-            return 0.0
-
         rates = [r.team_engagement_win_rate() for r in self.match.rounds]
-        return sum(rates) / len(rates)
+        return self._safe_div(sum(rates), len(rates))
 
     # ============================================================
-    # PLAYER LEVEL METRICS
+    # PLAYER AGGREGATION
     # ============================================================
 
     def player_summary(self) -> Dict[int, dict]:
-        """
-        Returns aggregated per-player performance across the match.
-        Keyed by player_id.
-        """
-
         summary: Dict[int, dict] = {}
 
-        for round_obj in self.match.rounds:
-            for stats in round_obj.player_stats:
-                pid = stats.player_id
+        for round_obj, stats in self._all_player_stats():
+            pid = stats.player_id
 
-                if pid not in summary:
-                    summary[pid] = {
-                        "player": stats.player,
-                        "kills": 0,
-                        "deaths": 0,
-                        "assists": 0,
-                        "engagements_taken": 0,
-                        "engagements_won": 0,
-                        "plants_attempted": 0,
-                        "plants_successful": 0,
-                        "rounds_played": 0,
-                    }
+            if pid not in summary:
+                summary[pid] = {
+                    "player": stats.player,
+                    "kills": 0,
+                    "deaths": 0,
+                    "assists": 0,
+                    "engagements_taken": 0,
+                    "engagements_won": 0,
+                    "plants_attempted": 0,
+                    "plants_successful": 0,
+                    "rounds_played": 0,
 
-                summary[pid]["kills"] += stats.kills
-                summary[pid]["deaths"] += stats.deaths
-                summary[pid]["assists"] += stats.assists
-                summary[pid]["engagements_taken"] += stats.engagements_taken
-                summary[pid]["engagements_won"] += stats.engagements_won
-                summary[pid]["plants_attempted"] += int(stats.plant_attempted)
-                summary[pid]["plants_successful"] += int(stats.plant_successful)
-                summary[pid]["rounds_played"] += 1
+                    # NEW TRACKING
+                    "rounds_survived": 0,
+                    "ability_used": 0,
+                    "ability_total": 0,
+                    "gadget_used": 0,
+                    "gadget_total": 0,
+                }
 
-        # Post-process derived metrics
-        for pid, data in summary.items():
-            deaths = data["deaths"]
-            data["kd_ratio"] = (
-                data["kills"] / deaths if deaths > 0 else float(data["kills"])
+            data = summary[pid]
+
+            data["kills"] += stats.kills
+            data["deaths"] += stats.deaths
+            data["assists"] += stats.assists
+            data["engagements_taken"] += stats.engagements_taken
+            data["engagements_won"] += stats.engagements_won
+            data["plants_attempted"] += int(stats.plant_attempted)
+            data["plants_successful"] += int(stats.plant_successful)
+            data["rounds_played"] += 1
+
+            # NEW
+            if stats.deaths == 0:
+                data["rounds_survived"] += 1
+
+            data["ability_used"] += stats.ability_used
+            data["ability_total"] += stats.ability_start
+
+            data["gadget_used"] += stats.secondary_used
+            data["gadget_total"] += stats.secondary_start
+
+        # ========================================================
+        # DERIVED PLAYER METRICS
+        # ========================================================
+
+        for data in summary.values():
+            data["kd_ratio"] = self._safe_div(data["kills"], data["deaths"])
+            data["engagement_win_rate"] = self._safe_div(
+                data["engagements_won"], data["engagements_taken"]
+            )
+            data["plant_success_rate"] = self._safe_div(
+                data["plants_successful"], data["plants_attempted"]
             )
 
-            taken = data["engagements_taken"]
-            data["engagement_win_rate"] = (
-                data["engagements_won"] / taken if taken > 0 else 0.0
+            # NEW
+            data["survival_rate"] = self._safe_div(
+                data["rounds_survived"], data["rounds_played"]
             )
 
-            data["plant_success_rate"] = (
-                data["plants_successful"] / data["plants_attempted"]
-                if data["plants_attempted"] > 0
-                else 0.0
+            data["ability_efficiency"] = self._safe_div(
+                data["ability_used"], data["ability_total"]
+            )
+
+            data["gadget_efficiency"] = self._safe_div(
+                data["gadget_used"], data["gadget_total"]
+            )
+
+            data["utility_efficiency"] = (
+                data["ability_efficiency"] * 0.6 +
+                data["gadget_efficiency"] * 0.4
             )
 
         return summary
 
     # ============================================================
-    # OPERATOR PERFORMANCE
-    # ============================================================
-
-    def operator_performance(self) -> Dict[str, dict]:
-        """
-        Aggregates performance by operator name.
-        """
-
-        operator_stats: Dict[str, dict] = {}
-
-        for round_obj in self.match.rounds:
-            for stats in round_obj.player_stats:
-                name = stats.operator.name
-
-                if name not in operator_stats:
-                    operator_stats[name] = {
-                        "kills": 0,
-                        "deaths": 0,
-                        "rounds_played": 0,
-                    }
-
-                operator_stats[name]["kills"] += stats.kills
-                operator_stats[name]["deaths"] += stats.deaths
-                operator_stats[name]["rounds_played"] += 1
-
-        for name, data in operator_stats.items():
-            deaths = data["deaths"]
-            data["kd_ratio"] = (
-                data["kills"] / deaths if deaths > 0 else float(data["kills"])
-            )
-
-        return operator_stats
-
-    # ============================================================
-    # TEAM RESOURCE EFFICIENCY
+    # TEAM RESOURCE METRICS
     # ============================================================
 
     def drone_efficiency(self) -> float:
-        """
-        Measures how efficiently drones are preserved on attack.
-        """
-
-        attack_rounds = [r for r in self.match.rounds if r.side == "attack"]
-        if not attack_rounds:
-            return 0.0
-
-        total_start = sum(r.resources.team_drones_start for r in attack_rounds)
-        total_lost = sum(r.resources.team_drones_lost for r in attack_rounds)
-
-        if total_start == 0:
-            return 0.0
-
-        return 1 - (total_lost / total_start)
+        rounds = [r for r in self.match.rounds if r.side == "attack"]
+        total_start = sum(r.resources.team_drones_start for r in rounds)
+        total_lost = sum(r.resources.team_drones_lost for r in rounds)
+        return 1 - self._safe_div(total_lost, total_start)
 
     def reinforcement_usage_rate(self) -> float:
-        defense_rounds = [r for r in self.match.rounds if r.side == "defense"]
-        if not defense_rounds:
-            return 0.0
+        rounds = [r for r in self.match.rounds if r.side == "defense"]
+        total_start = sum(r.resources.team_reinforcements_start for r in rounds)
+        total_used = sum(r.resources.team_reinforcements_used for r in rounds)
+        return self._safe_div(total_used, total_start)
 
-        total_start = sum(r.resources.team_reinforcements_start for r in defense_rounds)
-        total_used = sum(r.resources.team_reinforcements_used for r in defense_rounds)
+    # ============================================================
+    # ADVANTAGE / CONVERSION
+    # ============================================================
 
-        if total_start == 0:
-            return 0.0
-
-        return total_used / total_start
-    
-    def opening_kill_impact(self) -> float:
-        """
-        Measures how often winning the first engagement leads to winning the round.
-        """
-
-        total_with_opening = 0
-        converted = 0
-
-        for round_obj in self.match.rounds:
-            if not round_obj.player_stats:
-                continue
-
-            # Determine if team got first kill
-            team_kills = sum(p.kills for p in round_obj.player_stats)
-            team_deaths = sum(p.deaths for p in round_obj.player_stats)
-
-            if team_kills == 0 and team_deaths == 0:
-                continue
-
-            # Simplified assumption:
-            # If total kills > total deaths → assume opening advantage
-            if team_kills > team_deaths:
-                total_with_opening += 1
-                if round_obj.outcome == "win":
-                    converted += 1
-
-        if total_with_opening == 0:
-            return 0.0
-
-        return converted / total_with_opening
-    
     def man_advantage_conversion(self) -> float:
-        """
-        Measures how often rounds with more kills than deaths result in wins.
-        """
-
-        advantage_rounds = 0
+        advantage = 0
         wins = 0
 
-        for round_obj in self.match.rounds:
-            total_kills = sum(p.kills for p in round_obj.player_stats)
-            total_deaths = sum(p.deaths for p in round_obj.player_stats)
+        for r in self.match.rounds:
+            kills = sum(p.kills for p in r.player_stats)
+            deaths = sum(p.deaths for p in r.player_stats)
 
-            if total_kills > total_deaths:
-                advantage_rounds += 1
-                if round_obj.outcome == "win":
+            if kills > deaths:
+                advantage += 1
+                if r.outcome == "win":
                     wins += 1
 
-        if advantage_rounds == 0:
-            return 0.0
+        return self._safe_div(wins, advantage)
 
-        return wins / advantage_rounds
-
+    # ============================================================
+    # TRUE CLUTCH LOGIC (BEST POSSIBLE WITHOUT TIMELINE)
+    # ============================================================
 
     def clutch_rate(self) -> float:
         """
-        Measures how often a player wins a round
-        where they had >=2 kills and team won.
+        Heuristic clutch detection:
+        - Player gets >=2 kills
+        - Team total kills >=4 (indicates late-round scenario)
+        - Round is won
         """
 
-        clutch_attempts = 0
-        clutch_wins = 0
+        attempts = 0
+        wins = 0
 
-        for round_obj in self.match.rounds:
-            for stats in round_obj.player_stats:
-                if stats.kills >= 2:
-                    clutch_attempts += 1
-                    if round_obj.outcome == "win":
-                        clutch_wins += 1
+        for r in self.match.rounds:
+            team_kills = sum(p.kills for p in r.player_stats)
 
-        if clutch_attempts == 0:
-            return 0.0
+            for p in r.player_stats:
+                if p.kills >= 2 and team_kills >= 4:
+                    attempts += 1
+                    if r.outcome == "win":
+                        wins += 1
 
-        return clutch_wins / clutch_attempts
+        return self._safe_div(wins, attempts)
 
+    # ============================================================
+    # CONSISTENCY
+    # ============================================================
 
     def player_consistency_index(self) -> Dict[int, float]:
-        """
-        Lower score = more consistent.
-        Based on standard deviation of kills per round.
-        """
+        history: Dict[int, List[int]] = {}
 
-        player_kill_history: Dict[int, list[int]] = {}
+        for _, stats in self._all_player_stats():
+            history.setdefault(stats.player_id, []).append(stats.kills)
 
-        for round_obj in self.match.rounds:
-            for stats in round_obj.player_stats:
-                player_kill_history.setdefault(stats.player_id, []).append(stats.kills)
+        return {
+            pid: (statistics.stdev(kills) if len(kills) > 1 else 0.0)
+            for pid, kills in history.items()
+        }
 
-        consistency_scores: Dict[int, float] = {}
-
-        for pid, kills in player_kill_history.items():
-            if len(kills) < 2:
-                consistency_scores[pid] = 0.0
-            else:
-                consistency_scores[pid] = statistics.stdev(kills)
-
-        return consistency_scores
-
+    # ============================================================
+    # COMPOSITE SCORE (UPDATED)
+    # ============================================================
 
     def tactical_performance_score(self) -> Dict[int, float]:
-        """
-        Composite weighted rating per player.
-        """
-
         summary = self.player_summary()
         scores: Dict[int, float] = {}
 
-        for pid, data in summary.items():
-
+        for pid, d in summary.items():
             score = (
-                data["kd_ratio"] * 0.35 +
-                data["engagement_win_rate"] * 0.25 +
-                data["plant_success_rate"] * 0.15 +
-                (data["kills"] / max(data["rounds_played"], 1)) * 0.25
+                d["kd_ratio"] * 0.25 +
+                d["engagement_win_rate"] * 0.20 +
+                d["utility_efficiency"] * 0.20 +
+                d["survival_rate"] * 0.15 +
+                d["plant_success_rate"] * 0.10 +
+                (d["kills"] / max(d["rounds_played"], 1)) * 0.10
             )
 
             scores[pid] = round(score, 3)
