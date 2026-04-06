@@ -1,11 +1,12 @@
 import sqlite3
 from pathlib import Path
 
+from app.config import DB_PATH, SCHEMA_PATH
+
 
 class DatabaseManager:
     """
     Centralized SQLite database manager.
-
     Responsibilities:
     - Connection lifecycle
     - Schema initialization
@@ -13,10 +14,9 @@ class DatabaseManager:
     - Schema version tracking
     """
 
-    def __init__(self, db_path: str = "data/matches.db"):
-        self.db_path = Path(db_path)
-        self.schema_path = Path("database/schema.sql")
-
+    def __init__(self) -> None:
+        self.db_path: Path = DB_PATH
+        self.schema_path: Path = SCHEMA_PATH
         self._ensure_database_exists()
         self._initialize_schema()
 
@@ -39,7 +39,7 @@ class DatabaseManager:
 
     def _ensure_database_exists(self) -> None:
         """
-        Ensures data directory exists.
+        Ensures the data directory exists before SQLite tries to open the file.
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -59,16 +59,13 @@ class DatabaseManager:
     def get_schema_version(self) -> int:
         """
         Returns current schema version from metadata table.
-        If not set, defaults to 0.
+        Defaults to 0 if not yet set.
         """
         with self.get_connection() as conn:
             result = conn.execute(
                 "SELECT value FROM metadata WHERE key = 'schema_version'"
             ).fetchone()
-
-            if result:
-                return int(result["value"])
-            return 0
+            return int(result["value"]) if result else 0
 
     def set_schema_version(self, version: int) -> None:
         """
@@ -79,9 +76,8 @@ class DatabaseManager:
                 """
                 INSERT INTO metadata (key, value)
                 VALUES ('schema_version', ?)
-                ON CONFLICT(key)
-                DO UPDATE SET value = excluded.value
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
-                (str(version),)
+                (str(version),),
             )
             conn.commit()

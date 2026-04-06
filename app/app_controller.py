@@ -22,7 +22,8 @@ class AppController:
     # ============================================================
     # POST-MATCH WORKFLOW
     # ============================================================
-
+    def create_match(self, opponent_name, map_name):
+        return self.repo.create_match(opponent_name, map_name)
     def process_completed_match(self, match_id: int) -> Dict:
         match = self.repo.get_match_full(match_id)
 

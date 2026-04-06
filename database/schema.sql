@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS matches (
     datetime TEXT NOT NULL,
     opponent_name TEXT NOT NULL,
     map TEXT NOT NULL,
-    result TEXT CHECK(result IN ('win', 'loss')) NOT NULL,
+    result TEXT CHECK(result IN ('win', 'loss') OR result IS NULL),
     recording_path TEXT
 );
 
@@ -171,4 +171,12 @@ CREATE TABLE IF NOT EXISTS derived_metrics (
     metric_value REAL NOT NULL,
 
     FOREIGN KEY (match_id) REFERENCES matches(match_id) ON DELETE CASCADE
+);
+
+-- ==========================================
+-- Maps
+-- ==========================================
+CREATE TABLE IF NOT EXISTS maps (
+    map_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE
 );

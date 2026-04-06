@@ -240,10 +240,44 @@ class Repository:
                 "DELETE FROM players WHERE is_team_member = 1"
             )
             conn.commit()
-        # =====================================================
+
+    # =====================================================
+    # Maps
+    # =====================================================
+    def get_all_maps(self):
+        with self.db.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM maps ORDER BY name").fetchall()
+            return [row["name"] for row in rows]
+    def insert_map(self, map_name: str) -> int:
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO maps (name)
+                VALUES (?)
+                """,
+                (map_name,),
+            )
+            conn.commit()
+
+            if cursor.lastrowid is None:
+                raise RuntimeError("Failed to retrieve map ID after insert.")
+
+            return int(cursor.lastrowid)
+    # =====================================================
     # FULL MATCH LOADER
     # =====================================================
-
+    def create_match(self, opponent_name: str, map_name: str) -> int:
+        match = Match(
+            match_id=None,
+            datetime_played=datetime.now(),
+            opponent_name=opponent_name,
+            map=map_name,
+            result="",
+            recording_path="",
+            rounds=[]
+        )
+        return self.insert_match(match)
+    
     def get_match_full(self, match_id: int) -> Optional[Match]:
 
         with self.db.get_connection() as conn:

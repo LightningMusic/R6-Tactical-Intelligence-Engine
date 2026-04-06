@@ -1,7 +1,7 @@
 from email import header
 
 from PySide6.QtWidgets import (
-    QAbstractItemView, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+    QAbstractItemView, QInputDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QTableWidget, QTableWidgetItem, QPushButton, QSpinBox,
     QCheckBox, QMessageBox, QHeaderView, QTabWidget, QAbstractScrollArea
 )
@@ -11,6 +11,7 @@ from typing import cast
 from app.app_controller import AppController
 from database.db_manager import DatabaseManager
 from database.repositories import Repository
+from models import operator
 
 
 class MatchView(QWidget):
@@ -184,6 +185,7 @@ class MatchView(QWidget):
         self.side_selector = QComboBox()
         self.side_selector.addItems(["attack", "defense"])
         self.side_selector.currentTextChanged.connect(self.populate_tables)
+        self.side_selector.currentTextChanged.connect(self.update_objective_headers)
         round_layout.addWidget(self.side_selector)
 
         layout.addLayout(round_layout)
@@ -226,12 +228,33 @@ class MatchView(QWidget):
         # Style polish
 
         self.populate_tables()
+        self.update_objective_headers()
         self.update_resource_label()
 
     def refresh_all_loadouts(self):
         for table in (self.team_table, self.enemy_table):
             for row in range(table.rowCount()):
                 self.update_loadout(table, row)
+    def update_objective_headers(self):
+
+        def get_labels(side: str):
+            if side == "attack":
+                return "Plant Attempted", "Plant Successful"
+            else:
+                return "Defuse Attempted", "Defuse Successful"
+
+        team_side = self.side_selector.currentText()
+        enemy_side = "defense" if team_side == "attack" else "attack"
+
+        # Team table headers
+        team_attempt, team_success = get_labels(team_side)
+        self.team_table.setHorizontalHeaderItem(11, QTableWidgetItem(team_attempt))
+        self.team_table.setHorizontalHeaderItem(12, QTableWidgetItem(team_success))
+
+        # Enemy table headers
+        enemy_attempt, enemy_success = get_labels(enemy_side)
+        self.enemy_table.setHorizontalHeaderItem(11, QTableWidgetItem(enemy_attempt))
+        self.enemy_table.setHorizontalHeaderItem(12, QTableWidgetItem(enemy_success))
     # ============================================================
     # MATCH
     # ============================================================
@@ -240,26 +263,57 @@ class MatchView(QWidget):
         matches = self.repo.get_all_matches()
         self.match_selector.clear()
 
+        # 🔥 Always first option
+        self.match_selector.addItem("➕ Create New Match", "NEW")
+
         for m in matches:
             self.match_selector.addItem(
-                f"{m.match_id}: {m.opponent_name} ({m.map})",  # FIXED map_name → map
+                f"{m.match_id}: {m.opponent_name} ({m.map})",
                 m.match_id
             )
 
-        if matches:
-            self.match_selector.setCurrentIndex(0)  # 🔥 THIS IS CRITICAL
-            self.on_match_selected(0)               # 🔥 FORCE LOAD
-
     def on_match_selected(self, index):
-        self.current_match_id = self.match_selector.currentData()
+        data = self.match_selector.currentData()
+
+        # 🔥 NEW MATCH FLOW
+        if data == "NEW":
+            opponent, ok1 = QInputDialog.getText(self, "New Match", "Opponent Name:")
+            if not ok1 or not opponent:
+                return
+
+            maps = self.repo.get_all_maps()
+
+            map_name, ok2 = QInputDialog.getItem(
+                self,
+                "New Match",
+                "Select Map:",
+                maps,
+                0,
+                False
+            )
+
+            try:
+                match_id = self.controller.create_match(opponent, map_name)
+                self.load_matches()
+
+                # Select the newly created match
+                for i in range(self.match_selector.count()):
+                    if self.match_selector.itemData(i) == match_id:
+                        self.match_selector.setCurrentIndex(i)
+                        break
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
+
+            return
+
+        # NORMAL FLOW
+        self.current_match_id = data
 
         if self.current_match_id is None:
             return
 
-        # Reset round number (optional but clean UX)
         self.round_number_spin.setValue(1)
-
-        # Refresh UI
         self.populate_tables()
         self.update_resource_label()
 
@@ -397,13 +451,32 @@ class MatchView(QWidget):
         if operator_id is not None:
             operator = self.repo.get_operator_by_id(operator_id)
 
-            if operator and ability_label and ability_dropdown:
+            # -------------------------
+            # ABILITY HANDLING
+            # -------------------------
+            if operator and ability_label:
+
                 ability_label.setText(operator.ability_name)
-                ability_dropdown.blockSignals(True)
-                for i in range(operator.ability_max_count + 1):
-                    ability_dropdown.addItem(str(i), i)
-                ability_dropdown.setCurrentIndex(0)
-                ability_dropdown.blockSignals(False)
+
+                # Remove existing widget first
+                if ability_dropdown:
+                    ability_dropdown.deleteLater()
+
+                # CASE 1: Checkbox (binary abilities or toggles)
+                if operator.ability_max_count <= 1:
+                    ability_checkbox = QCheckBox()
+                    table.setCellWidget(row, 8, ability_checkbox)
+
+                # CASE 2: Numeric dropdown
+                else:
+                    ability_dropdown = QComboBox()
+                    table.setCellWidget(row, 8, ability_dropdown)
+
+                    ability_dropdown.blockSignals(True)
+                    for i in range(operator.ability_max_count + 1):
+                        ability_dropdown.addItem(str(i), i)
+                    ability_dropdown.setCurrentIndex(0)
+                    ability_dropdown.blockSignals(False)
 
             gadget_map = {}
             gadgets = self.repo.get_gadgets_for_operator(operator_id)
@@ -532,7 +605,6 @@ class MatchView(QWidget):
 
             table = self.team_table
 
-            # 🔥 CAST EVERYTHING PROPERLY
             op_box = cast(QComboBox, table.cellWidget(row, 1))
 
             kills = cast(QSpinBox, table.cellWidget(row, 2))
@@ -542,13 +614,23 @@ class MatchView(QWidget):
             eng_taken = cast(QSpinBox, table.cellWidget(row, 5))
             eng_won = cast(QSpinBox, table.cellWidget(row, 6))
 
-            ability_dropdown = cast(QComboBox, table.cellWidget(row, 8))
+            ability_widget = table.cellWidget(row, 8)  # ✅ defined here
 
             sec_box = cast(QComboBox, table.cellWidget(row, 9))
             sec_used = cast(QComboBox, table.cellWidget(row, 10))
 
             plant_attempt = cast(QCheckBox, table.cellWidget(row, 11))
             plant_success = cast(QCheckBox, table.cellWidget(row, 12))
+
+            # ----------------------------
+            # Ability Used (FIXED PROPERLY)
+            # ----------------------------
+            if isinstance(ability_widget, QCheckBox):
+                ability_used = 1 if ability_widget.isChecked() else 0
+            elif isinstance(ability_widget, QComboBox):
+                ability_used = ability_widget.currentData()
+            else:
+                ability_used = 0
 
             stats = {
                 "player_id": player.player_id,
@@ -561,7 +643,7 @@ class MatchView(QWidget):
                 "engagements_taken": eng_taken.value(),
                 "engagements_won": eng_won.value(),
 
-                "ability_used": ability_dropdown.currentData() if ability_dropdown else 0,
+                "ability_used": ability_used,
 
                 "secondary_gadget_id": sec_box.currentData(),
                 "secondary_used": sec_used.currentData() if sec_used else 0,

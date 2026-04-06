@@ -11,6 +11,7 @@ from models.round import Round
 
 @dataclass
 class Match:
+    match_id: Optional[int]
     """
     Represents a full match.
 
