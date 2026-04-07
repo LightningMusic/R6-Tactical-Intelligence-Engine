@@ -1,17 +1,12 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import List
 
-from models.round import Round
 from models.round import Round
 
 
 @dataclass
 class Match:
-    match_id: Optional[int]
     """
     Represents a full match.
 
@@ -19,15 +14,13 @@ class Match:
     - Match metadata
     - All rounds
     - Derived score logic
-
-    Enforces FOUNDATION V2.1 integrity rules.
     """
 
     match_id: Optional[int]
     datetime_played: datetime
     opponent_name: str
     map: str
-    result: str  # "win" or "loss"
+    result: Optional[str]        # None until match is completed; "win" or "loss" after
     recording_path: Optional[str]
 
     rounds: List[Round] = field(default_factory=list)
@@ -39,34 +32,28 @@ class Match:
     def validate(self) -> None:
         """
         Validates match integrity.
+        Only validates result/rounds if the match is completed.
         Raises ValueError on invalid state.
         """
+        if self.result is not None and self.result not in ("win", "loss"):
+            raise ValueError("Match result must be 'win', 'loss', or None.")
 
-        if self.result not in ("win", "loss"):
-            raise ValueError("Match result must be 'win' or 'loss'.")
+        if self.result is not None:
+            # Only enforce round rules on completed matches
+            if len(self.rounds) == 0:
+                raise ValueError("Completed match must contain at least one round.")
 
-        if len(self.rounds) == 0:
-            raise ValueError("Match must contain at least one round.")
+            for r in self.rounds:
+                r.validate()
 
-        # Validate each round
-        for r in self.rounds:
-            r.validate()
-
-        # Validate round sequencing
-        self._validate_round_sequence()
-
-        # Validate score consistency
-        self._validate_score_consistency()
+            self._validate_round_sequence()
+            self._validate_score_consistency()
 
     # ----------------------------------
     # Internal Consistency Rules
     # ----------------------------------
 
     def _validate_round_sequence(self) -> None:
-        """
-        Ensures round numbers are sequential starting at 1.
-        """
-
         expected = 1
         for r in sorted(self.rounds, key=lambda x: x.round_number):
             if r.round_number != expected:
@@ -74,10 +61,6 @@ class Match:
             expected += 1
 
     def _validate_score_consistency(self) -> None:
-        """
-        Ensures match result aligns with round outcomes.
-        """
-
         wins = sum(1 for r in self.rounds if r.outcome == "win")
         losses = sum(1 for r in self.rounds if r.outcome == "loss")
 
@@ -93,6 +76,9 @@ class Match:
     # Derived Helpers
     # ----------------------------------
 
+    def is_complete(self) -> bool:
+        return self.result in ("win", "loss")
+
     def total_rounds(self) -> int:
         return len(self.rounds)
 
@@ -107,17 +93,14 @@ class Match:
 
     def overall_engagement_win_rate(self) -> float:
         total_taken = sum(
-            r.team_engagement_win_rate() * 
+            r.team_engagement_win_rate() *
             sum(p.engagements_taken for p in r.player_stats)
             for r in self.rounds
         )
-
         total_engagements = sum(
             sum(p.engagements_taken for p in r.player_stats)
             for r in self.rounds
         )
-
         if total_engagements == 0:
             return 0.0
-
         return total_taken / total_engagements

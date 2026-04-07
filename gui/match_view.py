@@ -259,60 +259,78 @@ class MatchView(QWidget):
     # MATCH
     # ============================================================
 
-    def load_matches(self):
-        matches = self.repo.get_all_matches()
+    def load_matches(self, select_match_id: int | None = None):
+        """Repopulate the match selector. Optionally auto-select a match by ID."""
+        self.match_selector.blockSignals(True)
         self.match_selector.clear()
-
-        # 🔥 Always first option
         self.match_selector.addItem("➕ Create New Match", "NEW")
+        self.match_selector.addItem("— Select a match —", None)
+
+        matches = self.repo.get_all_matches()
+        target_index = 1  # default to placeholder
 
         for m in matches:
+            idx = self.match_selector.count()
             self.match_selector.addItem(
                 f"{m.match_id}: {m.opponent_name} ({m.map})",
                 m.match_id
             )
+            if select_match_id is not None and m.match_id == select_match_id:
+                target_index = idx
+
+        self.match_selector.blockSignals(False)
+        self.match_selector.setCurrentIndex(target_index)
+
+        # Manually trigger selection for the pre-selected match
+        if select_match_id is not None:
+            self.current_match_id = select_match_id
+            self.populate_tables()
+            self.update_resource_label()
 
     def on_match_selected(self, index):
         data = self.match_selector.currentData()
 
-        # 🔥 NEW MATCH FLOW
+        # ── Create New Match ─────────────────────────────────────
         if data == "NEW":
             opponent, ok1 = QInputDialog.getText(self, "New Match", "Opponent Name:")
-            if not ok1 or not opponent:
+            if not ok1 or not opponent.strip():
+                # User cancelled — snap back to placeholder without triggering again
+                self.match_selector.blockSignals(True)
+                self.match_selector.setCurrentIndex(1)
+                self.match_selector.blockSignals(False)
                 return
 
             maps = self.repo.get_all_maps()
+            if not maps:
+                QMessageBox.critical(self, "Error", "No maps in database. Run the seeder first.")
+                self.match_selector.blockSignals(True)
+                self.match_selector.setCurrentIndex(1)
+                self.match_selector.blockSignals(False)
+                return
 
             map_name, ok2 = QInputDialog.getItem(
-                self,
-                "New Match",
-                "Select Map:",
-                maps,
-                0,
-                False
+                self, "New Match", "Select Map:", maps, 0, False
             )
+            if not ok2:
+                self.match_selector.blockSignals(True)
+                self.match_selector.setCurrentIndex(1)
+                self.match_selector.blockSignals(False)
+                return
 
             try:
-                match_id = self.controller.create_match(opponent, map_name)
-                self.load_matches()
-
-                # Select the newly created match
-                for i in range(self.match_selector.count()):
-                    if self.match_selector.itemData(i) == match_id:
-                        self.match_selector.setCurrentIndex(i)
-                        break
-
+                match_id = self.controller.create_match(opponent.strip(), map_name)
+                self.load_matches(select_match_id=match_id)  # reload AND auto-select
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
-
             return
 
-        # NORMAL FLOW
+        # ── Placeholder ──────────────────────────────────────────
+        if data is None:
+            self.current_match_id = None
+            return
+
+        # ── Normal match selected ────────────────────────────────
         self.current_match_id = data
-
-        if self.current_match_id is None:
-            return
-
         self.round_number_spin.setValue(1)
         self.populate_tables()
         self.update_resource_label()

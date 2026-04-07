@@ -18,13 +18,13 @@ class Round:
     """
 
     round_id: Optional[int]
-    match_id: int
+    match_id: Optional[int]
     round_number: int
     side: str  # "attack" or "defense"
     site: str
     outcome: str  # "win" or "loss"
 
-    resources: RoundResources
+    resources: Optional[RoundResources]
     player_stats: List[PlayerRoundStats] = field(default_factory=list)
 
     # ----------------------------------
@@ -32,18 +32,16 @@ class Round:
     # ----------------------------------
 
     def validate(self) -> None:
-        """
-        Validates full round integrity.
-        Raises ValueError on invalid state.
-        """
-
         if self.side not in ("attack", "defense"):
             raise ValueError("Round side must be 'attack' or 'defense'.")
 
         if self.outcome not in ("win", "loss"):
             raise ValueError("Outcome must be 'win' or 'loss'.")
 
-        # Validate resources
+        # ✅ SAFE GUARD
+        if self.resources is None:
+            raise ValueError("Round resources must be set before validation.")
+
         if self.resources.side != self.side:
             raise ValueError("Resource side must match round side.")
 
@@ -56,7 +54,6 @@ class Round:
         for stats in self.player_stats:
             stats.validate()
 
-        # Optional consistency checks
         self._validate_kill_consistency()
 
     # ----------------------------------

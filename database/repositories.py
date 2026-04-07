@@ -272,7 +272,7 @@ class Repository:
             datetime_played=datetime.now(),
             opponent_name=opponent_name,
             map=map_name,
-            result="",
+            result=None,
             recording_path="",
             rounds=[]
         )

@@ -34,6 +34,9 @@ R6_DISSECT_PATH     = INTEGRATION_DIR / "bin" / "r6-dissect.exe"
 # ── Exports ───────────────────────────────────────────────────
 EXPORTS_DIR     = BASE_DIR / "exports"
 
+# ── Replay Detection Config ───────────────────────────────────────
+R6_REPLAY_FOLDER = "C:/Program Files (x86)/Steam/steamapps/common/Tom Clancy's Rainbow Six Siege/MatchReplay"
+
 
 def ensure_data_dirs() -> None:
     """

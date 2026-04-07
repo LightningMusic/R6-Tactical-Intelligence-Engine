@@ -392,7 +392,32 @@ OPERATOR_GADGET_OPTIONS = [
 
 
 ]
-
+MAPS = [
+    "Bank",
+    "Border",
+    "Chalet",
+    "Clubhouse",
+    "Coastline",
+    "Consulate",
+    "Emerald Plains",
+    "Favela",
+    "Fortress",
+    "Hereford Base",
+    "House",
+    "Kafe Dostoyevsky",
+    "Kanal",
+    "Lair",
+    "Nighthaven Labs",
+    "Oregon",
+    "Outback",
+    "Plane",
+    "Skyscraper",
+    "Stadium Bravo",
+    "Theme Park",
+    "Tower",
+    "Villa",
+    "Yacht",
+]
 # --------------------------------------
 # Seeder Function
 # --------------------------------------
@@ -497,6 +522,15 @@ def seed_database(db: DatabaseManager):
                 VALUES (?, 1)
                 """,
                 (name,)
+            )
+        for map_name in MAPS:
+            conn.execute(
+                """
+                INSERT INTO maps (name, is_active_pool)
+                VALUES (?, 1)
+                ON CONFLICT(name) DO NOTHING
+                """,
+                (map_name,)
             )
         conn.commit()
 
