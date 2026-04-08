@@ -433,7 +433,7 @@ class MatchView(QWidget):
         op_widget = cast(QComboBox, table.cellWidget(row, 1))
         sec_widget = cast(QComboBox, table.cellWidget(row, 9))
         ability_label = cast(QLabel, table.cellWidget(row, 7))
-        ability_dropdown = cast(QComboBox, table.cellWidget(row, 8))
+        ability_widget = table.cellWidget(row, 8)
         sec_used_dropdown = cast(QComboBox, table.cellWidget(row, 10))
 
         if not op_widget or not sec_widget:
@@ -454,11 +454,14 @@ class MatchView(QWidget):
         sec_widget.clear()
         sec_widget.addItem("None", None)
 
-        if ability_label and ability_dropdown:
+        ability_widget = table.cellWidget(row, 8)
+
+        if ability_label:
             ability_label.setText("Ability")
-            ability_dropdown.blockSignals(True)
-            ability_dropdown.clear()
-            ability_dropdown.blockSignals(False)
+
+        if ability_widget:
+            ability_widget.deleteLater()
+            table.setCellWidget(row, 8, None)
 
         if sec_used_dropdown:
             sec_used_dropdown.blockSignals(True)
@@ -477,8 +480,8 @@ class MatchView(QWidget):
                 ability_label.setText(operator.ability_name)
 
                 # Remove existing widget first
-                if ability_dropdown:
-                    ability_dropdown.deleteLater()
+                if ability_widget:
+                    ability_widget.deleteLater()
 
                 # CASE 1: Checkbox (binary abilities or toggles)
                 if operator.ability_max_count <= 1:
@@ -505,14 +508,37 @@ class MatchView(QWidget):
             def update_secondary_uses():
                 if not sec_used_dropdown:
                     return
-                sec_used_dropdown.blockSignals(True)
-                sec_used_dropdown.clear()
+
                 selected_id = sec_widget.currentData()
                 max_count = gadget_map.get(selected_id, 0)
-                for i in range(max_count + 1):
-                    sec_used_dropdown.addItem(str(i), i)
-                sec_used_dropdown.setCurrentIndex(0)
-                sec_used_dropdown.blockSignals(False)
+
+                operator_name = operator.name if operator else ""
+
+                # Remove existing widget first
+                existing_widget = table.cellWidget(row, 10)
+                if existing_widget:
+                    existing_widget.deleteLater()
+
+                # --------------------------------------
+                # CASE 1: Checkbox (max = 1)
+                # EXCEPT: Solid Snake
+                # --------------------------------------
+                if max_count == 1 and operator_name != "Solid Snake":
+                    checkbox = QCheckBox()
+                    table.setCellWidget(row, 10, checkbox)
+
+                # --------------------------------------
+                # CASE 2: Dropdown (normal behavior)
+                # --------------------------------------
+                else:
+                    dropdown = QComboBox()
+                    table.setCellWidget(row, 10, dropdown)
+
+                    dropdown.blockSignals(True)
+                    for i in range(max_count + 1):
+                        dropdown.addItem(str(i), i)
+                    dropdown.setCurrentIndex(0)
+                    dropdown.blockSignals(False)
 
             # Disconnect previous handler if one exists
             existing = self._secondary_handlers.get(id(sec_widget))
@@ -635,7 +661,14 @@ class MatchView(QWidget):
             ability_widget = table.cellWidget(row, 8)  # ✅ defined here
 
             sec_box = cast(QComboBox, table.cellWidget(row, 9))
-            sec_used = cast(QComboBox, table.cellWidget(row, 10))
+            sec_widget = table.cellWidget(row, 10)
+
+            if isinstance(sec_widget, QCheckBox):
+                secondary_used = 1 if sec_widget.isChecked() else 0
+            elif isinstance(sec_widget, QComboBox):
+                secondary_used = sec_widget.currentData()
+            else:
+                secondary_used = 0
 
             plant_attempt = cast(QCheckBox, table.cellWidget(row, 11))
             plant_success = cast(QCheckBox, table.cellWidget(row, 12))
@@ -664,7 +697,7 @@ class MatchView(QWidget):
                 "ability_used": ability_used,
 
                 "secondary_gadget_id": sec_box.currentData(),
-                "secondary_used": sec_used.currentData() if sec_used else 0,
+                "secondary_used": secondary_used,
 
                 "plant_attempted": plant_attempt.isChecked(),
                 "plant_successful": plant_success.isChecked(),

@@ -1,9 +1,11 @@
-from typing import Dict
+from datetime import datetime
+from typing import Dict, Optional
 
 from database.repositories import Repository
 from analysis.intel_engine import IntelEngine
 from analysis.report_generator import ReportGenerator
 
+from models.import_result import ImportResult
 from models.round import Round
 from models.round_resources import RoundResources
 from models.player_round_stats import PlayerRoundStats
@@ -20,10 +22,88 @@ class AppController:
         self.report_gen = ReportGenerator()
 
     # ============================================================
+    # MATCH CREATION
+    # ============================================================
+
+    def create_match(self, opponent_name: str, map_name: str) -> int:
+        return self.repo.create_match(opponent_name, map_name)
+
+    # ============================================================
+    # AUTOMATED IMPORT SAVE
+    # ============================================================
+
+    def save_imported_match(self, result: ImportResult) -> int:
+        """
+        Saves a fully parsed ImportResult to the DB.
+        Creates the match record, then saves each round.
+        Returns the new match_id.
+        """
+        if not result.is_success:
+            raise ValueError("Cannot save a non-successful ImportResult.")
+
+        # ── Resolve map name to map_id if possible ───────────────
+        map_id: Optional[int] = result.map_id
+        map_name: str = "Unknown"
+
+        if map_id is None and result.map_name:
+            map_id = self.repo.get_map_id_by_name(result.map_name)
+            map_name = result.map_name
+        elif map_id is not None:
+            resolved = self.repo.get_map_by_id(map_id)
+            map_name = resolved.name if resolved else "Unknown"
+
+        # ── Create match record ───────────────────────────────────
+        from models.match import Match
+        match = Match(
+            match_id=None,
+            datetime_played=datetime.now(),
+            opponent_name="Imported",   # r6-dissect doesn't give opponent name
+            map=map_name,
+            result=None,                # result unknown until match is complete
+            recording_path=None,
+            rounds=[],
+        )
+        match_id = self.repo.insert_match(match)
+
+        # ── Save each parsed round ────────────────────────────────
+        for round_obj in result.rounds:
+            round_obj.match_id = match_id
+
+            # Rounds from rec_importer have no resources yet — default them
+            side = round_obj.side
+            if side == "attack":
+                resources = RoundResources(
+                    resource_id=None,
+                    round_id=0,
+                    side=side,
+                    team_drones_start=10,
+                    team_drones_lost=0,
+                    team_reinforcements_start=0,
+                    team_reinforcements_used=0,
+                )
+            else:
+                resources = RoundResources(
+                    resource_id=None,
+                    round_id=0,
+                    side=side,
+                    team_drones_start=0,
+                    team_drones_lost=0,
+                    team_reinforcements_start=10,
+                    team_reinforcements_used=0,
+                )
+
+            round_id = self.repo.insert_round(round_obj, match_id)
+            self.repo.insert_round_resources(resources, round_id)
+
+            # Player stats are empty from rec_importer for now —
+            # they will be filled in manually via match_view if needed.
+
+        return match_id
+
+    # ============================================================
     # POST-MATCH WORKFLOW
     # ============================================================
-    def create_match(self, opponent_name, map_name):
-        return self.repo.create_match(opponent_name, map_name)
+
     def process_completed_match(self, match_id: int) -> Dict:
         match = self.repo.get_match_full(match_id)
 
@@ -55,18 +135,14 @@ class AppController:
         }
 
     # ============================================================
-    # ROUND SAVE (CORE PIPELINE)
+    # ROUND SAVE (MANUAL ENTRY PIPELINE)
     # ============================================================
 
-    def save_round(self, round_data: dict):
-
-        match_id = round_data["match_id"]
+    def save_round(self, round_data: dict) -> None:
+        match_id     = round_data["match_id"]
         round_number = round_data["round_number"]
-        side = round_data["side"]
+        side         = round_data["side"]
 
-        # ----------------------------
-        # Create Round Resources
-        # ----------------------------
         if side == "attack":
             resources = RoundResources(
                 resource_id=None,
@@ -88,9 +164,6 @@ class AppController:
                 team_reinforcements_used=round_data.get("team_reinforcements_used", 0),
             )
 
-        # ----------------------------
-        # Create Round
-        # ----------------------------
         round_obj = Round(
             round_id=None,
             match_id=match_id,
@@ -103,95 +176,67 @@ class AppController:
         )
 
         round_id = self.repo.insert_round(round_obj, match_id)
-
-        # Save resources AFTER round exists
         self.repo.insert_round_resources(resources, round_id)
 
-        # ----------------------------
-        # Insert Player Stats
-        # ----------------------------
         for ps in round_data["player_stats"]:
-
-            # Operator
             operator = self.repo.get_operator_by_id(ps["operator_id"])
             if operator is None:
                 raise ValueError(f"Invalid operator ID: {ps['operator_id']}")
 
-            # Player
             player = self.repo.get_player_by_id(ps["player_id"])
             if player is None or player.player_id is None:
                 raise ValueError(f"Invalid player ID: {ps['player_id']}")
 
-            player_id: int = player.player_id  # ✅ type safe
+            player_id: int = player.player_id
 
-            # ----------------------------
-            # Secondary Gadget
-            # ----------------------------
             secondary_gadget = None
-            secondary_start = 0
+            secondary_start  = 0
 
             if ps["secondary_gadget_id"]:
-                gadgets = self.repo.get_gadgets_for_operator(operator.operator_id)
-
-                for g in gadgets:
+                for g in self.repo.get_gadgets_for_operator(operator.operator_id):
                     if g.gadget_id == ps["secondary_gadget_id"]:
                         secondary_gadget = g
                         break
 
-                # Get max count
-                options = self.repo.get_gadget_options(operator.operator_id)
-                for opt in options:
+                for opt in self.repo.get_gadget_options(operator.operator_id):
                     if opt["gadget_id"] == ps["secondary_gadget_id"]:
                         secondary_start = opt["max_count"]
                         break
 
-            # ----------------------------
-            # Build Stats Object
-            # ----------------------------
             stat = PlayerRoundStats(
                 stat_id=None,
                 round_id=round_id,
                 player_id=player_id,
                 player=player,
                 operator=operator,
-
                 kills=ps["kills"],
                 deaths=ps["deaths"],
                 assists=ps["assists"],
-
                 engagements_taken=ps["engagements_taken"],
                 engagements_won=ps["engagements_won"],
-
                 ability_start=operator.ability_max_count,
                 ability_used=ps["ability_used"],
-
                 secondary_gadget=secondary_gadget,
                 secondary_start=secondary_start,
                 secondary_used=ps["secondary_used"],
-
                 plant_attempted=ps["plant_attempted"],
                 plant_successful=ps["plant_successful"],
             )
 
-            # ----------------------------
-            # Insert into DB
-            # ----------------------------
             self.repo.insert_player_round_stats(stat, round_id, player_id)
 
     # ============================================================
     # EXPORT / FETCH HELPERS
     # ============================================================
 
-    def export_match_csv(self, match_id, path):
+    def export_match_csv(self, match_id: int, path: str) -> None:
         self.repo.export_match_to_csv(match_id, path)
 
-    def get_transcript_text(self, match_id):
+    def get_transcript_text(self, match_id: int) -> Optional[str]:
         return self.repo.get_transcript_text(match_id)
 
-    def get_recording_path(self, match_id):
+    def get_recording_path(self, match_id: int) -> Optional[str]:
         match = self.repo.get_match(match_id)
-
         if match is None:
             raise ValueError(f"Match {match_id} not found")
-
         return match.recording_path

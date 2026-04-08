@@ -1,5 +1,6 @@
 from typing import List, Optional
 from datetime import datetime
+from models.map import Map
 from models.player import Player
 from database.db_manager import DatabaseManager
 from models.match import Match
@@ -263,6 +264,26 @@ class Repository:
                 raise RuntimeError("Failed to retrieve map ID after insert.")
 
             return int(cursor.lastrowid)
+    def get_map_id_by_name(self, name: str) -> Optional[int]:
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT map_id FROM maps WHERE name = ?", (name,)
+            ).fetchone()
+            return int(row["map_id"]) if row else None
+
+    def get_map_by_id(self, map_id: int) -> Optional["Map"]:
+        from models.map import Map
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM maps WHERE map_id = ?", (map_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return Map(
+                map_id=row["map_id"],
+                name=row["name"],
+                is_active_pool=bool(row["is_active_pool"]),
+            )
     # =====================================================
     # FULL MATCH LOADER
     # =====================================================
