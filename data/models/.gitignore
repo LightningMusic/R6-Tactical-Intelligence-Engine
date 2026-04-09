@@ -1,14 +1,3 @@
-# Database
-*.db
-
-# Python
-__pycache__/
-*.py[cod]
-
-# Environments
-.venv/
-env/
-
 # AI / ML models
 *.gguf
 *.bin
