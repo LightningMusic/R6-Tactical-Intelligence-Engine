@@ -73,6 +73,14 @@ def run_migrations(db: DatabaseManager) -> None:
                 WHERE map_id IS NULL
             """)
 
+            # In migrations.py, add to a new version 3 block:
+            try:
+                conn.execute(
+                    "ALTER TABLE derived_metrics ADD COLUMN metric_text TEXT"
+                )
+            except Exception:
+                pass
+
         conn.commit()
 
     db.set_schema_version(LATEST_SCHEMA_VERSION)

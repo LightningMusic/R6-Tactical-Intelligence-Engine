@@ -31,12 +31,54 @@ SCHEMA_PATH     = DATABASE_DIR / "schema.sql"
 INTEGRATION_DIR     = BASE_DIR / "integration"
 R6_DISSECT_PATH     = INTEGRATION_DIR / "bin" / "r6-dissect.exe"
 
+# ── OBS Integration ───────────────────────────────────────────
+OBS_HOST       = "localhost"
+OBS_PORT       = 4455
+OBS_PASSWORD   = "gr17aGAe8WkxZO6i"   # move to a local secrets file later
+OBS_SCENE_NAME = "R6_Intelligence"     # must match your OBS scene name exactly
+
+
 # ── Exports ───────────────────────────────────────────────────
 EXPORTS_DIR     = BASE_DIR / "exports"
 
-# ── Replay Detection Config ───────────────────────────────────────
-R6_REPLAY_FOLDER = "C:/Program Files (x86)/Steam/steamapps/common/Tom Clancy's Rainbow Six Siege/MatchReplay"
+# ── AI Model Paths ────────────────────────────────────────────
+MODEL_DIR  = DATA_DIR / "models"
+MODEL_PATH = MODEL_DIR / "model.gguf"
 
+# ── Whisper Model ─────────────────────────────────────────────
+WHISPER_MODEL_PATH = DATA_DIR / "models" / "whisper-base.pt"
+WHISPER_MODEL_SIZE = "base"
+
+# ── LLM Runtime Settings (overridable from Settings UI) ──────
+LLM_GPU_LAYERS = 0
+LLM_N_CTX      = 4096
+LLM_N_THREADS  = 6
+
+# ── Replay Detection Logic ───────────────────────────────────────────
+
+def _find_replay_folder() -> Path | None:
+    """
+    Attempts to auto-locate the R6 MatchReplay folder.
+    1. Checks the default Steam path.
+    2. Checks common Steam library locations on other drives.
+    """
+    # Default Steam path
+    default_path = Path("C:/Program Files (x86)/Steam/steamapps/common/Tom Clancy's Rainbow Six Siege/MatchReplay")
+    if default_path.exists():
+        return default_path
+
+    # Secondary Search: Look for common SteamLibrary folders on D:, E:, F:
+    # We look for the specific folder structure of R6
+    r6_suffix = "SteamLibrary/steamapps/common/Tom Clancy's Rainbow Six Siege/MatchReplay"
+    for drive in "DEFGHIJKLMNOPQRSTUVWXYZ":
+        drive_path = Path(f"{drive}:/{r6_suffix}")
+        if drive_path.exists():
+            return drive_path
+
+    return None
+
+# Auto-detected path (defaults to None if not found)
+R6_REPLAY_FOLDER = _find_replay_folder()
 
 def ensure_data_dirs() -> None:
     """

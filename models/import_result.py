@@ -25,6 +25,12 @@ class ImportResult:
     rounds: list[Round] = field(default_factory=list)
     error_message: Optional[str] = None
 
+    transcript_text:     Optional[str]  = None
+    transcript_segments: list           = field(default_factory=list)
+    
+    # In models/import_result.py — add this field:
+    recording_path: Optional[str] = None
+
     @property
     def is_success(self) -> bool:
         return self.status == ImportStatus.SUCCESS

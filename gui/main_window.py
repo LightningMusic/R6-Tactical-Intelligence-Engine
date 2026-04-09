@@ -5,6 +5,7 @@ from gui.match_view import MatchView
 from gui.recording_view import RecordingView
 from gui.analysis_view import AnalysisView
 from gui.settings_view import SettingsView
+from models.import_result import ImportResult
 
 
 class MainWindow(QMainWindow):
@@ -40,10 +41,17 @@ class MainWindow(QMainWindow):
             lambda: self.tabs.setCurrentWidget(self.match_view)
         )
 
+        self.recording_view.navigate_to_match_input_partial.connect(
+            lambda result: self._go_to_match_partial(result)
+        )
+
         layout.addWidget(self.tabs)
         central_widget.setLayout(layout)
         self.setCentralWidget(central_widget)
 
+    def _go_to_match_partial(self, result: ImportResult) -> None:
+        self.tabs.setCurrentWidget(self.match_view)
+        self.match_view.prefill_from_import(result)
     def _go_to_analysis(self, match_id: int) -> None:
         self.analysis_view.load_matches(select_match_id=match_id)
         self.tabs.setCurrentWidget(self.analysis_view)

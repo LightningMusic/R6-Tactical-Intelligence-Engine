@@ -9,15 +9,16 @@ from PySide6.QtWidgets import (
 from app.app_controller import AppController
 from app.config import R6_DISSECT_PATH
 from app.session_manager import SessionManager
+from integration.obs_controller import OBSController
 from integration.rec_importer import RecImporter
 from models.import_result import ImportResult, ImportStatus
+from app.config import R6_REPLAY_FOLDER
 
-
-# ── Background worker so the UI doesn't freeze during import ──
 
 class _ImportWorker(QObject):
-    finished = Signal(list)   # list[ImportResult]
+    finished = Signal(list)
     error    = Signal(str)
+
 
     def __init__(self, session_manager: SessionManager):
         super().__init__()
@@ -32,18 +33,18 @@ class _ImportWorker(QObject):
 
 
 class RecordingView(QWidget):
-    # Emitted after a successful import — carries the new match_id
     navigate_to_analysis    = Signal(int)
-    # Emitted on partial/critical failure — routes to manual entry
     navigate_to_match_input = Signal()
+    navigate_to_match_input_partial = Signal(object)  # carries ImportResult
 
     def __init__(self, controller: AppController, parent: QWidget | None = None):
         super().__init__(parent)
-        self.controller = controller
-        self._session_active = False
-        self._replay_folder: Path | None = None
+        self.controller  = controller
+        self.obs         = OBSController()
+        self._session_active    = False
+        self._replay_folder: Path | None     = R6_REPLAY_FOLDER
         self._session_manager: SessionManager | None = None
-        self._thread: QThread | None = None
+        self._thread: QThread | None         = None
         self._build_ui()
 
     # =====================================================
@@ -55,29 +56,45 @@ class RecordingView(QWidget):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
 
-        # Header
         header = QLabel("Recording Session")
         header.setStyleSheet("font-size: 22px; font-weight: bold;")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
 
-        # Replay folder selector
+        # OBS connection row
+        obs_layout = QHBoxLayout()
+        self._obs_status_label = QLabel("OBS: Disconnected")
+        self._obs_status_label.setStyleSheet("color: #e05555;")
+        connect_btn = QPushButton("Connect to OBS")
+        connect_btn.clicked.connect(self._connect_obs)
+        obs_layout.addWidget(self._obs_status_label, stretch=1)
+        obs_layout.addWidget(connect_btn)
+        layout.addLayout(obs_layout)
+
+        # Replay folder selector row
         folder_layout = QHBoxLayout()
-        self._folder_label = QLabel("No replay folder selected.")
-        self._folder_label.setStyleSheet("color: #aaa;")
-        folder_btn = QPushButton("Select R6 Replay Folder")
+        
+        # Update label based on whether R6_REPLAY_FOLDER was found
+        if self._replay_folder:
+            self._folder_label = QLabel(str(self._replay_folder))
+            self._folder_label.setStyleSheet("color: #55e07a;") # Green if found
+        else:
+            self._folder_label = QLabel("No replay folder found. Please select manually.")
+            self._folder_label.setStyleSheet("color: #e05555;") # Red if missing
+            self._folder_label.setToolTip("Please select the R6 replay folder manually.")
+        folder_btn = QPushButton("Change Folder")
         folder_btn.clicked.connect(self._select_folder)
         folder_layout.addWidget(self._folder_label, stretch=1)
         folder_layout.addWidget(folder_btn)
         layout.addLayout(folder_layout)
 
-        # Status indicator
+        # Status
         self._status_label = QLabel("Status: Idle")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._status_label.setStyleSheet("font-size: 14px; color: #888;")
         layout.addWidget(self._status_label)
 
-        # Start / Stop buttons
+        # Start / Stop
         btn_layout = QHBoxLayout()
         self._start_btn = QPushButton("▶  Start Session")
         self._start_btn.setMinimumHeight(44)
@@ -93,14 +110,35 @@ class RecordingView(QWidget):
         btn_layout.addWidget(self._stop_btn)
         layout.addLayout(btn_layout)
 
-        # Log output
+        # Log
         self._log = QTextEdit()
         self._log.setReadOnly(True)
-        self._log.setStyleSheet("background: #1a1a1a; color: #ccc; font-family: monospace;")
+        self._log.setStyleSheet(
+            "background: #1a1a1a; color: #ccc; font-family: monospace;"
+        )
         self._log.setMinimumHeight(200)
         layout.addWidget(self._log)
-
         layout.addStretch()
+
+        self._update_start_button
+    # =====================================================
+    # OBS CONNECTION
+    # =====================================================
+
+    def _connect_obs(self) -> None:
+        self._log_message("Connecting to OBS...")
+        if self.obs.connect():
+            self._obs_status_label.setText("OBS: Connected ✅")
+            self._obs_status_label.setStyleSheet("color: #55e07a;")
+            self._log_message("OBS connected successfully.")
+            self._update_start_button()
+        else:
+            self._obs_status_label.setText("OBS: Connection Failed ❌")
+            self._obs_status_label.setStyleSheet("color: #e05555;")
+            self._log_message(
+                "Could not connect to OBS. Check that OBS is open "
+                "and obs-websocket is enabled."
+            )
 
     # =====================================================
     # FOLDER SELECTION
@@ -108,18 +146,20 @@ class RecordingView(QWidget):
 
     def _select_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select R6 Replay Folder",
-            str(Path.home()),
+            self, "Select R6 Replay Folder", str(Path.home())
         )
         if not folder:
             return
-
         self._replay_folder = Path(folder)
         self._folder_label.setText(str(self._replay_folder))
-        self._folder_label.setStyleSheet("color: #fff;")
-        self._start_btn.setEnabled(True)
-        self._log_message(f"Replay folder set: {self._replay_folder}")
+        self._folder_label.setStyleSheet("color: #55e07a;")
+        self._log_message(f"Replay folder: {self._replay_folder}")
+        self._update_start_button()
+
+    def _update_start_button(self) -> None:
+        """Enable Start only when both OBS is connected and folder is set."""
+        ready = self.obs.is_connected and self._replay_folder is not None
+        self._start_btn.setEnabled(ready)
 
     # =====================================================
     # SESSION START
@@ -129,10 +169,20 @@ class RecordingView(QWidget):
         if not self._replay_folder:
             return
 
+        # Start OBS recording
+        if not self.obs.start_recording():
+            QMessageBox.critical(
+                self, "OBS Error",
+                "Failed to start OBS recording. Check OBS is open and the scene exists."
+            )
+            return
+
+        # Snapshot replay folder
         try:
             importer = RecImporter(dissect_path=R6_DISSECT_PATH)
         except FileNotFoundError as e:
             QMessageBox.critical(self, "Error", str(e))
+            self.obs.stop_recording()
             return
 
         self._session_manager = SessionManager(
@@ -145,7 +195,7 @@ class RecordingView(QWidget):
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._set_status("🔴 Recording in progress...", "#e05555")
-        self._log_message("Session started. Snapshot taken.")
+        self._log_message("Session started. OBS recording. Snapshot taken.")
 
     # =====================================================
     # SESSION STOP + IMPORT
@@ -156,8 +206,20 @@ class RecordingView(QWidget):
             return
 
         self._stop_btn.setEnabled(False)
-        self._set_status("⏳ Importing replays...", "#e0a830")
-        self._log_message("Session stopped. Detecting new replay folders...")
+        self._set_status("⏳ Stopping OBS and importing...", "#e0a830")
+
+        # Stop OBS — save the recording path for later use
+        recording_path = self.obs.stop_recording()
+        self._session_manager.recording_path = (
+            Path(recording_path) if recording_path else None
+        )
+        if recording_path:
+            self._log_message(f"OBS recording saved: {recording_path}")
+        else:
+            self._log_message("Warning: OBS did not return a recording path.")
+
+        self._recording_path = recording_path
+        self._log_message("Detecting new replay folders...")
 
         # Run import in background thread
         self._thread = QThread()
@@ -192,30 +254,34 @@ class RecordingView(QWidget):
             if result.error_message:
                 self._log_message(f"  ↳ {result.error_message}")
 
-        # Route based on worst result
         statuses = {r.status for r in results}
 
         if ImportStatus.CRITICAL_FAILURE in statuses:
-            self._log_message("Critical failure detected — routing to Manual Entry.")
+            self._log_message("Critical failure — routing to Manual Entry.")
             QMessageBox.warning(
                 self, "Import Failed",
-                "One or more replays could not be imported.\nYou will be routed to Manual Entry."
+                "One or more replays could not be imported.\n"
+                "You will be routed to Manual Entry."
             )
             self.navigate_to_match_input.emit()
 
         elif ImportStatus.PARTIAL_FAILURE in statuses:
-            self._log_message("Partial failure — routing to Manual Entry for review.")
+            partial_result = next(
+                r for r in results if r.status == ImportStatus.PARTIAL_FAILURE
+            )
+            self._log_message("Partial failure — routing to Manual Entry with pre-fill.")
             QMessageBox.warning(
                 self, "Partial Import",
-                "Some data could not be parsed.\nPlease review in Manual Entry."
+                "Some data could not be parsed.\nPre-filling what was recovered."
             )
-            self.navigate_to_match_input.emit()
+            self.navigate_to_match_input_partial.emit(partial_result)
 
         else:
-            # Full success — save all matches and go to analysis
             try:
                 last_match_id = self._save_results(results)
-                self._log_message(f"All matches saved. Routing to Analysis (match {last_match_id}).")
+                self._log_message(
+                    f"All matches saved. Routing to Analysis (match {last_match_id})."
+                )
                 self.navigate_to_analysis.emit(last_match_id)
             except Exception as e:
                 self._log_message(f"Save error: {e}")
@@ -235,23 +301,20 @@ class RecordingView(QWidget):
     # =====================================================
 
     def _save_results(self, results: list) -> int:
-        """
-        Saves all successful ImportResults to the DB.
-        Returns the match_id of the last saved match.
-        """
         last_match_id = -1
-
         for result in results:
             result: ImportResult
             if not result.is_success:
                 continue
-
+            # Attach the OBS recording path to the first match saved
+            if hasattr(self, "_recording_path") and self._recording_path:
+                result.recording_path = self._recording_path
+                self._recording_path = None  # only attach to first match
             match_id = self.controller.save_imported_match(result)
             last_match_id = match_id
 
         if last_match_id == -1:
             raise RuntimeError("No matches were saved successfully.")
-
         return last_match_id
 
     # =====================================================

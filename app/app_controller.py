@@ -1,4 +1,5 @@
 from datetime import datetime
+from re import Match
 from typing import Dict, Optional
 
 from database.repositories import Repository
@@ -57,10 +58,10 @@ class AppController:
         match = Match(
             match_id=None,
             datetime_played=datetime.now(),
-            opponent_name="Imported",   # r6-dissect doesn't give opponent name
+            opponent_name="Imported",
             map=map_name,
-            result=None,                # result unknown until match is complete
-            recording_path=None,
+            result=None,
+            recording_path=result.recording_path,  # ← was None
             rounds=[],
         )
         match_id = self.repo.insert_match(match)

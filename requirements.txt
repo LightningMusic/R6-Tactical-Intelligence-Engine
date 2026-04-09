@@ -1,0 +1,21 @@
+# Core UI
+PySide6>=6.6.0
+
+# Database
+# (sqlite3 is stdlib — no install needed)
+
+# AI Inference
+# CPU-only build (works everywhere, no CUDA required):
+llama-cpp-python==0.2.77
+
+# Audio Transcription
+openai-whisper>=20231117
+
+# OBS Integration
+obs-websocket-py>=1.0.0
+
+# Replay Parsing
+# (r6-dissect is a bundled .exe — no pip install needed)
+
+# Filesystem watching (for session_manager if upgraded to event-driven)
+watchdog>=4.0.0

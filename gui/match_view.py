@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QTimer, Qt
 from typing import cast
-
+from models.import_result import ImportResult, ImportStatus
 from app.app_controller import AppController
 from database.db_manager import DatabaseManager
 from database.repositories import Repository
@@ -628,6 +628,42 @@ class MatchView(QWidget):
 
         self._updating = False
 
+    def prefill_from_import(self, result: ImportResult) -> None:
+        """
+        Called when routed here via PARTIAL_FAILURE.
+        Pre-fills whatever data survived the import.
+        """
+        # If we know the match was already created in DB, select it
+        if result.match_id is not None:
+            for i in range(self.match_selector.count()):
+                if self.match_selector.itemData(i) == result.match_id:
+                    self.match_selector.blockSignals(True)
+                    self.match_selector.setCurrentIndex(i)
+                    self.match_selector.blockSignals(False)
+                    self.current_match_id = result.match_id
+                    self.populate_tables()
+                    break
+
+        # Pre-fill round data from parsed rounds
+        if result.rounds:
+            first_round = result.rounds[0]
+            # Set side from first round
+            side = first_round.side or "attack"
+            idx = self.side_selector.findText(side)
+            if idx >= 0:
+                self.side_selector.setCurrentIndex(idx)
+
+            # Set round number
+            self.round_number_spin.setValue(first_round.round_number or 1)
+
+        # Show a toast explaining what happened
+        msg = result.error_message or "Some data could not be parsed automatically."
+        QMessageBox.information(
+            self,
+            "Partial Import — Please Review",
+            f"{msg}\n\nFields that could be recovered have been pre-filled.\n"
+            f"Please verify and complete any missing data before saving."
+        )
     # ============================================================
     # SAVE
     # ============================================================
