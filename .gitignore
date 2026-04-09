@@ -9,12 +9,17 @@ __pycache__/
 .venv/
 env/
 
-# AI / ML models
-*.gguf
-*.bin
+# AI models
 *.pt
 *.pth
+*.bin
+*.gguf
 *.safetensors
 *.onnx
-/models/
-/weights/
+data/models/
+
+# Recordings / media
+*.mkv
+*.mp4
+*.wav
+data/recordings/
