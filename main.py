@@ -50,6 +50,11 @@ def main():
     window = MainWindow()
     window.show()
 
+    # In main.py, in initialize_system():
+    from app.config import ensure_data_dirs, load_settings
+    ensure_data_dirs()
+    load_settings()          # ← add this line
+    
     sys.exit(app.exec())
 
 

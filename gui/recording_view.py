@@ -12,7 +12,7 @@ from app.session_manager import SessionManager
 from integration.obs_controller import OBSController
 from integration.rec_importer import RecImporter
 from models.import_result import ImportResult, ImportStatus
-from app.config import R6_REPLAY_FOLDER
+from app.config import R6_DISSECT_PATH, get_replay_folder
 
 
 class _ImportWorker(QObject):
@@ -42,7 +42,7 @@ class RecordingView(QWidget):
         self.controller  = controller
         self.obs         = OBSController()
         self._session_active    = False
-        self._replay_folder: Path | None     = R6_REPLAY_FOLDER
+        self._replay_folder: Path | None = get_replay_folder()
         self._session_manager: SessionManager | None = None
         self._thread: QThread | None         = None
         self._build_ui()

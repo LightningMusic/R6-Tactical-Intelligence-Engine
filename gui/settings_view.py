@@ -290,26 +290,36 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
-    # =====================================================
+# =====================================================
     # LOAD
     # =====================================================
 
     def _load_all(self) -> None:
+        self._load_general_settings()
         self._load_obs_settings()
         self._load_players()
         self._load_maps()
         self._load_matches()
         self._check_model_status()
 
+    def _load_general_settings(self) -> None:
+        import app.config as cfg
+        if cfg.R6_REPLAY_FOLDER_OVERRIDE:
+            self._replay_folder_edit.setText(cfg.R6_REPLAY_FOLDER_OVERRIDE)
+        else:
+            folder = cfg.get_replay_folder()
+            if folder:
+                self._replay_folder_edit.setText(str(folder))
+        self._stability_wait_spin.setValue(cfg.STABILITY_WAIT)
+        self._stability_checks_spin.setValue(cfg.STABILITY_CHECKS)
+        self._transcribe_checkbox.setChecked(cfg.TRANSCRIBE_AUTO)
+
     def _load_obs_settings(self) -> None:
-        try:
-            from app.config import OBS_HOST, OBS_PORT, OBS_PASSWORD, OBS_SCENE_NAME
-            self._obs_host_edit.setText(OBS_HOST)
-            self._obs_port_spin.setValue(OBS_PORT)
-            self._obs_password_edit.setText(OBS_PASSWORD)
-            self._obs_scene_edit.setText(OBS_SCENE_NAME)
-        except Exception:
-            pass
+        import app.config as cfg
+        self._obs_host_edit.setText(cfg.OBS_HOST)
+        self._obs_port_spin.setValue(cfg.OBS_PORT)
+        self._obs_password_edit.setText(cfg.OBS_PASSWORD)
+        self._obs_scene_edit.setText(cfg.OBS_SCENE_NAME)
 
     def _load_players(self) -> None:
         try:
@@ -334,7 +344,6 @@ class SettingsView(QWidget):
             for row in rows:
                 r = self._maps_table.rowCount()
                 self._maps_table.insertRow(r)
-                self._maps_table.setItem(r, 0, QTableWidgetItem(row["name"]))
                 self._maps_table.setItem(r, 0, QTableWidgetItem(row["name"]))
 
                 cb = QCheckBox()
@@ -365,15 +374,13 @@ class SettingsView(QWidget):
                 self._matches_table.setItem(r, 3, QTableWidgetItem(m.result or "—"))
                 self._matches_table.setItem(
                     r, 4,
-                    QTableWidgetItem(
-                        m.datetime_played.strftime("%Y-%m-%d %H:%M")
-                    )
+                    QTableWidgetItem(m.datetime_played.strftime("%Y-%m-%d %H:%M"))
                 )
         except Exception as e:
             print(f"[Settings] Failed to load matches: {e}")
 
     def _check_model_status(self) -> None:
-        from app.config import MODEL_PATH, WHISPER_MODEL_PATH  # ← moved here
+        from app.config import MODEL_PATH, WHISPER_MODEL_PATH
 
         if MODEL_PATH.exists():
             size_mb = MODEL_PATH.stat().st_size // (1024 * 1024)
@@ -398,20 +405,25 @@ class SettingsView(QWidget):
     # =====================================================
 
     def _save_general(self) -> None:
-        QMessageBox.information(
-            self, "Saved",
-            "General settings noted.\n"
-            "Replay folder and stability settings take effect on next session start."
-        )
+        import app.config as cfg
+        from app.config import save_settings
+        cfg.STABILITY_WAIT   = self._stability_wait_spin.value()
+        cfg.STABILITY_CHECKS = self._stability_checks_spin.value()
+        cfg.TRANSCRIBE_AUTO  = self._transcribe_checkbox.isChecked()
+        folder = self._replay_folder_edit.text().strip()
+        cfg.R6_REPLAY_FOLDER_OVERRIDE = folder if folder else None
+        save_settings()
+        QMessageBox.information(self, "Saved", "General settings saved.")
 
     def _save_obs(self) -> None:
-        # Write back to config at runtime — does not persist to disk yet
         import app.config as cfg
+        from app.config import save_settings
         cfg.OBS_HOST       = self._obs_host_edit.text().strip()
         cfg.OBS_PORT       = self._obs_port_spin.value()
         cfg.OBS_PASSWORD   = self._obs_password_edit.text()
         cfg.OBS_SCENE_NAME = self._obs_scene_edit.text().strip()
-        QMessageBox.information(self, "Saved", "OBS settings updated for this session.")
+        save_settings()
+        QMessageBox.information(self, "Saved", "OBS settings saved.")
 
     def _save_players(self) -> None:
         try:
@@ -456,13 +468,13 @@ class SettingsView(QWidget):
 
     def _save_ai_settings(self) -> None:
         import app.config as cfg
-        # These take effect on next model load (lazy-load means no restart needed
-        # as long as the model hasn't been loaded yet in this session)
-        cfg.LLM_GPU_LAYERS = self._gpu_layers_spin.value()
-        cfg.LLM_N_CTX      = self._ctx_spin.value()
-        cfg.LLM_N_THREADS  = self._threads_spin.value()
-        cfg.WHISPER_MODEL_SIZE = self._whisper_size_combo.currentText()
-        QMessageBox.information(self, "Saved", "AI settings updated for this session.")
+        from app.config import save_settings
+        cfg.LLM_GPU_LAYERS     = self._gpu_layers_spin.value()
+        cfg.LLM_N_CTX          = self._ctx_spin.value()
+        cfg.LLM_N_THREADS      = self._threads_spin.value()
+        cfg.WHISPER_MODEL_SIZE  = self._whisper_size_combo.currentText()
+        save_settings()
+        QMessageBox.information(self, "Saved", "AI settings saved.")
 
     # =====================================================
     # MATCH MANAGEMENT
@@ -544,7 +556,10 @@ class SettingsView(QWidget):
                 obs.disconnect()
                 QMessageBox.information(self, "OBS", "Connection successful ✅")
             else:
-                QMessageBox.warning(self, "OBS", "Connection failed ❌\nCheck OBS is open and WebSocket is enabled.")
+                QMessageBox.warning(
+                    self, "OBS",
+                    "Connection failed ❌\nCheck OBS is open and WebSocket is enabled."
+                )
         except Exception as e:
             QMessageBox.critical(self, "OBS Error", str(e))
 

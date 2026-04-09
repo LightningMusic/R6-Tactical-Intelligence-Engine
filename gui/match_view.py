@@ -47,7 +47,33 @@ class MatchView(QWidget):
         "Ability", "Ability Uses", "Secondary", "Sec Used",
         "Obj Attempted", "Obj Successful"
     ]
-
+    # Map name → bomb sites
+    MAP_SITES: dict[str, list[str]] = {
+        "Bank":              ["1F Teller's Office", "2F Open Area", "B Lockers", "B CCTV"],
+        "Border":            ["1F Armory Lockers", "1F Supply Room", "2F Ventilation", "2F Tram Control"],
+        "Chalet":            ["B Wine Cellar", "1F Kitchen", "2F Master Bedroom", "2F Gaming Room"],
+        "Clubhouse":         ["B Cash Room", "1F Bar", "2F CCTV Room", "2F Gym"],
+        "Coastline":         ["1F Kitchen", "1F Billiards", "2F Penthouse", "2F Hookah Lounge"],
+        "Consulate":         ["B Garage", "1F Consul Office", "2F Lobby", "2F Meeting Room"],
+        "Emerald Plains":    ["1F Dining Hall", "1F Kitchen", "2F Master Bedroom", "2F Office"],
+        "Favela":            ["1F Laundry", "2F Master Bedroom", "3F Bedroom", "3F Office"],
+        "Fortress":          ["1F Armory", "1F Bedroom", "1F Commander's Office", "B Prison"],
+        "Hereford Base":     ["B Armory", "1F Dining Hall", "2F Recruit Dorm", "3F Commander's Office"],
+        "House":             ["1F Kitchen", "1F Living Room", "2F Master Bedroom", "2F Kids Bedroom"],
+        "Kafe Dostoyevsky":  ["1F Kitchen", "2F Reading Room", "3F Cocktail Bar", "3F Mining Room"],
+        "Kanal":             ["1F Coast Guard Room", "1F Server Room", "2F Map Room", "2F Office"],
+        "Lair":              ["B Server Room", "1F Hangar", "2F Living Quarters", "2F Office"],
+        "Nighthaven Labs":   ["1F Armory", "1F Labs", "2F Server Room", "2F Office"],
+        "Oregon":            ["B Laundry", "B Meeting Hall", "1F Kitchen", "2F Master Bedroom"],
+        "Outback":           ["1F Bar", "1F Kitchen", "2F Office", "2F Bedroom"],
+        "Plane":             ["1F Cargo Hold", "2F Cockpit", "2F Business Class", "2F Economy"],
+        "Skyscraper":        ["1F Bedroom", "1F Tea Room", "2F Office", "2F Exhibition"],
+        "Stadium Bravo":     ["1F Locker Room", "1F Concession", "2F CCTV Room", "2F Press Room"],
+        "Theme Park":        ["1F Armory", "1F Bunk", "2F Office", "2F Day Care"],
+        "Tower":             ["1F Bar", "2F Office", "3F Penthouse", "3F Game Room"],
+        "Villa":             ["1F Aviator Room", "1F Games Room", "2F Master Bedroom", "2F Statuary"],
+        "Yacht":             ["B Engine Room", "1F Galley", "2F State Room", "3F Cockpit"],
+    }
     # ============================================================
     # UI SETUP
     # ============================================================
@@ -214,13 +240,33 @@ class MatchView(QWidget):
     def update_resource_label(self) -> None:
         if self.side_selector.currentText() == "attack":
             self.resource_label.setText("Drones Lost:")
+            self.resource_spin.setVisible(True)
+            self.resource_spin.setRange(0, 10)
         else:
             self.resource_label.setText("Reinforcements Used:")
+            self.resource_spin.setVisible(True)
+            self.resource_spin.setRange(0, 10)
+        self.resource_spin.setValue(0)
 
     # ============================================================
     # MATCH SELECTOR
     # ============================================================
+    def _update_sites_for_match(self, match_id: int | None) -> None:
+        """Repopulates the site dropdown based on the selected match's map."""
+        self.site_edit.blockSignals(True)
+        self.site_edit.clear()
+        self.site_edit.addItem("")   # blank default
 
+        if match_id is not None:
+            try:
+                match = self.repo.get_match(match_id)
+                if match:
+                    sites = self.MAP_SITES.get(match.map, [])
+                    self.site_edit.addItems(sites)
+            except Exception:
+                pass
+
+        self.site_edit.blockSignals(False)
     def load_matches(self, select_match_id: int | None = None) -> None:
         self.match_selector.blockSignals(True)
         self.match_selector.clear()
@@ -246,6 +292,7 @@ class MatchView(QWidget):
             self.current_match_id = select_match_id
             self.populate_tables()
             self.update_resource_label()
+            self._update_sites_for_match(select_match_id)
 
     def on_match_selected(self, index: int) -> None:
         data = self.match_selector.currentData()
@@ -290,6 +337,7 @@ class MatchView(QWidget):
         self.round_number_spin.setValue(1)
         self.populate_tables()
         self.update_resource_label()
+        self._update_sites_for_match(data)
 
     # ============================================================
     # TABLE POPULATION
