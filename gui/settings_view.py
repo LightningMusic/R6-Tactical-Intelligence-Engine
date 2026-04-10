@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 
 
 class SettingsView(QWidget):
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._build_ui()
@@ -38,16 +39,11 @@ class SettingsView(QWidget):
         tabs.addTab(self._build_ai_tab(),        "🤖  AI / Models")
         layout.addWidget(tabs)
 
-    # ─────────────────────────────────────────────────────
-    # TAB: GENERAL
-    # ─────────────────────────────────────────────────────
-
     def _build_general_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(16)
 
-        # Replay folder
         replay_group = QGroupBox("R6 Replay Folder")
         replay_layout = QHBoxLayout(replay_group)
         self._replay_folder_edit = QLineEdit()
@@ -58,28 +54,20 @@ class SettingsView(QWidget):
         replay_layout.addWidget(browse_btn)
         layout.addWidget(replay_group)
 
-        # Stability settings
         stab_group = QGroupBox("File Stability (Import)")
         stab_form = QFormLayout(stab_group)
-
         self._stability_wait_spin = QSpinBox()
         self._stability_wait_spin.setRange(1, 30)
         self._stability_wait_spin.setSuffix("  seconds")
-        self._stability_wait_spin.setValue(5)
-
         self._stability_checks_spin = QSpinBox()
         self._stability_checks_spin.setRange(1, 10)
-        self._stability_checks_spin.setValue(4)
-
         stab_form.addRow("Wait between checks:", self._stability_wait_spin)
-        stab_form.addRow("Number of checks:", self._stability_checks_spin)
+        stab_form.addRow("Number of checks:",    self._stability_checks_spin)
         layout.addWidget(stab_group)
 
-        # Transcription toggle
         trans_group = QGroupBox("Transcription")
         trans_layout = QVBoxLayout(trans_group)
         self._transcribe_checkbox = QCheckBox("Auto-transcribe session audio after import")
-        self._transcribe_checkbox.setChecked(True)
         trans_layout.addWidget(self._transcribe_checkbox)
         layout.addWidget(trans_group)
 
@@ -89,10 +77,6 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
-    # ─────────────────────────────────────────────────────
-    # TAB: OBS
-    # ─────────────────────────────────────────────────────
-
     def _build_obs_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -100,15 +84,12 @@ class SettingsView(QWidget):
 
         obs_group = QGroupBox("OBS WebSocket Connection")
         form = QFormLayout(obs_group)
-
-        self._obs_host_edit = QLineEdit("localhost")
+        self._obs_host_edit = QLineEdit()
         self._obs_port_spin = QSpinBox()
         self._obs_port_spin.setRange(1, 65535)
-        self._obs_port_spin.setValue(4455)
         self._obs_password_edit = QLineEdit()
         self._obs_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._obs_scene_edit = QLineEdit("R6_Intelligence")
-
+        self._obs_scene_edit = QLineEdit()
         form.addRow("Host:",     self._obs_host_edit)
         form.addRow("Port:",     self._obs_port_spin)
         form.addRow("Password:", self._obs_password_edit)
@@ -125,15 +106,10 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
-    # ─────────────────────────────────────────────────────
-    # TAB: PLAYERS
-    # ─────────────────────────────────────────────────────
-
     def _build_players_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(12)
-
         layout.addWidget(QLabel("Team player names (5 players):"))
 
         self._player_edits: list[QLineEdit] = []
@@ -151,25 +127,18 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
-    # ─────────────────────────────────────────────────────
-    # TAB: MAPS
-    # ─────────────────────────────────────────────────────
-
     def _build_maps_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(12)
-
         layout.addWidget(QLabel("Toggle maps in/out of the active pool:"))
 
         self._maps_table = QTableWidget(0, 2)
         self._maps_table.setHorizontalHeaderLabels(["Map", "Active Pool"])
         self._maps_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
+            0, QHeaderView.ResizeMode.Stretch)
         self._maps_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents
-        )
+            1, QHeaderView.ResizeMode.ResizeToContents)
         self._maps_table.verticalHeader().setVisible(False)
         self._maps_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         layout.addWidget(self._maps_table)
@@ -179,39 +148,28 @@ class SettingsView(QWidget):
         layout.addWidget(save_btn)
         return w
 
-    # ─────────────────────────────────────────────────────
-    # TAB: MATCH MANAGER
-    # ─────────────────────────────────────────────────────
-
     def _build_matches_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(12)
-
         layout.addWidget(QLabel("Manage existing matches:"))
 
         self._matches_table = QTableWidget(0, 5)
         self._matches_table.setHorizontalHeaderLabels(
-            ["ID", "Opponent", "Map", "Result", "Date"]
-        )
+            ["ID", "Opponent", "Map", "Result", "Date"])
         for col in range(5):
             self._matches_table.horizontalHeader().setSectionResizeMode(
-                col, QHeaderView.ResizeMode.ResizeToContents
-            )
+                col, QHeaderView.ResizeMode.ResizeToContents)
         self._matches_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch
-        )
+            1, QHeaderView.ResizeMode.Stretch)
         self._matches_table.verticalHeader().setVisible(False)
         self._matches_table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
+            QAbstractItemView.SelectionBehavior.SelectRows)
         self._matches_table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
+            QAbstractItemView.EditTrigger.NoEditTriggers)
         layout.addWidget(self._matches_table)
 
         btn_row = QHBoxLayout()
-
         set_result_btn = QPushButton("Set Result (Win/Loss)")
         set_result_btn.clicked.connect(self._set_match_result)
         btn_row.addWidget(set_result_btn)
@@ -224,59 +182,41 @@ class SettingsView(QWidget):
         refresh_btn = QPushButton("↺  Refresh")
         refresh_btn.clicked.connect(self._load_matches)
         btn_row.addWidget(refresh_btn)
-
         layout.addLayout(btn_row)
         return w
-
-    # ─────────────────────────────────────────────────────
-    # TAB: AI / MODELS
-    # ─────────────────────────────────────────────────────
 
     def _build_ai_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(16)
 
-        # Model status
         status_group = QGroupBox("Model Status")
         status_layout = QFormLayout(status_group)
-
-        self._llm_status_label  = QLabel("Checking...")
+        self._llm_status_label     = QLabel("Checking...")
         self._whisper_status_label = QLabel("Checking...")
         status_layout.addRow("LLM (llama-cpp):", self._llm_status_label)
         status_layout.addRow("Whisper:",         self._whisper_status_label)
         layout.addWidget(status_group)
 
-        # LLM settings
         llm_group = QGroupBox("LLM Settings")
-        llm_form = QFormLayout(llm_group)
-
+        llm_form  = QFormLayout(llm_group)
         self._gpu_layers_spin = QSpinBox()
         self._gpu_layers_spin.setRange(0, 100)
-        self._gpu_layers_spin.setValue(0)
         self._gpu_layers_spin.setSpecialValueText("0 (CPU only)")
-
         self._ctx_spin = QSpinBox()
         self._ctx_spin.setRange(512, 16384)
         self._ctx_spin.setSingleStep(512)
-        self._ctx_spin.setValue(4096)
-
         self._threads_spin = QSpinBox()
         self._threads_spin.setRange(1, 32)
-        self._threads_spin.setValue(6)
-
-        llm_form.addRow("GPU Layers:",    self._gpu_layers_spin)
-        llm_form.addRow("Context Size:",  self._ctx_spin)
-        llm_form.addRow("CPU Threads:",   self._threads_spin)
+        llm_form.addRow("GPU Layers:",   self._gpu_layers_spin)
+        llm_form.addRow("Context Size:", self._ctx_spin)
+        llm_form.addRow("CPU Threads:",  self._threads_spin)
         layout.addWidget(llm_group)
 
-        # Whisper settings
         whisper_group = QGroupBox("Whisper Settings")
-        whisper_form = QFormLayout(whisper_group)
-
+        whisper_form  = QFormLayout(whisper_group)
         self._whisper_size_combo = QComboBox()
         self._whisper_size_combo.addItems(["tiny", "base", "small", "medium"])
-        self._whisper_size_combo.setCurrentText("base")
         whisper_form.addRow("Model Size:", self._whisper_size_combo)
         layout.addWidget(whisper_group)
 
@@ -290,7 +230,7 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
-# =====================================================
+    # =====================================================
     # LOAD
     # =====================================================
 
@@ -303,23 +243,20 @@ class SettingsView(QWidget):
         self._check_model_status()
 
     def _load_general_settings(self) -> None:
-        import app.config as cfg
-        if cfg.R6_REPLAY_FOLDER_OVERRIDE:
-            self._replay_folder_edit.setText(cfg.R6_REPLAY_FOLDER_OVERRIDE)
-        else:
-            folder = cfg.get_replay_folder()
-            if folder:
-                self._replay_folder_edit.setText(str(folder))
-        self._stability_wait_spin.setValue(cfg.STABILITY_WAIT)
-        self._stability_checks_spin.setValue(cfg.STABILITY_CHECKS)
-        self._transcribe_checkbox.setChecked(cfg.TRANSCRIBE_AUTO)
+        from app.config import settings
+        folder = settings.R6_REPLAY_FOLDER
+        if folder:
+            self._replay_folder_edit.setText(str(folder))
+        self._stability_wait_spin.setValue(int(settings.STABILITY_WAIT))
+        self._stability_checks_spin.setValue(settings.STABILITY_CHECKS)
+        self._transcribe_checkbox.setChecked(settings.TRANSCRIBE_AUTO)
 
     def _load_obs_settings(self) -> None:
-        import app.config as cfg
-        self._obs_host_edit.setText(cfg.OBS_HOST)
-        self._obs_port_spin.setValue(cfg.OBS_PORT)
-        self._obs_password_edit.setText(cfg.OBS_PASSWORD)
-        self._obs_scene_edit.setText(cfg.OBS_SCENE_NAME)
+        from app.config import settings
+        self._obs_host_edit.setText(settings.OBS_HOST)
+        self._obs_port_spin.setValue(settings.OBS_PORT)
+        self._obs_password_edit.setText(settings.OBS_PASSWORD)
+        self._obs_scene_edit.setText(settings.OBS_SCENE_NAME)
 
     def _load_players(self) -> None:
         try:
@@ -349,13 +286,12 @@ class SettingsView(QWidget):
                 cb = QCheckBox()
                 cb.setChecked(bool(row["is_active_pool"]))
                 cb.setProperty("map_id", row["map_id"])
-
-                cell_widget = QWidget()
-                cell_layout = QHBoxLayout(cell_widget)
+                cell = QWidget()
+                cell_layout = QHBoxLayout(cell)
                 cell_layout.addWidget(cb)
                 cell_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 cell_layout.setContentsMargins(0, 0, 0, 0)
-                self._maps_table.setCellWidget(r, 1, cell_widget)
+                self._maps_table.setCellWidget(r, 1, cell)
 
         except Exception as e:
             print(f"[Settings] Failed to load maps: {e}")
@@ -373,8 +309,9 @@ class SettingsView(QWidget):
                 self._matches_table.setItem(r, 2, QTableWidgetItem(m.map))
                 self._matches_table.setItem(r, 3, QTableWidgetItem(m.result or "—"))
                 self._matches_table.setItem(
-                    r, 4,
-                    QTableWidgetItem(m.datetime_played.strftime("%Y-%m-%d %H:%M"))
+                    r, 4, QTableWidgetItem(
+                        m.datetime_played.strftime("%Y-%m-%d %H:%M")
+                    )
                 )
         except Exception as e:
             print(f"[Settings] Failed to load matches: {e}")
@@ -383,21 +320,20 @@ class SettingsView(QWidget):
         from app.config import MODEL_PATH, WHISPER_MODEL_PATH
 
         if MODEL_PATH.exists():
-            size_mb = MODEL_PATH.stat().st_size // (1024 * 1024)
-            self._llm_status_label.setText(f"✅ Found ({size_mb} MB)")
+            mb = MODEL_PATH.stat().st_size // (1024 * 1024)
+            self._llm_status_label.setText(f"✅ Found ({mb} MB)")
             self._llm_status_label.setStyleSheet("color: #55e07a;")
         else:
             self._llm_status_label.setText("❌ Not found — place model.gguf in data/models/")
             self._llm_status_label.setStyleSheet("color: #e05555;")
 
         if WHISPER_MODEL_PATH.exists():
-            size_mb = WHISPER_MODEL_PATH.stat().st_size // (1024 * 1024)
-            self._whisper_status_label.setText(f"✅ Found ({size_mb} MB)")
+            mb = WHISPER_MODEL_PATH.stat().st_size // (1024 * 1024)
+            self._whisper_status_label.setText(f"✅ Found ({mb} MB)")
             self._whisper_status_label.setStyleSheet("color: #55e07a;")
         else:
             self._whisper_status_label.setText(
-                "❌ Not found — place whisper-base.pt in data/models/"
-            )
+                "❌ Not found — place whisper-base.pt in data/models/")
             self._whisper_status_label.setStyleSheet("color: #e05555;")
 
     # =====================================================
@@ -405,24 +341,26 @@ class SettingsView(QWidget):
     # =====================================================
 
     def _save_general(self) -> None:
-        import app.config as cfg
-        from app.config import save_settings
-        cfg.STABILITY_WAIT   = self._stability_wait_spin.value()
-        cfg.STABILITY_CHECKS = self._stability_checks_spin.value()
-        cfg.TRANSCRIBE_AUTO  = self._transcribe_checkbox.isChecked()
+        from app.config import settings
         folder = self._replay_folder_edit.text().strip()
-        cfg.R6_REPLAY_FOLDER_OVERRIDE = folder if folder else None
-        save_settings()
+        settings.set_many({
+            "stability_wait":   self._stability_wait_spin.value(),
+            "stability_checks": self._stability_checks_spin.value(),
+            "transcribe_auto":  self._transcribe_checkbox.isChecked(),
+            "r6_replay_folder": folder if folder else None,
+        })
+        settings.save()
         QMessageBox.information(self, "Saved", "General settings saved.")
 
     def _save_obs(self) -> None:
-        import app.config as cfg
-        from app.config import save_settings
-        cfg.OBS_HOST       = self._obs_host_edit.text().strip()
-        cfg.OBS_PORT       = self._obs_port_spin.value()
-        cfg.OBS_PASSWORD   = self._obs_password_edit.text()
-        cfg.OBS_SCENE_NAME = self._obs_scene_edit.text().strip()
-        save_settings()
+        from app.config import settings
+        settings.set_many({
+            "obs_host":       self._obs_host_edit.text().strip(),
+            "obs_port":       self._obs_port_spin.value(),
+            "obs_password":   self._obs_password_edit.text(),
+            "obs_scene_name": self._obs_scene_edit.text().strip(),
+        })
+        settings.save()
         QMessageBox.information(self, "Saved", "OBS settings saved.")
 
     def _save_players(self) -> None:
@@ -435,9 +373,7 @@ class SettingsView(QWidget):
                 name = edit.text().strip()
                 if name:
                     repo.insert_player(Player(
-                        player_id=None,
-                        name=name,
-                        is_team_member=True,
+                        player_id=None, name=name, is_team_member=True
                     ))
             QMessageBox.information(self, "Saved", "Players updated.")
         except Exception as e:
@@ -449,17 +385,15 @@ class SettingsView(QWidget):
             repo = Repository()
             with repo.db.get_connection() as conn:
                 for row in range(self._maps_table.rowCount()):
-                    cell_widget = self._maps_table.cellWidget(row, 1)
-                    if cell_widget is None:
+                    cell = self._maps_table.cellWidget(row, 1)
+                    if cell is None:
                         continue
-                    cb = cell_widget.findChild(QCheckBox)
+                    cb = cell.findChild(QCheckBox)
                     if cb is None:
                         continue
-                    map_id = cb.property("map_id")
-                    active = 1 if cb.isChecked() else 0
                     conn.execute(
                         "UPDATE maps SET is_active_pool = ? WHERE map_id = ?",
-                        (active, map_id),
+                        (1 if cb.isChecked() else 0, cb.property("map_id")),
                     )
                 conn.commit()
             QMessageBox.information(self, "Saved", "Map pool updated.")
@@ -467,13 +401,14 @@ class SettingsView(QWidget):
             QMessageBox.critical(self, "Error", str(e))
 
     def _save_ai_settings(self) -> None:
-        import app.config as cfg
-        from app.config import save_settings
-        cfg.LLM_GPU_LAYERS     = self._gpu_layers_spin.value()
-        cfg.LLM_N_CTX          = self._ctx_spin.value()
-        cfg.LLM_N_THREADS      = self._threads_spin.value()
-        cfg.WHISPER_MODEL_SIZE  = self._whisper_size_combo.currentText()
-        save_settings()
+        from app.config import settings
+        settings.set_many({
+            "llm_gpu_layers":    self._gpu_layers_spin.value(),
+            "llm_n_ctx":         self._ctx_spin.value(),
+            "llm_n_threads":     self._threads_spin.value(),
+            "whisper_model_size": self._whisper_size_combo.currentText(),
+        })
+        settings.save()
         QMessageBox.information(self, "Saved", "AI settings saved.")
 
     # =====================================================
@@ -485,11 +420,10 @@ class SettingsView(QWidget):
         if selected < 0:
             QMessageBox.warning(self, "Warning", "Select a match first.")
             return
-
-        match_id_item = self._matches_table.item(selected, 0)
-        if match_id_item is None:
+        item = self._matches_table.item(selected, 0)
+        if item is None:
             return
-        match_id = int(match_id_item.text())
+        match_id = int(item.text())
 
         from PySide6.QtWidgets import QInputDialog
         result, ok = QInputDialog.getItem(
@@ -507,7 +441,7 @@ class SettingsView(QWidget):
                 )
                 conn.commit()
             self._load_matches()
-            QMessageBox.information(self, "Updated", f"Match {match_id} set to '{result}'.")
+            QMessageBox.information(self, "Updated", f"Match {match_id} → '{result}'.")
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
@@ -516,17 +450,14 @@ class SettingsView(QWidget):
         if selected < 0:
             QMessageBox.warning(self, "Warning", "Select a match first.")
             return
-
-        match_id_item = self._matches_table.item(selected, 0)
-        if match_id_item is None:
+        item = self._matches_table.item(selected, 0)
+        if item is None:
             return
-        match_id = int(match_id_item.text())
+        match_id = int(item.text())
 
         confirm = QMessageBox.question(
-            self,
-            "Confirm Delete",
-            f"Permanently delete match {match_id} and all its rounds?\n"
-            f"This cannot be undone.",
+            self, "Confirm Delete",
+            f"Permanently delete match {match_id} and all its rounds?\nThis cannot be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
@@ -535,9 +466,7 @@ class SettingsView(QWidget):
         try:
             from database.repositories import Repository
             with Repository().db.get_connection() as conn:
-                conn.execute(
-                    "DELETE FROM matches WHERE match_id = ?", (match_id,)
-                )
+                conn.execute("DELETE FROM matches WHERE match_id = ?", (match_id,))
                 conn.commit()
             self._load_matches()
             QMessageBox.information(self, "Deleted", f"Match {match_id} deleted.")
@@ -545,7 +474,7 @@ class SettingsView(QWidget):
             QMessageBox.critical(self, "Error", str(e))
 
     # =====================================================
-    # OBS TEST
+    # OBS TEST / BROWSE
     # =====================================================
 
     def _test_obs(self) -> None:
@@ -562,10 +491,6 @@ class SettingsView(QWidget):
                 )
         except Exception as e:
             QMessageBox.critical(self, "OBS Error", str(e))
-
-    # =====================================================
-    # BROWSE
-    # =====================================================
 
     def _browse_replay_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(

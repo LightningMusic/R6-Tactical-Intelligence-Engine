@@ -133,15 +133,21 @@ class MetricsEngine:
     # ============================================================
 
     def drone_efficiency(self) -> float:
-        rounds = [r for r in self.match.rounds if r.side == "attack"]
-        total_start = sum(r.resources.team_drones_start for r in rounds)
-        total_lost = sum(r.resources.team_drones_lost for r in rounds)
-        return 1 - self._safe_div(total_lost, total_start)
+        rounds = [
+            r for r in self.match.rounds
+            if r.side == "attack" and r.resources is not None
+        ]
+        total_start = sum(r.resources.team_drones_start for r in rounds)  # type: ignore[union-attr]
+        total_lost  = sum(r.resources.team_drones_lost  for r in rounds)  # type: ignore[union-attr]
+        return 1.0 - self._safe_div(total_lost, total_start)
 
     def reinforcement_usage_rate(self) -> float:
-        rounds = [r for r in self.match.rounds if r.side == "defense"]
-        total_start = sum(r.resources.team_reinforcements_start for r in rounds)
-        total_used = sum(r.resources.team_reinforcements_used for r in rounds)
+        rounds = [
+            r for r in self.match.rounds
+            if r.side == "defense" and r.resources is not None
+        ]
+        total_start = sum(r.resources.team_reinforcements_start for r in rounds)  # type: ignore[union-attr]
+        total_used  = sum(r.resources.team_reinforcements_used  for r in rounds)  # type: ignore[union-attr]
         return self._safe_div(total_used, total_start)
 
     # ============================================================

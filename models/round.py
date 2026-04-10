@@ -72,6 +72,7 @@ class Round:
         if total_kills > 5:
             raise ValueError("Total team kills cannot exceed 5 in a round.")
 
+
     # ----------------------------------
     # Derived Helpers
     # ----------------------------------
@@ -83,8 +84,9 @@ class Round:
         return sum(p.deaths for p in self.player_stats)
 
     def team_engagement_win_rate(self) -> float:
-        total_taken = sum(p.engagements_taken for p in self.player_stats)
-        total_won = sum(p.engagements_won for p in self.player_stats)
+        total = sum(p.engagements_taken for p in self.player_stats)
+        won   = sum(p.engagements_won   for p in self.player_stats)
+        return won / total if total > 0 else 0.0
 
         if total_taken == 0:
             return 0.0

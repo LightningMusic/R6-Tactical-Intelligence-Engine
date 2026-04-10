@@ -14,23 +14,22 @@ class SessionManager:
     - Detect new match folders after session ends
     - Wait for file stability before importing
     - Transcribe the session audio and clip to each match window
-    - Pass results to RecImporter
     """
 
     def __init__(
         self,
         replay_folder: Path,
         importer: RecImporter,
-        recording_path: Optional[Path] = None,   # OBS output file
+        recording_path: Optional[Path] = None,
         transcribe: bool = True,
         stability_wait: float = 5.0,
         stability_checks: int = 4,
-    ):
-        self.replay_folder   = replay_folder
-        self.importer        = importer
-        self.recording_path  = recording_path
-        self.transcribe      = transcribe
-        self.stability_wait  = stability_wait
+    ) -> None:
+        self.replay_folder    = replay_folder
+        self.importer         = importer
+        self.recording_path   = recording_path
+        self.transcribe       = transcribe
+        self.stability_wait   = stability_wait
         self.stability_checks = stability_checks
         self._snapshot: set[Path] = set()
         self._transcriber: Optional[WhisperTranscriber] = None
@@ -48,7 +47,7 @@ class SessionManager:
 
     def end_session(self) -> list[ImportResult]:
         current_folders = self._scan_match_folders()
-        new_folders = current_folders - self._snapshot
+        new_folders     = current_folders - self._snapshot
 
         if not new_folders:
             return [ImportResult(
@@ -66,7 +65,6 @@ class SessionManager:
 
         results = self.importer.import_multiple_folders(stable_folders)
 
-        # ── Transcription (optional, non-blocking on failure) ───
         if self.transcribe and self.recording_path:
             try:
                 self._run_transcription(results, stable_folders)
@@ -84,35 +82,65 @@ class SessionManager:
         results: list[ImportResult],
         folders: list[Path],
     ) -> None:
-        """
-        Transcribes the full session recording, then clips
-        each match's segment using timestamps from the .rec files.
-        Attaches the transcript text to each ImportResult.
-        """
         from analysis.timeline_aligner import TimelineAligner
+        from analysis.transcript_parser import TranscriptParser
+        from database.repositories import Repository
+        import json
 
         if self._transcriber is None:
             self._transcriber = WhisperTranscriber()
 
+        if self.recording_path is None:
+            return
+
         print("[SessionManager] Starting transcription of session audio...")
-        full_result = self._transcriber.transcribe(self.recording_path)  # type: ignore[arg-type]
+        full_result = self._transcriber.transcribe(self.recording_path)
 
         aligner = TimelineAligner()
+        parser  = TranscriptParser()
+        repo    = Repository()
 
         for i, (result, folder) in enumerate(zip(results, folders)):
+            # Initialise clipped so it's always bound before use
+            clipped: dict = {"text": "", "segments": []}
+
             try:
                 start_sec, end_sec = aligner.get_match_window(folder)
                 clipped = self._transcriber.clip_to_match(
                     full_result, start_sec, end_sec
                 )
-                result.transcript_text = clipped.get("text", "")
-                result.transcript_segments = clipped.get("segments", [])
                 print(
                     f"[SessionManager] Match {i+1} transcript clipped "
                     f"({start_sec:.0f}s – {end_sec:.0f}s)"
                 )
             except Exception as e:
                 print(f"[SessionManager] Clip failed for folder {folder.name}: {e}")
+                # clipped stays as the empty default — processing continues below
+
+            text     = clipped.get("text", "")
+            segments = clipped.get("segments", [])
+
+            parsed  = parser.parse_segments_list(segments, match_id=result.match_id)
+            storage = parser.to_storage_dict(parsed)
+
+            if result.match_id is not None:
+                try:
+                    with repo.db.get_connection() as conn:
+                        conn.execute(
+                            """
+                            INSERT INTO transcripts
+                                (match_id, raw_text, processed_segments_json)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT DO NOTHING
+                            """,
+                            (result.match_id, text, json.dumps(storage))
+                        )
+                        conn.commit()
+                except Exception as db_err:
+                    print(f"[SessionManager] Failed to store transcript: {db_err}")
+
+            result.transcript_text     = text
+            result.transcript_segments = segments
 
     # =====================================================
     # FOLDER SCAN

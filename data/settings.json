@@ -1,0 +1,14 @@
+{
+  "obs_host": "localhost",
+  "obs_port": 4455,
+  "obs_password": "gr17aGAe8WkxZO6i",
+  "obs_scene_name": "R6_Intelligence",
+  "whisper_model_size": "base",
+  "llm_gpu_layers": 0,
+  "llm_n_ctx": 4096,
+  "llm_n_threads": 6,
+  "stability_wait": 5,
+  "stability_checks": 8,
+  "transcribe_auto": true,
+  "r6_replay_folder": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Tom Clancy's Rainbow Six Siege\\MatchReplay"
+}

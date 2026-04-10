@@ -129,11 +129,60 @@ class AppController:
     def regenerate_report(self, match_id: int) -> str:
         return self.report_gen.generate_match_report(match_id)
 
-    def fetch_match_intel(self, match_id: int) -> Dict:
-        return {
-            "derived_metrics": self.intel.analyze_match(match_id),
-            "player_intel": self.intel.get_player_intel(match_id),
+    def fetch_match_intel(self, match_id: int) -> dict:
+        from analysis.metrics_engine import MetricsEngine
+
+        match = self.repo.get_match_full(match_id)
+        if match is None:
+            return {"error": f"Match {match_id} not found."}
+
+        engine = MetricsEngine(match)
+
+        # ── Core match metrics ────────────────────────────────
+        metrics: dict = {
+            "win_rate":                    round(engine.win_rate(), 3),
+            "attack_win_rate":             round(engine.attack_win_rate(), 3),
+            "defense_win_rate":            round(engine.defense_win_rate(), 3),
+            "engagement_win_rate":         round(engine.average_team_engagement_win_rate(), 3),
+            "drone_efficiency":            round(engine.drone_efficiency(), 3),
+            "reinforcement_usage_rate":    round(engine.reinforcement_usage_rate(), 3),
+            "man_advantage_conversion":    round(engine.man_advantage_conversion(), 3),
+            "clutch_rate":                 round(engine.clutch_rate(), 3),
         }
+
+        # ── Per-player summary ────────────────────────────────
+        summary      = engine.player_summary()
+        tps          = engine.tactical_performance_score()
+        consistency  = engine.player_consistency_index()
+
+        player_metrics: dict = {}
+        for pid, data in summary.items():
+            name = data["player"].name
+            player_metrics[name] = {
+                "kills":               data["kills"],
+                "deaths":              data["deaths"],
+                "assists":             data["assists"],
+                "kd_ratio":            round(data["kd_ratio"], 2),
+                "engagement_win_rate": round(data["engagement_win_rate"], 2),
+                "survival_rate":       round(data["survival_rate"], 2),
+                "ability_efficiency":  round(data["ability_efficiency"], 2),
+                "gadget_efficiency":   round(data["gadget_efficiency"], 2),
+                "utility_efficiency":  round(data["utility_efficiency"], 2),
+                "plant_success_rate":  round(data["plant_success_rate"], 2),
+                "tps":                 tps.get(pid, 0.0),
+                "consistency_stdev":   round(consistency.get(pid, 0.0), 3),
+            }
+
+        metrics["players"] = player_metrics
+
+        # ── AI intel (lazy — won't load model unless called) ──
+        try:
+            ai_result = self.intel.analyze_match(match_id)
+            metrics["ai_summary"] = ai_result.get("ai_match_summary", "")
+        except Exception as e:
+            metrics["ai_summary"] = f"[AI unavailable: {e}]"
+
+        return metrics
 
     # ============================================================
     # ROUND SAVE (MANUAL ENTRY PIPELINE)

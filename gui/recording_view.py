@@ -119,8 +119,14 @@ class RecordingView(QWidget):
         self._log.setMinimumHeight(200)
         layout.addWidget(self._log)
         layout.addStretch()
+        
+        # In _build_ui, after self._log, add:
+        self._progress_label = QLabel("")
+        self._progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._progress_label.setStyleSheet("font-size: 12px; color: #888;")
+        layout.addWidget(self._progress_label)
 
-        self._update_start_button
+        self._update_start_button()
     # =====================================================
     # OBS CONNECTION
     # =====================================================

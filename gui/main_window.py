@@ -6,7 +6,7 @@ from gui.recording_view import RecordingView
 from gui.analysis_view import AnalysisView
 from gui.settings_view import SettingsView
 from models.import_result import ImportResult
-
+from gui.export_view import ExportView
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -27,12 +27,16 @@ class MainWindow(QMainWindow):
         self.match_view     = MatchView()
         self.analysis_view  = AnalysisView(parent=self, controller=self.controller)
         self.settings_view  = SettingsView()
+        self.export_view = ExportView(parent=self, controller=self.controller)
+
 
         self.tabs.addTab(self.recording_view, "🎙 Recording")
         self.tabs.addTab(self.match_view,     "📋 Match Input")
         self.tabs.addTab(self.analysis_view,  "📊 Analysis")
         self.tabs.addTab(self.settings_view,  "⚙ Settings")
+        self.tabs.addTab(self.export_view, "📦 Export")
 
+        
         # ── Routing signals from RecordingView ─────────────────
         self.recording_view.navigate_to_analysis.connect(
             lambda match_id: self._go_to_analysis(match_id)
