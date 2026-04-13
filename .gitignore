@@ -23,3 +23,22 @@ data/models/
 *.mp4
 *.wav
 data/recordings/
+
+# PyInstaller & Build folders
+build/
+dist/
+*.spec
+
+# Python environment
+.venv/
+__pycache__/
+*.py[cod]
+
+# Data & Large Files (Don't sync these to GitHub!)
+data/models/
+*.db
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db

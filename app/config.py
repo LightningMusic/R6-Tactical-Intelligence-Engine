@@ -8,24 +8,38 @@ def _resolve_base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).parent.parent
 
-
 BASE_DIR = _resolve_base_dir()
 
-# ── Static paths (never change at runtime) ────────────────────
-DATA_DIR           = BASE_DIR / "data"
+# ── Bundle vs Data Logic ──────────────────────────────────────
+if getattr(sys, "frozen", False):
+    # Files inside the PyInstaller bundle
+    BUNDLE_DIR = BASE_DIR / "_internal"
+else:
+    # Files in your dev environment
+    BUNDLE_DIR = BASE_DIR
+
+# DATA_DIR stays at the root of the USB so models aren't deleted on update
+DATA_DIR = BASE_DIR / "data"
+
+# ── Static paths (Merged & Fixed) ─────────────────────────────
 DB_PATH            = DATA_DIR / "matches.db"
 RECORDINGS_DIR     = DATA_DIR / "recordings"
 TRANSCRIPTS_DIR    = DATA_DIR / "transcripts"
 REPORTS_DIR        = DATA_DIR / "reports"
 EXPORTS_DIR        = BASE_DIR / "exports"
-DATABASE_DIR       = BASE_DIR / "database"
-SCHEMA_PATH        = DATABASE_DIR / "schema.sql"
-INTEGRATION_DIR    = BASE_DIR / "integration"
-R6_DISSECT_PATH    = INTEGRATION_DIR / "bin" / "r6-dissect.exe"
 MODEL_DIR          = DATA_DIR / "models"
 MODEL_PATH         = MODEL_DIR / "model.gguf"
-WHISPER_MODEL_PATH = DATA_DIR / "models" / "whisper-base.pt"
+WHISPER_MODEL_PATH = MODEL_DIR / "whisper-base.pt"
 SETTINGS_PATH      = DATA_DIR / "settings.json"
+
+# These must use BUNDLE_DIR to find files inside _internal
+SCHEMA_PATH        = BUNDLE_DIR / "database" / "schema.sql"
+INTEGRATION_DIR    = BUNDLE_DIR / "integration"
+R6_DISSECT_PATH    = INTEGRATION_DIR / "bin" / "r6-dissect.exe"
+
+# OBS sits outside the R6Analyzer folder on the USB root
+OBS_DIR            = BASE_DIR.parent / "OBS-Studio"
+OBS_EXE_PATH       = OBS_DIR / "bin" / "64bit" / "obs64.exe"
 
 
 # ── Settings singleton ────────────────────────────────────────

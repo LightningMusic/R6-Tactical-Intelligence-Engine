@@ -133,17 +133,24 @@ class RecordingView(QWidget):
 
     def _connect_obs(self) -> None:
         self._log_message("Connecting to OBS...")
+        self._obs_status_label.setText("OBS: Launching...")
+        self._obs_status_label.setStyleSheet("color: #e0a830;")
+
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()   # show the label update immediately
+
         if self.obs.connect():
             self._obs_status_label.setText("OBS: Connected ✅")
             self._obs_status_label.setStyleSheet("color: #55e07a;")
             self._log_message("OBS connected successfully.")
             self._update_start_button()
         else:
-            self._obs_status_label.setText("OBS: Connection Failed ❌")
+            self._obs_status_label.setText("OBS: Failed ❌")
             self._obs_status_label.setStyleSheet("color: #e05555;")
             self._log_message(
-                "Could not connect to OBS. Check that OBS is open "
-                "and obs-websocket is enabled."
+                "Could not connect to OBS.\n"
+                "Check that OBS-Studio\\ is on the USB next to R6Analyzer\\\n"
+                "and that obs-websocket is enabled with the correct password."
             )
 
     # =====================================================
