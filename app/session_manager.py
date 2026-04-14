@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 import time
 
 from integration.rec_importer import RecImporter
@@ -9,11 +9,9 @@ from models.import_result import ImportResult, ImportStatus
 
 class SessionManager:
     """
-    Handles recording session lifecycle:
-    - Snapshot the R6 replay folder
-    - Detect new match folders after session ends
-    - Wait for file stability before importing
-    - Transcribe the session audio and clip to each match window
+    Handles recording session lifecycle.
+    Auto-creates a DB match record for every ImportResult that has rounds,
+    whether SUCCESS or PARTIAL_FAILURE — so manual entry can always save.
     """
 
     def __init__(
@@ -45,33 +43,136 @@ class SessionManager:
     # SESSION END
     # =====================================================
 
-    def end_session(self) -> list[ImportResult]:
+    def end_session(
+        self,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> list[ImportResult]:
+
+        def log(msg: str) -> None:
+            print(f"[SessionManager] {msg}")
+            if status_callback:
+                status_callback(msg)
+
+        log("Scanning for new match folders...")
         current_folders = self._scan_match_folders()
         new_folders     = current_folders - self._snapshot
 
         if not new_folders:
+            log("No new match folders found.")
             return [ImportResult(
                 status=ImportStatus.CRITICAL_FAILURE,
                 error_message="No new match folders detected since session start.",
             )]
 
+        log(f"Found {len(new_folders)} new folder(s). Checking stability...")
         stable_folders = self._filter_stable_folders(new_folders)
 
         if not stable_folders:
+            log("Folders found but not yet stable — try stopping again in a moment.")
             return [ImportResult(
                 status=ImportStatus.CRITICAL_FAILURE,
                 error_message="New folders found but none were stable enough to read.",
             )]
 
-        results = self.importer.import_multiple_folders(stable_folders)
+        log(f"Importing {len(stable_folders)} stable folder(s)...")
 
+        # Pass log callback into importer so UI log updates during parsing
+        self.importer._log = log
+        results = self.importer.import_multiple_folders(
+            stable_folders, log_callback=log
+        )
+
+        # ── Auto-create match records for anything with rounds ──
+        log("Creating match records...")
+        self._auto_create_matches(results, log)
+
+        # ── Transcription ─────────────────────────────────────
         if self.transcribe and self.recording_path:
+            log("Starting transcription (this may take a few minutes)...")
             try:
-                self._run_transcription(results, stable_folders)
+                self._run_transcription(results, stable_folders, log_callback=log)
             except Exception as e:
-                print(f"[SessionManager] Transcription failed (non-fatal): {e}")
+                log(f"Transcription failed (non-fatal): {e}")
 
         return results
+
+    # =====================================================
+    # AUTO-CREATE MATCH RECORDS
+    # =====================================================
+
+    def _auto_create_matches(
+        self,
+        results: list[ImportResult],
+        log: Callable[[str], None],
+    ) -> None:
+        """
+        For every result that has at least one parsed round,
+        create a match record in the DB and attach the match_id
+        to the result. Works for both SUCCESS and PARTIAL_FAILURE.
+        """
+        from database.repositories import Repository
+        from models.match import Match
+        from datetime import datetime
+
+        repo = Repository()
+
+        for result in results:
+            if not result.rounds:
+                log(f"  Skipping match creation — no rounds parsed.")
+                continue
+            if result.match_id is not None:
+                log(f"  Match {result.match_id} already exists.")
+                continue
+
+            # Resolve map name
+            map_name = result.map_name or "Unknown"
+            if map_name and map_name.startswith("Map("):
+                map_name = "Unknown"   # unresolved numeric ID
+
+            try:
+                # Resolve map_id if possible
+                map_id = repo.get_map_id_by_name(map_name)
+
+                match = Match(
+                    match_id=None,
+                    datetime_played=datetime.now(),
+                    opponent_name="Imported",
+                    map=map_name,
+                    result=None,
+                    recording_path=str(self.recording_path)
+                        if self.recording_path else None,
+                    rounds=[],
+                )
+                match_id = repo.insert_match(match)
+                result.match_id = match_id
+                result.map_id   = map_id
+
+                # Insert rounds
+                for round_obj in result.rounds:
+                    round_obj.match_id = match_id
+                    from models.round_resources import RoundResources
+                    if round_obj.side == "attack":
+                        resources = RoundResources(
+                            resource_id=None, round_id=0, side="attack",
+                            team_drones_start=10, team_drones_lost=0,
+                            team_reinforcements_start=0, team_reinforcements_used=0,
+                        )
+                    else:
+                        resources = RoundResources(
+                            resource_id=None, round_id=0, side="defense",
+                            team_drones_start=0, team_drones_lost=0,
+                            team_reinforcements_start=10, team_reinforcements_used=0,
+                        )
+                    round_id = repo.insert_round(round_obj, match_id)
+                    repo.insert_round_resources(resources, round_id)
+
+                log(
+                    f"  ✓ Created match {match_id}: {map_name} "
+                    f"({len(result.rounds)} rounds)"
+                )
+
+            except Exception as e:
+                log(f"  ✗ Failed to create match record: {e}")
 
     # =====================================================
     # TRANSCRIPTION
@@ -81,6 +182,7 @@ class SessionManager:
         self,
         results: list[ImportResult],
         folders: list[Path],
+        log_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         from analysis.timeline_aligner import TimelineAligner
         from analysis.transcript_parser import TranscriptParser
@@ -88,20 +190,19 @@ class SessionManager:
         import json
 
         if self._transcriber is None:
+            if log_callback:
+                log_callback("Loading Whisper model...")
             self._transcriber = WhisperTranscriber()
 
         if self.recording_path is None:
             return
 
-        print("[SessionManager] Starting transcription of session audio...")
         full_result = self._transcriber.transcribe(self.recording_path)
-
-        aligner = TimelineAligner()
-        parser  = TranscriptParser()
-        repo    = Repository()
+        aligner     = TimelineAligner()
+        parser      = TranscriptParser()
+        repo        = Repository()
 
         for i, (result, folder) in enumerate(zip(results, folders)):
-            # Initialise clipped so it's always bound before use
             clipped: dict = {"text": "", "segments": []}
 
             try:
@@ -109,19 +210,19 @@ class SessionManager:
                 clipped = self._transcriber.clip_to_match(
                     full_result, start_sec, end_sec
                 )
-                print(
-                    f"[SessionManager] Match {i+1} transcript clipped "
-                    f"({start_sec:.0f}s – {end_sec:.0f}s)"
-                )
+                if log_callback:
+                    log_callback(
+                        f"Match {i+1} transcript: "
+                        f"{start_sec:.0f}s – {end_sec:.0f}s"
+                    )
             except Exception as e:
-                print(f"[SessionManager] Clip failed for folder {folder.name}: {e}")
-                # clipped stays as the empty default — processing continues below
+                if log_callback:
+                    log_callback(f"Clip failed for {folder.name}: {e}")
 
             text     = clipped.get("text", "")
             segments = clipped.get("segments", [])
-
-            parsed  = parser.parse_segments_list(segments, match_id=result.match_id)
-            storage = parser.to_storage_dict(parsed)
+            parsed   = parser.parse_segments_list(segments, match_id=result.match_id)
+            storage  = parser.to_storage_dict(parsed)
 
             if result.match_id is not None:
                 try:
@@ -137,7 +238,7 @@ class SessionManager:
                         )
                         conn.commit()
                 except Exception as db_err:
-                    print(f"[SessionManager] Failed to store transcript: {db_err}")
+                    print(f"[SessionManager] DB transcript store failed: {db_err}")
 
             result.transcript_text     = text
             result.transcript_segments = segments

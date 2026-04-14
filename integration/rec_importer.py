@@ -1,7 +1,8 @@
 import subprocess
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import tempfile
+import os
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -39,18 +40,17 @@ MAP_ID_LOOKUP: dict[int, str] = {
     108180728456: "Donut",
 }
 
-# How many times to retry a single .rec file before giving up
-MAX_RETRIES   = 5
-RETRY_DELAY   = 1.5   # seconds between retries
-# Timeout for r6-dissect subprocess per file
-DISSECT_TIMEOUT = 60  # seconds
+MAX_RETRIES     = 5
+RETRY_DELAY     = 2.0
+DISSECT_TIMEOUT = 90
 
 
 class RecImporter:
     """
-    Parses one or more match replay folders using r6-dissect.
-    Retries each file up to MAX_RETRIES times before marking partial failure.
-    Never stops early — always processes every file it can.
+    Parses match replay folders using r6-dissect.
+    Uses temp file output (more reliable than stdout capture).
+    Sequential processing only — no threads (avoids UI deadlocks).
+    Retries each file up to MAX_RETRIES times.
     """
 
     def __init__(
@@ -63,12 +63,11 @@ class RecImporter:
 
         if not self.dissect_path.exists():
             raise FileNotFoundError(
-                f"r6-dissect not found at {self.dissect_path}\n"
-                f"Expected: {self.dissect_path}"
+                f"r6-dissect not found at {self.dissect_path}"
             )
 
     # =====================================================
-    # PUBLIC: Single folder
+    # PUBLIC: Single folder — sequential
     # =====================================================
 
     def import_match_folder(self, folder: Path) -> ImportResult:
@@ -83,18 +82,20 @@ class RecImporter:
 
         self._log(f"Found {len(rec_files)} .rec file(s) in {folder.name}")
 
-        parsed_rounds:  list[Round] = []
-        failed_files:   list[str]   = []
-        map_name:       Optional[str] = None
-        score_us:       Optional[int] = None
-        score_them:     Optional[int] = None
+        parsed_rounds: list[Round] = []
+        failed_files:  list[str]  = []
+        map_name:      Optional[str] = None
+        score_us:      Optional[int] = None
+        score_them:    Optional[int] = None
 
         for rec_file in rec_files:
             self._log(f"  Parsing {rec_file.name}...")
             raw, err = self._run_dissect_with_retry(rec_file)
 
             if raw is None:
-                self._log(f"  ✗ {rec_file.name} failed after {MAX_RETRIES} attempts: {err}")
+                self._log(
+                    f"  ✗ {rec_file.name} — all {MAX_RETRIES} attempts failed: {err}"
+                )
                 failed_files.append(rec_file.name)
                 continue
 
@@ -104,26 +105,26 @@ class RecImporter:
 
                 if map_name is None and meta.get("map_name"):
                     map_name = meta["map_name"]
-                    self._log(f"  Map detected: {map_name}")
+                    self._log(f"  Map: {map_name}")
                 if score_us is None and meta.get("score_us") is not None:
                     score_us = meta["score_us"]
                 if score_them is None and meta.get("score_them") is not None:
                     score_them = meta["score_them"]
 
                 self._log(
-                    f"  ✓ {rec_file.name} → Round {round_obj.round_number} "
+                    f"  ✓ R{round_obj.round_number} "
                     f"| {round_obj.side} | {round_obj.outcome}"
+                    f" | site: {round_obj.site or '?'}"
                 )
 
             except Exception as parse_err:
-                self._log(f"  ✗ {rec_file.name} parse error: {parse_err}")
+                self._log(f"  ✗ {rec_file.name} — parse error: {parse_err}")
                 failed_files.append(rec_file.name)
 
-        # ── Determine final status ────────────────────────────
         if not parsed_rounds:
             msg = (
-                f"All {len(rec_files)} rounds failed to parse in {folder.name}.\n"
-                f"Failed files: {', '.join(failed_files)}"
+                f"All {len(rec_files)} files failed in {folder.name}. "
+                f"Failed: {', '.join(failed_files)}"
             )
             self._log(f"CRITICAL: {msg}")
             return ImportResult(
@@ -140,11 +141,9 @@ class RecImporter:
             self._log(f"PARTIAL: {msg}")
             status = ImportStatus.PARTIAL_FAILURE
         else:
-            msg = None
+            msg    = None
             status = ImportStatus.SUCCESS
-            self._log(
-                f"SUCCESS: {len(parsed_rounds)} rounds parsed from {folder.name}"
-            )
+            self._log(f"SUCCESS: {len(parsed_rounds)} rounds from {folder.name}")
 
         return ImportResult(
             status=status,
@@ -156,116 +155,191 @@ class RecImporter:
         )
 
     # =====================================================
-    # PUBLIC: Multiple folders (parallel)
+    # PUBLIC: Multiple folders — sequential, no threads
     # =====================================================
 
     def import_multiple_folders(
         self,
         folders: list[Path],
-        max_workers: int = 2,   # lowered from 4 — USB I/O is the bottleneck
+        max_workers: int = 1,       # ignored — always sequential
+        log_callback: Optional[Callable[[str], None]] = None,
     ) -> list[ImportResult]:
-        results: dict[int, ImportResult] = {}
+        results: list[ImportResult] = []
 
-        self._log(
-            f"Starting import of {len(folders)} folder(s) "
-            f"with {max_workers} worker(s)..."
-        )
+        msg = f"Importing {len(folders)} folder(s) sequentially..."
+        self._log(msg)
+        if log_callback:
+            log_callback(msg)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {
-                executor.submit(self.import_match_folder, folder): i
-                for i, folder in enumerate(folders)
-            }
+        for i, folder in enumerate(folders):
+            msg = f"Processing folder {i+1}/{len(folders)}: {folder.name}"
+            self._log(msg)
+            if log_callback:
+                log_callback(msg)
 
-            for future in as_completed(future_map):
-                index = future_map[future]
-                try:
-                    results[index] = future.result()
-                except Exception as e:
-                    self._log(f"Worker exception for folder #{index}: {e}")
-                    results[index] = ImportResult(
-                        status=ImportStatus.CRITICAL_FAILURE,
-                        error_message=str(e),
-                    )
+            result = self.import_match_folder(folder)
+            results.append(result)
 
-        return [results[i] for i in range(len(folders))]
+            summary = (
+                f"Folder {i+1} done: {result.status.value} "
+                f"— {len(result.rounds)} rounds"
+            )
+            self._log(summary)
+            if log_callback:
+                log_callback(summary)
+
+        return results
 
     # =====================================================
-    # INTERNAL: Run dissect with retry
+    # INTERNAL: Run r6-dissect via temp file output
     # =====================================================
 
     def _run_dissect_with_retry(
         self, rec_file: Path
     ) -> tuple[Optional[dict], Optional[str]]:
-        """
-        Runs r6-dissect on a single file, retrying up to MAX_RETRIES times.
-        Returns (parsed_dict, None) on success or (None, error_string) on failure.
-        """
         last_error = "Unknown error"
 
         for attempt in range(1, MAX_RETRIES + 1):
             if attempt > 1:
-                self._log(
-                    f"    Retry {attempt}/{MAX_RETRIES} for {rec_file.name}..."
-                )
+                self._log(f"    Retry {attempt}/{MAX_RETRIES}...")
                 time.sleep(RETRY_DELAY)
+
+            tmp_path = Path(tempfile.mktemp(suffix=".json"))
 
             try:
                 proc = subprocess.run(
-                    [str(self.dissect_path), str(rec_file), "--format", "json"],
+                    [
+                        str(self.dissect_path),
+                        str(rec_file),
+                        "--format", "json",
+                        "--output", str(tmp_path),
+                    ],
                     capture_output=True,
                     text=True,
                     timeout=DISSECT_TIMEOUT,
+                    cwd=str(self.dissect_path.parent),
                 )
 
-                # r6-dissect sometimes exits non-zero but still outputs valid JSON
-                stdout = proc.stdout.strip()
-                stderr = proc.stderr.strip()
+                stderr = proc.stderr.strip() if proc.stderr else ""
 
-                if proc.returncode != 0 and not stdout:
-                    last_error = (
-                        f"Exit code {proc.returncode}"
-                        + (f": {stderr}" if stderr else "")
-                    )
-                    self._log(f"    Attempt {attempt} failed: {last_error}")
-                    continue
+                # ── Detect r6-dissect panic (Go runtime crash) ────
+                if "panic:" in stderr or "goroutine" in stderr:
+                    # Extract the useful part of the panic message
+                    panic_lines = [
+                        line for line in stderr.splitlines()
+                        if line.startswith("panic:") or "unknown" in line.lower()
+                    ]
+                    panic_msg = panic_lines[0] if panic_lines else stderr[:150]
 
-                if not stdout:
-                    last_error = "Empty output from r6-dissect"
-                    self._log(f"    Attempt {attempt} failed: {last_error}")
-                    continue
+                    # Check if this is an unknown operator — no point retrying
+                    if "unknown" in panic_msg.lower() or "role unknown" in panic_msg.lower():
+                        self._log(
+                            f"    r6-dissect crashed: {panic_msg}\n"
+                            f"    This is an unknown operator in your r6-dissect version.\n"
+                            f"    Fix: update r6-dissect.exe from "
+                            f"https://github.com/redraskal/r6-dissect/releases"
+                        )
+                        # No point retrying — same crash every time
+                        return None, f"r6-dissect outdated: {panic_msg}"
+                    else:
+                        last_error = f"r6-dissect panic: {panic_msg}"
+                        self._log(f"    Attempt {attempt}: {last_error}")
+                        continue
 
-                # Try to parse JSON — handle leading garbage before '{'
-                json_start = stdout.find("{")
-                if json_start == -1:
-                    last_error = "No JSON object found in output"
-                    self._log(f"    Attempt {attempt} failed: {last_error}")
-                    continue
+                # Check temp file first
+                if tmp_path.exists() and tmp_path.stat().st_size > 0:
+                    try:
+                        content = tmp_path.read_text(encoding="utf-8", errors="ignore")
+                        data = self._parse_json_safe(content, rec_file.name)
+                        if data is not None:
+                            return data, None
+                    except Exception as e:
+                        last_error = f"Temp file parse error: {e}"
+                    finally:
+                        try:
+                            tmp_path.unlink()
+                        except Exception:
+                            pass
 
-                data = json.loads(stdout[json_start:])
-                return data, None
+                # Fallback: stdout
+                stdout = proc.stdout.strip() if proc.stdout else ""
+                if stdout:
+                    data = self._parse_json_safe(stdout, rec_file.name)
+                    if data is not None:
+                        return data, None
+
+                last_error = (
+                    f"Exit {proc.returncode}"
+                    + (f" | {stderr[:200]}" if stderr else "")
+                    + (" | no output" if not stdout else "")
+                )
+                self._log(f"    Attempt {attempt}: {last_error}")
 
             except subprocess.TimeoutExpired:
-                last_error = f"r6-dissect timed out after {DISSECT_TIMEOUT}s"
-                self._log(f"    Attempt {attempt} failed: {last_error}")
-
-            except json.JSONDecodeError as e:
-                last_error = f"JSON parse error: {e}"
-                self._log(f"    Attempt {attempt} failed: {last_error}")
+                last_error = f"Timed out after {DISSECT_TIMEOUT}s"
+                self._log(f"    Attempt {attempt}: {last_error}")
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
 
             except Exception as e:
                 last_error = str(e)
-                self._log(f"    Attempt {attempt} failed: {last_error}")
+                self._log(f"    Attempt {attempt}: {last_error}")
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
 
         return None, last_error
 
+    def _parse_json_safe(
+        self, text: str, filename: str
+    ) -> Optional[dict]:
+        """
+        Parses JSON from text, handling leading garbage.
+        Returns None if no valid JSON found.
+        """
+        text = text.strip()
+        if not text:
+            return None
+
+        # Find the first '{' — skip any BOM or debug output before JSON
+        json_start = text.find("{")
+        if json_start == -1:
+            self._log(f"    No JSON object found in output for {filename}")
+            return None
+
+        try:
+            return json.loads(text[json_start:])
+        except json.JSONDecodeError as e:
+            # Try to find a complete JSON object
+            # r6-dissect sometimes writes multiple objects
+            brace_depth = 0
+            json_end    = -1
+            for i, ch in enumerate(text[json_start:], start=json_start):
+                if ch == "{":
+                    brace_depth += 1
+                elif ch == "}":
+                    brace_depth -= 1
+                    if brace_depth == 0:
+                        json_end = i + 1
+                        break
+            if json_end != -1:
+                try:
+                    return json.loads(text[json_start:json_end])
+                except json.JSONDecodeError:
+                    pass
+            self._log(f"    JSON decode error for {filename}: {e}")
+            return None
+
     # =====================================================
-    # INTERNAL: Parse one round
+    # INTERNAL: Parse one round's data
     # =====================================================
 
     def _parse_round(self, data: dict) -> tuple[Round, dict]:
-        recording_player_id             = data.get("recordingPlayerID")
-        our_team_index: Optional[int]   = None
+        recording_player_id           = data.get("recordingPlayerID")
+        our_team_index: Optional[int] = None
 
         for player in data.get("players", []):
             if player.get("id") == recording_player_id:
@@ -284,9 +358,9 @@ class RecImporter:
             won   = team.get("won", False)
 
             if our_team_index is not None and i == our_team_index:
-                score_us  = score
-                our_side  = "attack" if role == "attack" else "defense"
-                outcome   = "win" if won else "loss"
+                score_us = score
+                our_side = "attack" if role == "attack" else "defense"
+                outcome  = "win" if won else "loss"
             else:
                 score_them = score
 
@@ -294,18 +368,15 @@ class RecImporter:
         map_id_raw = map_data.get("id")
         map_name   = MAP_ID_LOOKUP.get(map_id_raw, map_data.get("name"))
 
+        # r6-dissect roundNumber is 0-indexed
         round_number = data.get("roundNumber", 0)
-
-        # roundNumber is 0-indexed in r6-dissect — convert to 1-indexed
-        if isinstance(round_number, int) and round_number == 0:
-            round_number = 1
-        elif isinstance(round_number, int):
-            round_number = round_number + 1
+        if isinstance(round_number, int):
+            round_number = round_number + 1  # always convert to 1-indexed
 
         round_obj = Round(
             round_id=None,
             match_id=None,
-            round_number=round_number,
+            round_number=max(1, round_number),
             side=our_side or "attack",
             site=data.get("site", ""),
             outcome=outcome or "loss",
@@ -313,10 +384,8 @@ class RecImporter:
             player_stats=[],
         )
 
-        meta = {
+        return round_obj, {
             "map_name":  map_name,
             "score_us":  score_us,
             "score_them": score_them,
         }
-
-        return round_obj, meta

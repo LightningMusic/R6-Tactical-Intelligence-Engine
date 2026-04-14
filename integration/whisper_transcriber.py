@@ -58,6 +58,9 @@ class WhisperTranscriber:
     def transcribe(self, audio_path: Path, language: str = "en") -> dict:
         self._load_model()
 
+        file_size = audio_path.stat().st_size / (1024 * 1024)
+        print(f"[Whisper] Processing {file_size:.1f} MB audio file...")
+        
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 

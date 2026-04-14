@@ -7,44 +7,50 @@ from PySide6.QtWidgets import (
 )
 
 from app.app_controller import AppController
-from app.config import R6_DISSECT_PATH
+from app.config import R6_DISSECT_PATH, get_replay_folder, settings
 from app.session_manager import SessionManager
 from integration.obs_controller import OBSController
 from integration.rec_importer import RecImporter
 from models.import_result import ImportResult, ImportStatus
-from app.config import R6_DISSECT_PATH, get_replay_folder
 
 
 class _ImportWorker(QObject):
     finished = Signal(list)
     error    = Signal(str)
+    progress = Signal(str)
 
-
-    def __init__(self, session_manager: SessionManager):
+    def __init__(self, session_manager: SessionManager) -> None:
         super().__init__()
         self._session = session_manager
 
     def run(self) -> None:
         try:
-            results = self._session.end_session()
+            results = self._session.end_session(
+                status_callback=lambda msg: self.progress.emit(msg)
+            )
             self.finished.emit(results)
         except Exception as e:
             self.error.emit(str(e))
 
 
 class RecordingView(QWidget):
-    navigate_to_analysis    = Signal(int)
-    navigate_to_match_input = Signal()
-    navigate_to_match_input_partial = Signal(object)  # carries ImportResult
+    navigate_to_analysis         = Signal(int)
+    navigate_to_match_input      = Signal()
+    navigate_to_match_input_partial = Signal(object)
 
-    def __init__(self, controller: AppController, parent: QWidget | None = None):
+    def __init__(
+        self,
+        controller: AppController,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.controller  = controller
-        self.obs         = OBSController()
-        self._session_active    = False
-        self._replay_folder: Path | None = get_replay_folder()
+        self.controller      = controller
+        self.obs             = OBSController()
+        self._session_active = False
+        self._replay_folder: Path | None     = get_replay_folder()
         self._session_manager: SessionManager | None = None
         self._thread: QThread | None         = None
+        self._recording_path: str | None     = None
         self._build_ui()
 
     # =====================================================
@@ -54,14 +60,14 @@ class RecordingView(QWidget):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
 
         header = QLabel("Recording Session")
         header.setStyleSheet("font-size: 22px; font-weight: bold;")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
 
-        # OBS connection row
+        # OBS row
         obs_layout = QHBoxLayout()
         self._obs_status_label = QLabel("OBS: Disconnected")
         self._obs_status_label.setStyleSheet("color: #e05555;")
@@ -71,17 +77,14 @@ class RecordingView(QWidget):
         obs_layout.addWidget(connect_btn)
         layout.addLayout(obs_layout)
 
-        # Replay folder selector row
+        # Replay folder row
         folder_layout = QHBoxLayout()
-        
-        # Update label based on whether R6_REPLAY_FOLDER was found
         if self._replay_folder:
             self._folder_label = QLabel(str(self._replay_folder))
-            self._folder_label.setStyleSheet("color: #55e07a;") # Green if found
+            self._folder_label.setStyleSheet("color: #55e07a;")
         else:
-            self._folder_label = QLabel("No replay folder found. Please select manually.")
-            self._folder_label.setStyleSheet("color: #e05555;") # Red if missing
-            self._folder_label.setToolTip("Please select the R6 replay folder manually.")
+            self._folder_label = QLabel("No replay folder found — select manually.")
+            self._folder_label.setStyleSheet("color: #e05555;")
         folder_btn = QPushButton("Change Folder")
         folder_btn.clicked.connect(self._select_folder)
         folder_layout.addWidget(self._folder_label, stretch=1)
@@ -94,7 +97,7 @@ class RecordingView(QWidget):
         self._status_label.setStyleSheet("font-size: 14px; color: #888;")
         layout.addWidget(self._status_label)
 
-        # Start / Stop
+        # Buttons
         btn_layout = QHBoxLayout()
         self._start_btn = QPushButton("▶  Start Session")
         self._start_btn.setMinimumHeight(44)
@@ -110,51 +113,51 @@ class RecordingView(QWidget):
         btn_layout.addWidget(self._stop_btn)
         layout.addLayout(btn_layout)
 
+        # Progress label
+        self._progress_label = QLabel("")
+        self._progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._progress_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        layout.addWidget(self._progress_label)
+
         # Log
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setStyleSheet(
-            "background: #1a1a1a; color: #ccc; font-family: monospace;"
+            "background: #1a1a1a; color: #ccc; font-family: monospace; font-size: 11px;"
         )
-        self._log.setMinimumHeight(200)
+        self._log.setMinimumHeight(220)
         layout.addWidget(self._log)
         layout.addStretch()
-        
-        # In _build_ui, after self._log, add:
-        self._progress_label = QLabel("")
-        self._progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._progress_label.setStyleSheet("font-size: 12px; color: #888;")
-        layout.addWidget(self._progress_label)
 
         self._update_start_button()
+
     # =====================================================
-    # OBS CONNECTION
+    # OBS
     # =====================================================
 
     def _connect_obs(self) -> None:
         self._log_message("Connecting to OBS...")
-        self._obs_status_label.setText("OBS: Launching...")
+        self._obs_status_label.setText("OBS: Connecting...")
         self._obs_status_label.setStyleSheet("color: #e0a830;")
 
         from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()   # show the label update immediately
+        QApplication.processEvents()
 
         if self.obs.connect():
             self._obs_status_label.setText("OBS: Connected ✅")
             self._obs_status_label.setStyleSheet("color: #55e07a;")
-            self._log_message("OBS connected successfully.")
-            self._update_start_button()
+            self._log_message("OBS connected.")
         else:
             self._obs_status_label.setText("OBS: Failed ❌")
             self._obs_status_label.setStyleSheet("color: #e05555;")
             self._log_message(
-                "Could not connect to OBS.\n"
-                "Check that OBS-Studio\\ is on the USB next to R6Analyzer\\\n"
-                "and that obs-websocket is enabled with the correct password."
+                "OBS connection failed. Check OBS is running and "
+                "websocket is enabled with the correct password in Settings."
             )
+        self._update_start_button()
 
     # =====================================================
-    # FOLDER SELECTION
+    # FOLDER
     # =====================================================
 
     def _select_folder(self) -> None:
@@ -170,7 +173,6 @@ class RecordingView(QWidget):
         self._update_start_button()
 
     def _update_start_button(self) -> None:
-        """Enable Start only when both OBS is connected and folder is set."""
         ready = self.obs.is_connected and self._replay_folder is not None
         self._start_btn.setEnabled(ready)
 
@@ -182,15 +184,14 @@ class RecordingView(QWidget):
         if not self._replay_folder:
             return
 
-        # Start OBS recording
         if not self.obs.start_recording():
             QMessageBox.critical(
                 self, "OBS Error",
-                "Failed to start OBS recording. Check OBS is open and the scene exists."
+                "Failed to start recording.\n"
+                "Check OBS is connected and the scene exists."
             )
             return
 
-        # Snapshot replay folder
         try:
             importer = RecImporter(dissect_path=R6_DISSECT_PATH)
         except FileNotFoundError as e:
@@ -201,17 +202,20 @@ class RecordingView(QWidget):
         self._session_manager = SessionManager(
             replay_folder=self._replay_folder,
             importer=importer,
+            transcribe=settings.TRANSCRIBE_AUTO,
+            stability_wait=settings.STABILITY_WAIT,
+            stability_checks=settings.STABILITY_CHECKS,
         )
         self._session_manager.start_session()
 
         self._session_active = True
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
-        self._set_status("🔴 Recording in progress...", "#e05555")
-        self._log_message("Session started. OBS recording. Snapshot taken.")
+        self._set_status("🔴 Recording...", "#e05555")
+        self._log_message("Session started. OBS recording. Folder snapshot taken.")
 
     # =====================================================
-    # SESSION STOP + IMPORT
+    # SESSION STOP
     # =====================================================
 
     def _stop_session(self) -> None:
@@ -219,33 +223,35 @@ class RecordingView(QWidget):
             return
 
         self._stop_btn.setEnabled(False)
-        self._set_status("⏳ Stopping OBS and importing...", "#e0a830")
+        self._set_status("⏳ Stopping OBS...", "#e0a830")
 
-        # Stop OBS — save the recording path for later use
         recording_path = self.obs.stop_recording()
-        self._session_manager.recording_path = (
-            Path(recording_path) if recording_path else None
-        )
         if recording_path:
-            self._log_message(f"OBS recording saved: {recording_path}")
+            self._recording_path = recording_path
+            self._session_manager.recording_path = Path(recording_path)
+            self._log_message(f"Recording saved: {recording_path}")
         else:
             self._log_message("Warning: OBS did not return a recording path.")
 
-        self._recording_path = recording_path
-        self._log_message("Detecting new replay folders...")
+        self._set_status("⏳ Importing replays...", "#e0a830")
+        self._log_message("Starting import...")
 
-        # Run import in background thread
         self._thread = QThread()
         self._worker = _ImportWorker(self._session_manager)
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_import_finished)
         self._worker.error.connect(self._on_import_error)
         self._worker.finished.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
 
         self._thread.start()
+
+    def _on_progress(self, msg: str) -> None:
+        self._progress_label.setText(msg)
+        self._log_message(msg)
 
     # =====================================================
     # IMPORT RESULT HANDLING
@@ -254,81 +260,74 @@ class RecordingView(QWidget):
     def _on_import_finished(self, results: list) -> None:
         self._session_active = False
         self._start_btn.setEnabled(True)
-        self._set_status("✅ Import complete.", "#55e07a")
+        self._progress_label.setText("")
 
         if not results:
             self._log_message("No results returned.")
+            self._set_status("❌ No results.", "#e05555")
             self.navigate_to_match_input.emit()
             return
 
-        for result in results:
-            result: ImportResult
-            self._log_message(f"Result: {result.status.value}")
-            if result.error_message:
-                self._log_message(f"  ↳ {result.error_message}")
+        self._set_status("✅ Import complete.", "#55e07a")
 
         statuses = {r.status for r in results}
 
-        if ImportStatus.CRITICAL_FAILURE in statuses:
-            self._log_message("Critical failure — routing to Manual Entry.")
+        # Log summary
+        for r in results:
+            self._log_message(
+                f"  {r.status.value}: {len(r.rounds)} rounds"
+                + (f" | match_id={r.match_id}" if r.match_id else "")
+                + (f" | {r.error_message}" if r.error_message else "")
+            )
+
+        if ImportStatus.CRITICAL_FAILURE in statuses and all(
+            r.status == ImportStatus.CRITICAL_FAILURE for r in results
+        ):
+            # Everything failed — no match created
+            self._log_message("All imports critically failed — going to Manual Entry.")
             QMessageBox.warning(
                 self, "Import Failed",
-                "One or more replays could not be imported.\n"
-                "You will be routed to Manual Entry."
+                "Could not parse any replays.\n"
+                "Going to Manual Entry — create a match manually."
             )
             self.navigate_to_match_input.emit()
+            return
 
-        elif ImportStatus.PARTIAL_FAILURE in statuses:
-            partial_result = next(
-                r for r in results if r.status == ImportStatus.PARTIAL_FAILURE
-            )
-            self._log_message("Partial failure — routing to Manual Entry with pre-fill.")
-            QMessageBox.warning(
-                self, "Partial Import",
-                "Some data could not be parsed.\nPre-filling what was recovered."
-            )
-            self.navigate_to_match_input_partial.emit(partial_result)
+        # At least some rounds parsed — match records were auto-created
+        # Find the best result to route with
+        success_results = [r for r in results if r.status == ImportStatus.SUCCESS]
+        partial_results = [r for r in results if r.status == ImportStatus.PARTIAL_FAILURE]
 
-        else:
-            try:
-                last_match_id = self._save_results(results)
+        if success_results:
+            last_match_id = success_results[-1].match_id
+            if last_match_id is not None:
                 self._log_message(
-                    f"All matches saved. Routing to Analysis (match {last_match_id})."
+                    f"Routing to Analysis (match {last_match_id})."
                 )
                 self.navigate_to_analysis.emit(last_match_id)
-            except Exception as e:
-                self._log_message(f"Save error: {e}")
-                QMessageBox.critical(self, "Save Error", str(e))
+            else:
                 self.navigate_to_match_input.emit()
+        elif partial_results:
+            partial = partial_results[0]
+            self._log_message(
+                f"Partial import — routing to Manual Entry "
+                f"(match {partial.match_id} pre-created)."
+            )
+            QMessageBox.information(
+                self, "Partial Import",
+                f"Parsed {len(partial.rounds)} rounds.\n"
+                f"Match record created — you can save rounds directly.\n"
+                f"Missing data shown in Manual Entry."
+            )
+            self.navigate_to_match_input_partial.emit(partial)
 
     def _on_import_error(self, message: str) -> None:
         self._session_active = False
         self._start_btn.setEnabled(True)
-        self._set_status("❌ Import error.", "#e05555")
+        self._set_status("❌ Error.", "#e05555")
         self._log_message(f"Error: {message}")
         QMessageBox.critical(self, "Import Error", message)
         self.navigate_to_match_input.emit()
-
-    # =====================================================
-    # SAVE RESULTS TO DB
-    # =====================================================
-
-    def _save_results(self, results: list) -> int:
-        last_match_id = -1
-        for result in results:
-            result: ImportResult
-            if not result.is_success:
-                continue
-            # Attach the OBS recording path to the first match saved
-            if hasattr(self, "_recording_path") and self._recording_path:
-                result.recording_path = self._recording_path
-                self._recording_path = None  # only attach to first match
-            match_id = self.controller.save_imported_match(result)
-            last_match_id = match_id
-
-        if last_match_id == -1:
-            raise RuntimeError("No matches were saved successfully.")
-        return last_match_id
 
     # =====================================================
     # HELPERS
@@ -340,3 +339,6 @@ class RecordingView(QWidget):
 
     def _log_message(self, message: str) -> None:
         self._log.append(message)
+        # Auto-scroll to bottom
+        sb = self._log.verticalScrollBar()
+        sb.setValue(sb.maximum())
