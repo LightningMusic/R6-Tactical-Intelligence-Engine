@@ -153,8 +153,11 @@ class MatchView(QWidget):
         # ── Resource spinboxes — always visible, relabel on side change ──
         res_row = QHBoxLayout()
         self.drones_label = QLabel("Drones Lost:")
-        self.drones_spin  = QSpinBox()
-        self.drones_spin.setRange(0, 10)
+        self.drones_spin = QComboBox()
+        for i in range(11):
+            self.drones_spin.addItem(str(i), i)
+
+        
         self.drones_spin.setFixedWidth(55)
         res_row.addWidget(self.drones_label)
         res_row.addWidget(self.drones_spin)
@@ -162,13 +165,15 @@ class MatchView(QWidget):
         res_row.addSpacing(20)
 
         self.reinf_label = QLabel("Reinforcements Used:")
-        self.reinf_spin  = QSpinBox()
-        self.reinf_spin.setRange(0, 10)
+        self.reinf_spin = QComboBox()
+        for i in range(11):
+            self.reinf_spin.addItem(str(i), i)
+        
         self.reinf_spin.setFixedWidth(55)
         res_row.addWidget(self.reinf_label)
         res_row.addWidget(self.reinf_spin)
         res_row.addStretch()
-        meta_form.addRow("Resources:", res_row)
+        meta_form.addRow("", res_row)
 
         layout.addWidget(meta_group)
 
@@ -184,6 +189,8 @@ class MatchView(QWidget):
         self.setup_table(self.enemy_table)
         self.enemy_table.setMinimumHeight(260)
         self.tabs.addTab(self.enemy_table, "Enemies")
+
+        self.tabs.currentChanged.connect(self._update_resource_widgets)
 
         layout.addWidget(self.tabs)
 
@@ -208,34 +215,57 @@ class MatchView(QWidget):
     # ============================================================
 
     def _update_resource_widgets(self) -> None:
-        """Both spinboxes always shown. Active one is bold, inactive is dimmed."""
-        if self.side_selector.currentText() == "attack":
-            self.drones_label.setStyleSheet("font-weight: bold; color: #fff;")
-            self.drones_spin.setEnabled(True)
-            self.reinf_label.setStyleSheet("color: #555;")
-            self.reinf_spin.setEnabled(False)
-            self.reinf_spin.setValue(0)
-        else:
-            self.reinf_label.setStyleSheet("font-weight: bold; color: #fff;")
-            self.reinf_spin.setEnabled(True)
-            self.drones_label.setStyleSheet("color: #555;")
-            self.drones_spin.setEnabled(False)
-            self.drones_spin.setValue(0)
+        side = self.side_selector.currentText()
+        # Get the current tab index: 0 is Team, 1 is Enemies
+        current_tab = self.tabs.currentIndex()
+
+        # Reset general enabling
+        self.drones_spin.setEnabled(True)
+        self.reinf_spin.setEnabled(True)
+
+        if side == "attack":
+            # If viewing Team (Attacking)
+            if current_tab == 0:
+                self.drones_label.setText("Team Drones Lost:")
+                self.reinf_label.setText("Enemy Reinforcements:")
+                self.reinf_spin.setCurrentIndex(0)
+                self.reinf_spin.setEnabled(False)
+            # If viewing Enemies (Defending)
+            else:
+                self.drones_label.setText("Team Drones Lost:")
+                self.reinf_label.setText("Enemy Reinforcements:")
+                self.drones_spin.setCurrentIndex(0)
+                self.drones_spin.setEnabled(False)
+
+        else: # side == "defense"
+            # If viewing Team (Defending)
+            if current_tab == 0:
+                self.drones_label.setText("Enemy Drones:")
+                self.reinf_label.setText("Team Reinforcements Used:")
+                self.drones_spin.setCurrentIndex(0)
+                self.drones_spin.setEnabled(False)
+            # If viewing Enemies (Attacking)
+            else:
+                self.drones_label.setText("Enemy Drones:")
+                self.reinf_label.setText("Team Reinforcements Used:")
+                self.reinf_spin.setCurrentIndex(0)
+                self.reinf_spin.setEnabled(False)
 
     # ============================================================
     # HEADER LABELS
     # ============================================================
 
     def update_objective_headers(self) -> None:
-        team_side  = self.side_selector.currentText()
+        team_side = self.side_selector.currentText()
         enemy_side = "defense" if team_side == "attack" else "attack"
 
-        def labels(side: str) -> tuple[str, str]:
-            return ("Plant Attempted", "Plant Successful") \
-                if side == "attack" else ("Defuse Attempted", "Defuse Successful")
+        # Correct labels based on role
+        t_atk_labels = ("Plant Attempted", "Plant Successful")
+        t_def_labels = ("Defuse Attempted", "Defuse Successful")
 
-        ta, ts = labels(team_side)
-        ea, es = labels(enemy_side)
+        ta, ts = t_atk_labels if team_side == "attack" else t_def_labels
+        ea, es = t_atk_labels if enemy_side == "attack" else t_def_labels
+
         self.team_table.setHorizontalHeaderItem(11, QTableWidgetItem(ta))
         self.team_table.setHorizontalHeaderItem(12, QTableWidgetItem(ts))
         self.enemy_table.setHorizontalHeaderItem(11, QTableWidgetItem(ea))
@@ -655,12 +685,13 @@ class MatchView(QWidget):
             "player_stats": [],
         }
 
+        # Force strict 0-values to satisfy Database Check Constraints
         if side == "attack":
-            round_data["team_drones_lost"]        = self.drones_spin.value()
-            round_data["team_reinforcements_used"] = 0
+            round_data["team_drones_lost"] = self.drones_spin.currentData()
+            round_data["team_reinforcements_used"] = 0 
         else:
-            round_data["team_drones_lost"]         = 0
-            round_data["team_reinforcements_used"] = self.reinf_spin.value()
+            round_data["team_drones_lost"] = 0
+            round_data["team_reinforcements_used"] = self.reinf_spin.currentData()
 
         for row, player in enumerate(self.players):
             table  = self.team_table
@@ -717,8 +748,8 @@ class MatchView(QWidget):
             self.controller.save_round(round_data)
             self.round_number_spin.setValue(self.round_number_spin.value() + 1)
             self.outcome_selector.setCurrentIndex(0)
-            self.drones_spin.setValue(0)
-            self.reinf_spin.setValue(0)
+            self.drones_spin.setCurrentIndex(0)
+            self.reinf_spin.setCurrentIndex(0)
             QMessageBox.information(self, "Saved", "Round saved!")
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
