@@ -5,6 +5,7 @@ import time
 from integration.rec_importer import RecImporter
 from integration.whisper_transcriber import WhisperTranscriber
 from models.import_result import ImportResult, ImportStatus
+from models.round_resources import RoundResources
 
 
 class SessionManager:
@@ -150,18 +151,22 @@ class SessionManager:
                 # Insert rounds
                 for round_obj in result.rounds:
                     round_obj.match_id = match_id
-                    from models.round_resources import RoundResources
+
                     if round_obj.side == "attack":
                         resources = RoundResources(
                             resource_id=None, round_id=0, side="attack",
-                            team_drones_start=10, team_drones_lost=0,
-                            team_reinforcements_start=0, team_reinforcements_used=0,
+                            team_drones_start=10,        # ← must be 10, schema CHECK constraint
+                            team_drones_lost=0,
+                            team_reinforcements_start=10, # ← must be 10 too
+                            team_reinforcements_used=0,
                         )
                     else:
                         resources = RoundResources(
                             resource_id=None, round_id=0, side="defense",
-                            team_drones_start=0, team_drones_lost=0,
-                            team_reinforcements_start=10, team_reinforcements_used=0,
+                            team_drones_start=10,        # ← must be 10
+                            team_drones_lost=0,
+                            team_reinforcements_start=10, # ← must be 10
+                            team_reinforcements_used=0,
                         )
                     round_id = repo.insert_round(round_obj, match_id)
                     repo.insert_round_resources(resources, round_id)

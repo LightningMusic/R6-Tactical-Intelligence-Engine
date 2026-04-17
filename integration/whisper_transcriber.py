@@ -67,12 +67,20 @@ class WhisperTranscriber:
         print(f"[Whisper] Transcribing {audio_path.name}...")
 
         import whisper
-        result: dict = self._model.transcribe(  # type: ignore[union-attr]
-            str(audio_path),
-            language=language,
-            verbose=False,
-            fp16=False,
-        )
+        import sys
+        from contextlib import redirect_stdout
+        import os
+
+        # We use redirect_stdout to ensure that if Whisper tries to 'write' 
+        # progress to a broken stream, it goes to devnull instead.
+        with open(os.devnull, 'w') as fnull:
+            with redirect_stdout(fnull):
+                result: dict = self._model.transcribe(  # type: ignore[union-attr]
+                    str(audio_path),
+                    language=language,
+                    verbose=None, # Changed from False to None to let it use default internal handling
+                    fp16=False,
+                )
 
         print(f"[Whisper] Done. {len(result.get('segments', []))} segments.")
         return result

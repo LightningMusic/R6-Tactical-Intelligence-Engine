@@ -18,6 +18,8 @@ class MetricsEngine:
 
     def _all_player_stats(self):
         for r in self.match.rounds:
+            if not r.player_stats:
+                continue   # imported rounds have no stats yet
             for p in r.player_stats:
                 yield r, p
 
@@ -41,7 +43,13 @@ class MetricsEngine:
         return self._safe_div(wins, len(rounds))
 
     def average_team_engagement_win_rate(self) -> float:
-        rates = [r.team_engagement_win_rate() for r in self.match.rounds]
+        rates = [
+            r.team_engagement_win_rate()
+            for r in self.match.rounds
+            if r.player_stats  # skip rounds with no stats
+        ]
+        if not rates:
+            return 0.0
         return self._safe_div(sum(rates), len(rates))
 
     # ============================================================
@@ -137,8 +145,20 @@ class MetricsEngine:
             r for r in self.match.rounds
             if r.side == "attack" and r.resources is not None
         ]
-        total_start = sum(r.resources.team_drones_start for r in rounds)  # type: ignore[union-attr]
-        total_lost  = sum(r.resources.team_drones_lost  for r in rounds)  # type: ignore[union-attr]
+        if not rounds:
+            return 0.0
+
+        total_start = 0
+        total_lost = 0
+        
+        for r in rounds:
+            # By checking here again or using the filtered list, 
+            # we ensure Pylance knows 'resources' is present.
+            res = r.resources
+            if res:
+                total_start += res.team_drones_start
+                total_lost += res.team_drones_lost
+                
         return 1.0 - self._safe_div(total_lost, total_start)
 
     def reinforcement_usage_rate(self) -> float:
@@ -146,8 +166,18 @@ class MetricsEngine:
             r for r in self.match.rounds
             if r.side == "defense" and r.resources is not None
         ]
-        total_start = sum(r.resources.team_reinforcements_start for r in rounds)  # type: ignore[union-attr]
-        total_used  = sum(r.resources.team_reinforcements_used  for r in rounds)  # type: ignore[union-attr]
+        if not rounds:
+            return 0.0
+
+        total_start = 0
+        total_used = 0
+        
+        for r in rounds:
+            res = r.resources
+            if res:
+                total_start += res.team_reinforcements_start
+                total_used += res.team_reinforcements_used
+                
         return self._safe_div(total_used, total_start)
 
     # ============================================================

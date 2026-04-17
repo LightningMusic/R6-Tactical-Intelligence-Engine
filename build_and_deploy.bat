@@ -57,19 +57,25 @@ if "%USB_DRIVE%"=="" (
     pause & exit /b 1
 )
 
-REM ── Copy build to USB ─────────────────────────────────────────
-echo [3/4] Copying build to %USB_DEST%...
-if exist "%USB_DEST%" (
-    echo      Removing old build...
-    rmdir /s /q "%USB_DEST%"
-)
-xcopy "%DIST_DIR%" "%USB_DEST%\" /e /i /h /y /q
-if errorlevel 1 (
-    echo [ERROR] Copy failed. Check USB is writable.
+REM ── Copy build to USB (CLEAN UPDATE + PRESERVE DATA) ──────────
+echo [3/4] Syncing build to %USB_DEST%...
+if not exist "%USB_DEST%" mkdir "%USB_DEST%"
+
+REM /PURGE : Deletes destination files/folders that no longer exist in source (Nukes old code)
+REM /XF    : Excludes specific FILES from being deleted or overwritten (settings.json)
+REM /XD    : Excludes specific FOLDERS from being deleted (recordings, transcripts, reports)
+REM /E     : Copies subdirectories, including empty ones
+REM /XO    : Excludes older files
+
+robocopy "%DIST_DIR%" "%USB_DEST%" /E /PURGE /XO /R:3 /W:5 ^
+    /XF settings.json matches.db ^
+    /XD recordings transcripts reports data
+
+if errorlevel 8 (
+    echo [ERROR] Robocopy encountered a serious error.
     pause & exit /b 1
 )
-echo [OK] Build copied.
-echo.
+echo [OK] Build synced. Old files purged, personal data preserved.
 
 REM ── Copy model files if they exist ───────────────────────────
 echo [4/4] Copying model files...
