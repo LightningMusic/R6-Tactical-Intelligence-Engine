@@ -1,4 +1,6 @@
 import os
+import sys
+import io
 import time
 from typing import TYPE_CHECKING, Optional, Callable
 
@@ -48,11 +50,18 @@ class IntelEngine:
         if self._llm is not None:
             return
 
+
+        if sys.stdout is None:
+            sys.stdout = io.StringIO()
+        if sys.stderr is None:
+            sys.stderr = io.StringIO()
+
         if not MODEL_PATH.exists():
             raise FileNotFoundError(
                 f"No model found at {MODEL_PATH}\n"
                 "Place a Q4_K_M .gguf file there and rename it to 'model.gguf'."
             )
+        # ... rest of the method unchanged
 
         try:
             from llama_cpp import Llama

@@ -1,4 +1,7 @@
 import warnings
+import whisper
+import sys
+import io
 from pathlib import Path
 
 from app.config import TRANSCRIPTS_DIR, WHISPER_MODEL_PATH
@@ -30,13 +33,18 @@ class WhisperTranscriber:
                 "Run: pip install openai-whisper"
             )
 
+        # Guard against None stdout in windowed exe mode
+        if sys.stdout is None:
+            sys.stdout = io.StringIO()
+        if sys.stderr is None:
+            sys.stderr = io.StringIO()
+
         from app.config import settings
 
         if not WHISPER_MODEL_PATH.exists():
             raise FileNotFoundError(
                 f"Whisper model not found at {WHISPER_MODEL_PATH}\n"
-                "Place whisper-base.pt in data/models/ — "
-                "see setup instructions."
+                "Place whisper-base.pt in data/models/ — see setup instructions."
             )
 
         size = settings.WHISPER_MODEL_SIZE
@@ -58,29 +66,26 @@ class WhisperTranscriber:
     def transcribe(self, audio_path: Path, language: str = "en") -> dict:
         self._load_model()
 
-        file_size = audio_path.stat().st_size / (1024 * 1024)
-        print(f"[Whisper] Processing {file_size:.1f} MB audio file...")
-        
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-        print(f"[Whisper] Transcribing {audio_path.name}...")
+        file_size = audio_path.stat().st_size / (1024 * 1024)
+        print(f"[Whisper] Transcribing {audio_path.name} ({file_size:.1f} MB)...")
 
-        import whisper
-        import sys
-        from contextlib import redirect_stdout
-        import os
 
-        # We use redirect_stdout to ensure that if Whisper tries to 'write' 
-        # progress to a broken stream, it goes to devnull instead.
-        with open(os.devnull, 'w') as fnull:
-            with redirect_stdout(fnull):
-                result: dict = self._model.transcribe(  # type: ignore[union-attr]
-                    str(audio_path),
-                    language=language,
-                    verbose=None, # Changed from False to None to let it use default internal handling
-                    fp16=False,
-                )
+        # Replace None stdout/stderr with a no-op buffer so Whisper's
+        # internal tqdm progress bars don't crash on windowed exe mode
+        if sys.stdout is None:
+            sys.stdout = io.StringIO()
+        if sys.stderr is None:
+            sys.stderr = io.StringIO()
+
+        result: dict = self._model.transcribe(  # type: ignore[union-attr]
+            str(audio_path),
+            language=language,
+            verbose=False,
+            fp16=False,
+        )
 
         print(f"[Whisper] Done. {len(result.get('segments', []))} segments.")
         return result

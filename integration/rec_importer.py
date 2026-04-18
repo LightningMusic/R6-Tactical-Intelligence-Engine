@@ -222,26 +222,23 @@ class RecImporter:
 
                 stderr = proc.stderr.strip() if proc.stderr else ""
 
-                # ── Detect r6-dissect panic (Go runtime crash) ────
                 if "panic:" in stderr or "goroutine" in stderr:
-                    # Extract the useful part of the panic message
                     panic_lines = [
                         line for line in stderr.splitlines()
                         if line.startswith("panic:") or "unknown" in line.lower()
                     ]
                     panic_msg = panic_lines[0] if panic_lines else stderr[:150]
 
-                    # Check if this is an unknown operator — no point retrying
-                    if "unknown" in panic_msg.lower() or "role unknown" in panic_msg.lower():
+                    # Only skip retries for unknown operator — that's truly unrecoverable
+                    # with the old binary. Index errors and other panics may be transient.
+                    if "role unknown for operator" in panic_msg.lower():
                         self._log(
                             f"    r6-dissect crashed: {panic_msg}\n"
-                            f"    This is an unknown operator in your r6-dissect version.\n"
-                            f"    Fix: update r6-dissect.exe from "
-                            f"https://github.com/redraskal/r6-dissect/releases"
+                            f"    Unknown operator — rebuild r6-dissect with the patched binary."
                         )
-                        # No point retrying — same crash every time
                         return None, f"r6-dissect outdated: {panic_msg}"
                     else:
+                        # All other panics: log and retry normally
                         last_error = f"r6-dissect panic: {panic_msg}"
                         self._log(f"    Attempt {attempt}: {last_error}")
                         continue
