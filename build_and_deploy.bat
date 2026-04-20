@@ -69,7 +69,7 @@ REM /XO    : Excludes older files
 
 robocopy "%DIST_DIR%" "%USB_DEST%" /E /PURGE /XO /R:3 /W:5 ^
     /XF settings.json matches.db ^
-    /XD recordings transcripts reports data
+    /XD recordings transcripts reports data exports
 
 if errorlevel 8 (
     echo [ERROR] Robocopy encountered a serious error.
