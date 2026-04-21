@@ -41,41 +41,31 @@ class OBSController:
     # =====================================================
 
     def _launch_obs(self) -> bool:
-        """
-        Launches OBS Portable from the USB.
-        Returns True once the process is detected running.
-        """
         if not OBS_EXE_PATH.exists():
-            print(
-                f"[OBS] Portable exe not found at:\n  {OBS_EXE_PATH}\n"
-                f"Extract OBS-Studio\\ zip to USB root (one level above R6Analyzer\\)."
-            )
+            print(f"[OBS] Not found at: {OBS_EXE_PATH}")
             return False
 
         print(f"[OBS] Launching: {OBS_EXE_PATH}")
         try:
             subprocess.Popen(
-                [str(OBS_EXE_PATH), "--minimize-to-tray"],
+                [str(OBS_EXE_PATH)],   # ← remove --minimize-to-tray
                 cwd=str(OBS_EXE_PATH.parent),
-                # Don't inherit console — avoids blocking the GUI
-                creationflags=subprocess.CREATE_NO_WINDOW
-                if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+                # no CREATE_NO_WINDOW — let it show
             )
             self._launched_by_us = True
         except Exception as e:
             print(f"[OBS] Launch failed: {e}")
             return False
 
-        # Poll until OBS process appears
-        print(f"[OBS] Waiting up to {self.LAUNCH_WAIT_SEC}s for OBS to start...")
+        print(f"[OBS] Waiting up to {self.LAUNCH_WAIT_SEC}s...")
         for i in range(self.LAUNCH_WAIT_SEC):
             time.sleep(1)
             if _obs_is_running():
-                print(f"[OBS] Process detected after {i+1}s.")
-                time.sleep(3)   # let websocket server initialise
+                print(f"[OBS] Detected after {i+1}s. Waiting 4s for websocket...")
+                time.sleep(4)
                 return True
 
-        print("[OBS] OBS process never appeared — launch may have failed silently.")
+        print("[OBS] Never appeared.")
         return False
 
     # =====================================================
@@ -168,12 +158,58 @@ class OBSController:
 
     def stop_recording(self) -> Optional[str]:
         if not self._connected or self._client is None:
-            print("[OBS] Not connected.")
             return None
         try:
-            response  = self._client.call(obs_requests.StopRecord())
-            save_path = response.getOutputPath()
-            print(f"[OBS] Recording saved → {save_path}")
+            response = self._client.call(obs_requests.StopRecord())
+
+            # Try all known path field names across obs-websocket versions
+            save_path = None
+            for getter in ["getOutputPath", "getOutputFilePath"]:
+                try:
+                    fn = getattr(response, getter, None)
+                    if fn:
+                        result = fn()
+                        if result:
+                            save_path = result
+                            break
+                except Exception:
+                    pass
+
+            if not save_path:
+                try:
+                    d = response.datain
+                    save_path = (
+                        d.get("outputPath")
+                        or d.get("outputFilePath")
+                        or d.get("output-path")
+                    )
+                except Exception:
+                    pass
+
+            if save_path:
+                print(f"[OBS] Recording saved → {save_path}")
+            else:
+                # Fall back to latest file in recordings dir
+                try:
+                    files = sorted(
+                        RECORDINGS_DIR.glob("*.mp4"),
+                        key=lambda f: f.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if not files:
+                        files = sorted(
+                            RECORDINGS_DIR.glob("*.mkv"),
+                            key=lambda f: f.stat().st_mtime,
+                            reverse=True,
+                        )
+                    if files:
+                        save_path = str(files[0])
+                        print(f"[OBS] Path not returned — using latest file: {save_path}")
+                    else:
+                        print("[OBS] Warning: no recording file found in recordings folder.")
+                except Exception as e:
+                    print(f"[OBS] Fallback path detection failed: {e}")
+
             return save_path
         except Exception as e:
             print(f"[OBS] Error stopping recording: {e}")

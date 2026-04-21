@@ -36,7 +36,8 @@ class AnalysisView(QWidget):
 
         run_btn = QPushButton("▶  Run Analysis")
         run_btn.clicked.connect(self.run_analysis)
-        selection_layout.addWidget(run_btn)
+        self._run_btn = run_btn   # store reference
+        selection_layout.addWidget(self._run_btn)
 
         report_btn = QPushButton("📄  Generate Report")
         report_btn.clicked.connect(self.generate_report)
@@ -171,32 +172,77 @@ class AnalysisView(QWidget):
         if match_id is None:
             QMessageBox.warning(self, "Warning", "Select a match first.")
             return
-        try:
-            # Metrics
-            metrics = self.controller.fetch_match_intel(match_id)
-            self._display_metrics(metrics)
 
-            # Match summary
-            derived = metrics.get("derived_metrics", {})
-            summary = derived.get("ai_match_summary", "")
+        # Disable controls and show loading state
+        self._run_btn.setEnabled(False)
+        self._run_btn.setText("⏳ Analyzing...")
+        self._summary_label.setText(
+            "🤖 Loading AI model (first run may take 30–60 seconds)..."
+        )
+
+        from PySide6.QtCore import QThread, QObject, Signal as QSignal
+
+        class _Worker(QObject):
+            done     = QSignal(dict)
+            failed   = QSignal(str)
+            progress = QSignal(str)
+
+            def __init__(self, ctrl, mid):
+                super().__init__()
+                self._ctrl = ctrl
+                self._mid  = mid
+
+            def run(self):
+                try:
+                    def on_progress(attempt, total, msg):
+                        self.progress.emit(msg)
+
+                    result = self._ctrl.fetch_match_intel(
+                        self._mid,
+                        progress_callback=on_progress,
+                    )
+                    self.done.emit(result)
+                except Exception as e:
+                    self.failed.emit(str(e))
+
+        self._analysis_thread = QThread()
+        self._analysis_worker = _Worker(self.controller, match_id)
+        self._analysis_worker.moveToThread(self._analysis_thread)
+
+        self._analysis_thread.started.connect(self._analysis_worker.run)
+        self._analysis_worker.progress.connect(
+            lambda msg: self._summary_label.setText(f"🤖 {msg}")
+        )
+        self._analysis_worker.done.connect(self._on_analysis_done)
+        self._analysis_worker.failed.connect(self._on_analysis_error)
+        self._analysis_worker.done.connect(self._analysis_thread.quit)
+        self._analysis_worker.failed.connect(self._analysis_thread.quit)
+        self._analysis_thread.finished.connect(self._analysis_thread.deleteLater)
+
+        self._analysis_thread.start()
+
+    def _on_analysis_done(self, metrics: dict) -> None:
+        self._run_btn.setEnabled(True)
+        self._run_btn.setText("▶  Run Analysis")
+        match_id = self.match_dropdown.currentData()
+        try:
+            self._display_metrics(metrics)
+            summary = metrics.get("ai_summary", "")
             if summary:
                 self._intel_match_text.setPlainText(str(summary))
-
-            # Player intel
-            player_intel = metrics.get("player_intel", {})
+            player_intel = metrics.get("players", {})
             self._display_player_intel(player_intel)
-
-            # Rounds
             self._load_rounds_tab(match_id)
-
-            # Summary bar
             self._update_summary_bar(match_id)
-
-            # Switch to metrics tab
             self._tabs.setCurrentIndex(0)
-
+            self._summary_label.setText("✅ Analysis complete.")
         except Exception as e:
-            QMessageBox.critical(self, "Analysis Error", str(e))
+            QMessageBox.critical(self, "Display Error", str(e))
+
+    def _on_analysis_error(self, message: str) -> None:
+        self._run_btn.setEnabled(True)
+        self._run_btn.setText("▶  Run Analysis")
+        self._summary_label.setText(f"❌ {message}")
 
     # =====================================================
     # DISPLAY HELPERS

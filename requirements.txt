@@ -1,12 +1,10 @@
 # Core UI
 PySide6>=6.6.0
 
-# Database
-# (sqlite3 is stdlib — no install needed)
-
-# AI Inference
-# CPU-only build (works everywhere, no CUDA required):
-llama-cpp-python==0.2.77
+# AI Inference — use the CPU-only no-AVX wheel for school computers
+# Install with: pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# If that fails (older CPU): set CMAKE_ARGS="-DLLAMA_AVX=OFF -DLLAMA_AVX2=OFF" then pip install llama-cpp-python --no-binary llama-cpp-python
+llama-cpp-python
 
 # Audio Transcription
 openai-whisper>=20231117
@@ -14,8 +12,6 @@ openai-whisper>=20231117
 # OBS Integration
 obs-websocket-py>=1.0.0
 
-# Replay Parsing
-# (r6-dissect is a bundled .exe — no pip install needed)
-
-# Filesystem watching (for session_manager if upgraded to event-driven)
+# System
+psutil>=5.9.0
 watchdog>=4.0.0

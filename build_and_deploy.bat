@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ============================================================
-echo  R6 Tactical Intelligence Engine — Build + USB Deploy
+echo  R6 Tactical Intelligence Engine Build + USB Deploy
 echo ============================================================
 echo.
 

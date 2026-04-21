@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTextEdit, QFileDialog, QMessageBox
 )
+from torch import layout
 
 from app.app_controller import AppController
 from app.config import R6_DISSECT_PATH, get_replay_folder, settings
@@ -125,11 +126,22 @@ class RecordingView(QWidget):
         self._log.setStyleSheet(
             "background: #1a1a1a; color: #ccc; font-family: monospace; font-size: 11px;"
         )
+
+        # ── Hotkey: Ctrl+Shift+R toggles session ─────────────────
+        from PySide6.QtGui import QKeySequence, QShortcut
+        self._hotkey = QShortcut(QKeySequence("Ctrl+Shift+R"), self)
+        self._hotkey.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._hotkey.activated.connect(self._hotkey_triggered)
+
+        hotkey_label = QLabel("Hotkey: Ctrl+Shift+R — Start / Stop Session")
+        hotkey_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hotkey_label.setStyleSheet("font-size: 10px; color: #666;")
+        layout.addWidget(hotkey_label)
+        
         self._log.setMinimumHeight(220)
         layout.addWidget(self._log)
         layout.addStretch()
 
-        self._update_start_button()
 
     # =====================================================
     # OBS
@@ -214,6 +226,19 @@ class RecordingView(QWidget):
         self._set_status("🔴 Recording...", "#e05555")
         self._log_message("Session started. OBS recording. Folder snapshot taken.")
 
+    def _hotkey_triggered(self) -> None:
+        if not self._session_active:
+            if self._start_btn.isEnabled():
+                self._log_message("🎮 Hotkey: Starting session (Ctrl+Shift+R)")
+                self._start_session()
+            else:
+                self._log_message(
+                    "⚠ Hotkey: not ready — connect OBS and set replay folder first."
+                )
+        else:
+            self._log_message("🎮 Hotkey: Stopping session (Ctrl+Shift+R)")
+            self._stop_session()
+            
     # =====================================================
     # SESSION STOP
     # =====================================================
