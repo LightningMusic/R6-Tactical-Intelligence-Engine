@@ -9,15 +9,7 @@ echo.
 REM ── Config ───────────────────────────────────────────────────
 set APP_NAME=R6Analyzer
 set DIST_DIR=dist\%APP_NAME%
-set USB_DRIVE=E:
-set USB_DEST=%USB_DRIVE%\%APP_NAME%
-
-REM Allow override: build_and_deploy.bat F:  (different drive letter)
-if not "%1"=="" set USB_DRIVE=%1
-if not "%1"=="" set USB_DEST=%1\%APP_NAME%
-
-echo Target USB: %USB_DEST%
-echo.
+set TARGET_LABEL=R6_PROJ
 
 REM ── Activate venv ────────────────────────────────────────────
 if exist ".venv\Scripts\activate.bat" (
@@ -39,11 +31,6 @@ if errorlevel 1 (
 echo [OK] Build complete.
 echo.
 
-REM ── Config ───────────────────────────────────────────────────
-set APP_NAME=R6Analyzer
-set DIST_DIR=dist\%APP_NAME%
-set TARGET_LABEL=R6_PROJ
-
 REM ── Find USB Drive by Label ──────────────────────────────────
 echo [2/4] Searching for USB with label: %TARGET_LABEL%...
 set USB_DRIVE=
@@ -57,81 +44,83 @@ if "%USB_DRIVE%"=="" (
     pause & exit /b 1
 )
 
-REM ── Copy build to USB (CLEAN UPDATE + PRESERVE DATA) ──────────
-echo [3/4] Syncing build to %USB_DEST%...
+set USB_DEST=%USB_DRIVE%\%APP_NAME%
+echo [OK] USB found at %USB_DRIVE%
+echo.
+
+REM ── Ensure destination exists ────────────────────────────────
 if not exist "%USB_DEST%" mkdir "%USB_DEST%"
 
-REM /PURGE : Deletes destination files/folders that no longer exist in source (Nukes old code)
-REM /XF    : Excludes specific FILES from being deleted or overwritten (settings.json)
-REM /XD    : Excludes specific FOLDERS from being deleted (recordings, transcripts, reports)
-REM /E     : Copies subdirectories, including empty ones
-REM /XO    : Excludes older files
+REM ── Robocopy with safe exclusions ────────────────────────────
+echo [3/4] Syncing build to %USB_DEST%...
+echo       Preserving: data\, exports\, settings.json, matches.db
+echo.
+
+REM /PURGE  — removes files in dest that don't exist in source
+REM /XF     — exclude specific files from purge/overwrite
+REM /XD     — exclude specific folders from purge entirely
+REM /E      — include subdirectories (even empty ones)
+REM /XO     — skip files that are older than destination copy
 
 robocopy "%DIST_DIR%" "%USB_DEST%" /E /PURGE /XO /R:3 /W:5 ^
     /XF settings.json matches.db ^
-    /XD recordings transcripts reports data exports
+    /XD data exports recordings transcripts reports models
 
 if errorlevel 8 (
-    echo [ERROR] Robocopy encountered a serious error.
+    echo [ERROR] Robocopy encountered a serious error (code %errorlevel%).
     pause & exit /b 1
 )
-echo [OK] Build synced. Old files purged, personal data preserved.
+echo [OK] Build synced. Code updated, personal data preserved.
+echo.
 
-REM ── Copy model files if they exist ───────────────────────────
-echo [4/4] Copying model files...
+REM ── Ensure data subdirs exist on USB ─────────────────────────
+if not exist "%USB_DEST%\data"               mkdir "%USB_DEST%\data"
+if not exist "%USB_DEST%\data\models"        mkdir "%USB_DEST%\data\models"
+if not exist "%USB_DEST%\data\recordings"    mkdir "%USB_DEST%\data\recordings"
+if not exist "%USB_DEST%\data\transcripts"   mkdir "%USB_DEST%\data\transcripts"
+if not exist "%USB_DEST%\data\reports"       mkdir "%USB_DEST%\data\reports"
+if not exist "%USB_DEST%\exports"            mkdir "%USB_DEST%\exports"
 
+REM ── Copy model files (only if newer or missing) ──────────────
+echo [4/4] Checking model files...
+
+set MODEL_SRC=data\models
 set MODEL_DEST=%USB_DEST%\data\models
-if not exist "%MODEL_DEST%" mkdir "%MODEL_DEST%"
 
-if exist "data\models\model.gguf" (
-    echo      Copying model.gguf...
-    copy /y "data\models\model.gguf" "%MODEL_DEST%\model.gguf" >nul
-    echo      [OK] model.gguf copied.
+if exist "%MODEL_SRC%\model.gguf" (
+    echo      Syncing model.gguf ^(large file — may take a moment^)...
+    robocopy "%MODEL_SRC%" "%MODEL_DEST%" model.gguf /XO /R:1 /W:2 >nul
+    echo      [OK] model.gguf synced.
 ) else (
-    echo      [WARN] model.gguf not found in data\models\ — copy manually.
+    echo      [WARN] model.gguf not found in %MODEL_SRC%
+    echo             Copy manually: data\models\model.gguf
 )
 
-if exist "data\models\whisper-base.pt" (
-    echo      Copying whisper-base.pt...
-    copy /y "data\models\whisper-base.pt" "%MODEL_DEST%\whisper-base.pt" >nul
-    echo      [OK] whisper-base.pt copied.
+if exist "%MODEL_SRC%\whisper-base.pt" (
+    echo      Syncing whisper-base.pt...
+    robocopy "%MODEL_SRC%" "%MODEL_DEST%" whisper-base.pt /XO /R:1 /W:2 >nul
+    echo      [OK] whisper-base.pt synced.
 ) else (
-    echo      [WARN] whisper-base.pt not found in data\models\ — copy manually.
+    echo      [WARN] whisper-base.pt not found in %MODEL_SRC%
+    echo             Copy manually: data\models\whisper-base.pt
 )
 
-REM ── Copy existing DB if present (preserve match history) ─────
+REM ── Copy DB if present (only if newer) ───────────────────────
 if exist "data\matches.db" (
-    echo      Copying matches.db...
-    set DB_DEST=%USB_DEST%\data
-    if not exist "!DB_DEST!" mkdir "!DB_DEST!"
-    copy /y "data\matches.db" "!DB_DEST!\matches.db" >nul
-    echo      [OK] matches.db copied.
+    robocopy "data" "%USB_DEST%\data" matches.db /XO /R:1 /W:2 >nul
+    echo      [OK] matches.db synced.
 )
 
 echo.
 echo ============================================================
 echo  DEPLOY COMPLETE
-echo  Launch:  %USB_DEST%\%APP_NAME%.exe
+echo  Launch : %USB_DEST%\R6Analyzer.exe
+echo  USB    : %USB_DRIVE%\
 echo ============================================================
 echo.
-
-REM ── USB structure reminder ───────────────────────────────────
-echo  Expected USB structure:
-echo  %USB_DRIVE%\
-echo    %APP_NAME%\
-echo      R6Analyzer.exe
-echo      data\
-echo        matches.db
-echo        models\
-echo          model.gguf          ^(~4.4GB^)
-echo          whisper-base.pt     ^(~145MB^)
-echo        recordings\
-echo        transcripts\
-echo        reports\
-echo      integration\
-echo        bin\
-echo          r6-dissect.exe
-echo      database\
-echo        schema.sql
+echo  Preserved on USB:
+echo    %USB_DEST%\data\           (database, models, recordings)
+echo    %USB_DEST%\exports\        (exported reports and CSVs)
+echo    %USB_DEST%\data\settings.json
 echo.
 pause
