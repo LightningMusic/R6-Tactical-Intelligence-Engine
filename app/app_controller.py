@@ -138,7 +138,6 @@ class AppController:
 
         engine = MetricsEngine(match)
 
-        # ── Core match metrics ────────────────────────────────
         metrics: dict = {
             "win_rate":                    round(engine.win_rate(), 3),
             "attack_win_rate":             round(engine.attack_win_rate(), 3),
@@ -150,10 +149,9 @@ class AppController:
             "clutch_rate":                 round(engine.clutch_rate(), 3),
         }
 
-        # ── Per-player summary ────────────────────────────────
-        summary      = engine.player_summary()
-        tps          = engine.tactical_performance_score()
-        consistency  = engine.player_consistency_index()
+        summary     = engine.player_summary()
+        tps         = engine.tactical_performance_score()
+        consistency = engine.player_consistency_index()
 
         player_metrics: dict = {}
         for pid, data in summary.items():
@@ -175,7 +173,6 @@ class AppController:
 
         metrics["players"] = player_metrics
 
-        # ── AI intel (lazy — won't load model unless called) ──
         try:
             ai_result = self.intel.analyze_match(match_id)
             metrics["ai_summary"] = ai_result.get("ai_match_summary", "")

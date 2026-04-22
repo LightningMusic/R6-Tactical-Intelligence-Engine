@@ -194,13 +194,7 @@ class AnalysisView(QWidget):
 
             def run(self):
                 try:
-                    def on_progress(attempt, total, msg):
-                        self.progress.emit(msg)
-
-                    result = self._ctrl.fetch_match_intel(
-                        self._mid,
-                        progress_callback=on_progress,
-                    )
+                    result = self._ctrl.fetch_match_intel(self._mid)
                     self.done.emit(result)
                 except Exception as e:
                     self.failed.emit(str(e))
