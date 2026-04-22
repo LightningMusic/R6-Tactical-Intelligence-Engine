@@ -156,10 +156,13 @@ if errorlevel 8 (
     goto :finish
 )
 
-call :copy_if_exists "data\settings.json" "%USB_DEST%\data\settings.json" "settings.json"
-call :copy_if_exists "data\matches.db" "%USB_DEST%\data\matches.db" "matches.db"
-call :copy_if_exists "%MODEL_SRC%\model.gguf" "%USB_DEST%\data\models\model.gguf" "model.gguf"
-call :copy_if_exists "%MODEL_SRC%\whisper-base.pt" "%USB_DEST%\data\models\whisper-base.pt" "whisper-base.pt"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0sync_deploy_assets.ps1" -UsbDest "%USB_DEST%" -ModelSrc "%MODEL_SRC%"
+if errorlevel 1 (
+    set "DEPLOY_WARNINGS=1"
+)
+if errorlevel 2 (
+    set "DEPLOY_WARNINGS=1"
+)
 
 echo.
 echo ============================================================
@@ -213,25 +216,6 @@ if defined FFMPEG_SRC exit /b 0
 
 for /f "delims=" %%F in ('where ffmpeg 2^>nul') do (
     if not defined FFMPEG_SRC set "FFMPEG_SRC=%%~fF"
-)
-exit /b 0
-
-:copy_if_exists
-set "SRC=%~1"
-set "DEST=%~2"
-set "LABEL=%~3"
-
-if exist "!SRC!" (
-    copy /Y "!SRC!" "!DEST!" >nul
-    if errorlevel 1 (
-        echo [WARN] Failed to copy !LABEL! to !DEST!
-        set "DEPLOY_WARNINGS=1"
-    ) else (
-        echo [OK] !LABEL! synced.
-    )
-) else (
-    echo [WARN] !LABEL! not found at !SRC!
-    set "DEPLOY_WARNINGS=1"
 )
 exit /b 0
 

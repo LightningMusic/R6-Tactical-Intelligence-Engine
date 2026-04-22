@@ -10,20 +10,22 @@ $logFile = Join-Path $logDir "build_and_deploy_$timestamp.log"
 Write-Host "Writing log to: $logFile"
 Write-Host ""
 
-Push-Location $projectRoot
-try {
-    Start-Transcript -Path $logFile -Force | Out-Null
-    & cmd /c "build_and_deploy.bat"
-    $exitCode = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } else { 0 }
+$cmdText = 'cd /d "{0}" && call build_and_deploy.bat > "{1}" 2>&1' -f $projectRoot, $logFile
+$process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmdText -PassThru
+
+while (-not (Test-Path $logFile)) {
+    if ($process.HasExited) { break }
+    Start-Sleep -Milliseconds 200
 }
-finally {
-    try {
-        Stop-Transcript | Out-Null
-    }
-    catch {
-    }
-    Pop-Location
+
+if (Test-Path $logFile) {
+    Get-Content -Path $logFile -Wait
+} else {
+    $process.WaitForExit()
 }
+
+$process.WaitForExit()
+$exitCode = $process.ExitCode
 
 Write-Host ""
 Write-Host "Log saved to: $logFile"
