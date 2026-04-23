@@ -3,7 +3,7 @@ import sys
 import io
 from pathlib import Path
 
-from app.config import TRANSCRIPTS_DIR, WHISPER_MODEL_PATH
+from app.config import TRANSCRIPTS_DIR, get_whisper_model_path
 
 
 def _ensure_console() -> None:
@@ -66,11 +66,12 @@ class WhisperTranscriber:
             )
 
         from app.config import settings
+        whisper_model_path = get_whisper_model_path()
 
-        if not WHISPER_MODEL_PATH.exists():
+        if not whisper_model_path.exists():
             raise FileNotFoundError(
-                f"Whisper model not found at {WHISPER_MODEL_PATH}\n"
-                "Copy whisper-base.pt to data/models/"
+                f"Whisper model not found at {whisper_model_path}\n"
+                "Copy the selected Whisper model file to data/models/."
             )
 
         if not _find_ffmpeg():
@@ -82,14 +83,19 @@ class WhisperTranscriber:
             )
 
         size = settings.WHISPER_MODEL_SIZE
-        print(f"[Whisper] Loading '{size}' model...")
+        print(f"[Whisper] Loading '{size}' model from {whisper_model_path.name}...")
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            self._model = whisper.load_model(
-                size,
-                download_root=str(WHISPER_MODEL_PATH.parent),
-            )
+            try:
+                self._model = whisper.load_model(str(whisper_model_path))
+            except Exception as e:
+                print(f"[Whisper] Direct checkpoint load failed: {e}")
+                print("[Whisper] Falling back to Whisper's named model loader...")
+                self._model = whisper.load_model(
+                    size,
+                    download_root=str(whisper_model_path.parent),
+                )
 
         print("[Whisper] Model ready.")
 

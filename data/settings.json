@@ -4,6 +4,7 @@
   "obs_password": "gr17aGAe8WkxZO6i",
   "obs_scene_name": "R6_Intelligence",
   "whisper_model_size": "base",
+  "llm_model_filename": "model.gguf",
   "llm_gpu_layers": 0,
   "llm_n_ctx": 4096,
   "llm_n_threads": 6,

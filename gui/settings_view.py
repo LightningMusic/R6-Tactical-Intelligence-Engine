@@ -240,6 +240,7 @@ class SettingsView(QWidget):
         self._load_players()
         self._load_maps()
         self._load_matches()
+        self._load_ai_settings()
         self._check_model_status()
 
     def _load_general_settings(self) -> None:
@@ -316,24 +317,38 @@ class SettingsView(QWidget):
         except Exception as e:
             print(f"[Settings] Failed to load matches: {e}")
 
-    def _check_model_status(self) -> None:
-        from app.config import MODEL_PATH, WHISPER_MODEL_PATH
+    def _load_ai_settings(self) -> None:
+        from app.config import settings
+        self._gpu_layers_spin.setValue(settings.LLM_GPU_LAYERS)
+        self._ctx_spin.setValue(settings.LLM_N_CTX)
+        self._threads_spin.setValue(settings.LLM_N_THREADS)
 
-        if MODEL_PATH.exists():
-            mb = MODEL_PATH.stat().st_size // (1024 * 1024)
-            self._llm_status_label.setText(f"✅ Found ({mb} MB)")
+        whisper_size = settings.WHISPER_MODEL_SIZE
+        idx = self._whisper_size_combo.findText(whisper_size)
+        if idx >= 0:
+            self._whisper_size_combo.setCurrentIndex(idx)
+
+    def _check_model_status(self) -> None:
+        from app.config import get_llm_model_path, get_whisper_model_path
+
+        model_path = get_llm_model_path()
+        whisper_model_path = get_whisper_model_path()
+
+        if model_path.exists():
+            mb = model_path.stat().st_size // (1024 * 1024)
+            self._llm_status_label.setText(f"✅ {model_path.name} ({mb} MB)")
             self._llm_status_label.setStyleSheet("color: #55e07a;")
         else:
-            self._llm_status_label.setText("❌ Not found — place model.gguf in data/models/")
+            self._llm_status_label.setText("❌ Not found — place a .gguf model in data/models/")
             self._llm_status_label.setStyleSheet("color: #e05555;")
 
-        if WHISPER_MODEL_PATH.exists():
-            mb = WHISPER_MODEL_PATH.stat().st_size // (1024 * 1024)
-            self._whisper_status_label.setText(f"✅ Found ({mb} MB)")
+        if whisper_model_path.exists():
+            mb = whisper_model_path.stat().st_size // (1024 * 1024)
+            self._whisper_status_label.setText(f"✅ {whisper_model_path.name} ({mb} MB)")
             self._whisper_status_label.setStyleSheet("color: #55e07a;")
         else:
             self._whisper_status_label.setText(
-                "❌ Not found — place whisper-base.pt in data/models/")
+                "❌ Not found — place the selected Whisper model file in data/models/")
             self._whisper_status_label.setStyleSheet("color: #e05555;")
 
     # =====================================================

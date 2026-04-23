@@ -41,8 +41,20 @@ function Copy-OptionalFile {
 
 Copy-OptionalFile -Source "data\settings.json" -Destination (Join-Path $UsbDest "data\settings.json")
 Copy-OptionalFile -Source "data\matches.db" -Destination (Join-Path $UsbDest "data\matches.db")
-Copy-OptionalFile -Source (Join-Path $ModelSrc "model.gguf") -Destination (Join-Path $UsbDest "data\models\model.gguf")
-Copy-OptionalFile -Source (Join-Path $ModelSrc "whisper-base.pt") -Destination (Join-Path $UsbDest "data\models\whisper-base.pt")
+
+$modelSourceDir = Join-Path $projectRoot $ModelSrc
+$modelDestDir = Join-Path $UsbDest "data\models"
+
+if (Test-Path -LiteralPath $modelSourceDir) {
+    Get-ChildItem -LiteralPath $modelSourceDir -File | Where-Object {
+        $_.Extension -in @(".gguf", ".pt")
+    } | ForEach-Object {
+        Copy-OptionalFile -Source (Join-Path $ModelSrc $_.Name) -Destination (Join-Path $modelDestDir $_.Name)
+    }
+} else {
+    Write-Output "[WARN] Model source directory not found at $modelSourceDir"
+    $warnings = $true
+}
 
 if ($warnings) {
     exit 2

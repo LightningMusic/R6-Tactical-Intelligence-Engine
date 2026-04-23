@@ -57,6 +57,7 @@ class _Settings:
         "obs_password":       "",
         "obs_scene_name":     "R6_Intelligence",
         "whisper_model_size": "base",
+        "llm_model_filename": "model.gguf",
         "llm_gpu_layers":     0,
         "llm_n_ctx":          4096,
         "llm_n_threads":      6,
@@ -126,6 +127,10 @@ class _Settings:
         return int(self._data["llm_gpu_layers"])
 
     @property
+    def LLM_MODEL_FILENAME(self) -> str:
+        return str(self._data.get("llm_model_filename", "model.gguf"))
+
+    @property
     def LLM_N_CTX(self) -> int:
         return int(self._data["llm_n_ctx"])
 
@@ -176,6 +181,58 @@ def _find_replay_folder() -> Path | None:
 
 def get_replay_folder() -> Path | None:
     return settings.R6_REPLAY_FOLDER
+
+
+def get_llm_model_path() -> Path:
+    configured = settings.LLM_MODEL_FILENAME.strip()
+    if configured:
+        configured_path = Path(configured)
+        if configured_path.is_absolute():
+            return configured_path
+        candidate = MODEL_DIR / configured
+        if candidate.exists():
+            return candidate
+
+    if MODEL_PATH.exists():
+        return MODEL_PATH
+
+    gguf_files = sorted(
+        MODEL_DIR.glob("*.gguf"),
+        key=lambda p: p.stat().st_size,
+        reverse=True,
+    )
+    if gguf_files:
+        return gguf_files[0]
+
+    return MODEL_PATH
+
+
+def get_whisper_model_path() -> Path:
+    size = settings.WHISPER_MODEL_SIZE.strip().lower() or "base"
+    candidates = [
+        MODEL_DIR / f"{size}.pt",
+        MODEL_DIR / f"whisper-{size}.pt",
+    ]
+
+    if size == "base":
+        candidates.extend([
+            MODEL_DIR / "base.pt",
+            WHISPER_MODEL_PATH,
+        ])
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    pt_files = sorted(
+        MODEL_DIR.glob("*.pt"),
+        key=lambda p: p.stat().st_size,
+        reverse=True,
+    )
+    if pt_files:
+        return pt_files[0]
+
+    return candidates[0]
 
 
 def ensure_data_dirs() -> None:

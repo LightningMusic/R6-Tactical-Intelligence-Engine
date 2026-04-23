@@ -4,7 +4,7 @@ import time
 import io
 from typing import TYPE_CHECKING, Optional, Callable
 
-from app.config import MODEL_PATH
+from app.config import get_llm_model_path
 
 if TYPE_CHECKING:
     from llama_cpp import CreateCompletionResponse
@@ -63,6 +63,19 @@ def _detect_gpu_layers() -> int:
     return 0
 
 
+def _resolve_gpu_layers() -> int:
+    from app.config import settings
+
+    configured = settings.LLM_GPU_LAYERS
+    if configured > 0:
+        print(f"[AI] Using configured GPU layers: {configured}")
+        return configured
+    if configured == 0:
+        print("[AI] GPU layers set to 0 in settings. Using CPU-only inference.")
+        return 0
+    return _detect_gpu_layers()
+
+
 class IntelEngine:
     """
     Local AI inference using llama-cpp-python + GGUF models.
@@ -90,11 +103,12 @@ class IntelEngine:
 
         # Fix DLL paths before importing llama_cpp
         _fix_frozen_paths()
+        model_path = get_llm_model_path()
 
-        if not MODEL_PATH.exists():
+        if not model_path.exists():
             self._load_error = (
-                f"No model found at {MODEL_PATH}\n"
-                "Place a Q4_K_M .gguf file there and rename it to 'model.gguf'."
+                f"No model found at {model_path}\n"
+                "Place a .gguf file in data/models/ or set llm_model_filename in settings.json."
             )
             raise FileNotFoundError(self._load_error)
 
@@ -109,25 +123,43 @@ class IntelEngine:
             raise RuntimeError(self._load_error) from e
 
         from app.config import settings
-        gpu_layers = _detect_gpu_layers()
+        preferred_gpu_layers = _resolve_gpu_layers()
+        attempts = [preferred_gpu_layers]
+        if preferred_gpu_layers > 0:
+            attempts.append(0)
 
-        print(f"[AI] Loading: {MODEL_PATH.name}")
-        print(f"[AI] GPU layers={gpu_layers} | CTX={settings.LLM_N_CTX} "
-              f"| Threads={settings.LLM_N_THREADS}")
+        last_error = None
+        for gpu_layers in attempts:
+            print(f"[AI] Loading: {model_path.name}")
+            print(f"[AI] GPU layers={gpu_layers} | CTX={settings.LLM_N_CTX} "
+                  f"| Threads={settings.LLM_N_THREADS}")
+            try:
+                self._llm = Llama(
+                    model_path=str(model_path),
+                    n_gpu_layers=gpu_layers,
+                    n_ctx=settings.LLM_N_CTX,
+                    n_threads=settings.LLM_N_THREADS,
+                    n_batch=min(512, settings.LLM_N_CTX),
+                    verbose=False,
+                )
+                print("[AI] Model ready.")
+                return
+            except Exception as e:
+                last_error = e
+                if gpu_layers > 0:
+                    print(f"[AI] GPU-backed load failed: {e}")
+                    print("[AI] Retrying with CPU-only inference...")
+                else:
+                    break
 
-        try:
-            self._llm = Llama(
-                model_path=str(MODEL_PATH),
-                n_gpu_layers=gpu_layers,
-                n_ctx=settings.LLM_N_CTX,
-                n_threads=settings.LLM_N_THREADS,
-                n_batch=512,
-                verbose=False,
+        detail = str(last_error) if last_error is not None else "Unknown error"
+        if "0xc000001d" in detail or "-1073741795" in detail:
+            detail += (
+                "\nThis usually means the bundled llama runtime is using CPU instructions "
+                "the machine does not support."
             )
-            print("[AI] Model ready.")
-        except Exception as e:
-            self._load_error = f"Model load failed: {e}"
-            raise RuntimeError(self._load_error) from e
+        self._load_error = f"Model load failed: {detail}"
+        raise RuntimeError(self._load_error) from last_error
 
     # =====================================================
     # GENERATE WITH RETRY
