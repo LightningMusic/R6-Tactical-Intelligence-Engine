@@ -57,6 +57,7 @@ class ExportView(QWidget):
             ("📄  Export Report  (HTML)",              self.export_html),
             ("📝  Export Report  (TXT)",               self.export_txt),
             ("🎙  Export Transcript",                  self.export_transcript),
+            ("📝  Export Full Session Transcript", self.export_full_transcript),
             ("🎬  Copy Recording  (MP4)",              self.export_recording),
         ]
 
@@ -175,6 +176,48 @@ class ExportView(QWidget):
                 return
             Path(path).write_text(text, encoding="utf-8")
             QMessageBox.information(self, "Exported", f"Transcript saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
+
+    def export_full_transcript(self) -> None:
+        from app.config import TRANSCRIPTS_DIR
+        import shutil
+
+        # Find the most recent full session transcript
+        full_transcripts = sorted(
+            TRANSCRIPTS_DIR.glob("session_*_full.txt"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+
+        if not full_transcripts:
+            QMessageBox.warning(
+                self, "Not Found",
+                "No full session transcript found.\n"
+                "Full transcripts are generated automatically during session import."
+            )
+            return
+
+        # Show list if multiple
+        if len(full_transcripts) > 1:
+            from PySide6.QtWidgets import QInputDialog
+            names = [f.name for f in full_transcripts]
+            choice, ok = QInputDialog.getItem(
+                self, "Select Transcript", "Session:", names, 0, False
+            )
+            if not ok:
+                return
+            src = TRANSCRIPTS_DIR / choice
+        else:
+            src = full_transcripts[0]
+
+        path = self._save_dialog(src.name, "Text Files (*.txt)")
+        if not path:
+            return
+
+        try:
+            shutil.copy(src, path)
+            QMessageBox.information(self, "Exported", f"Full transcript saved to:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
 

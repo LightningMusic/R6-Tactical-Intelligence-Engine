@@ -223,3 +223,38 @@ class OBSController:
             return bool(status.getOutputActive())
         except Exception:
             return False
+        
+    def ensure_recording(self) -> bool:
+        """
+        Checks if OBS is still recording. If it stopped unexpectedly,
+        attempts to restart it. Returns True if recording is active after check.
+        """
+        if not self._connected or self._client is None:
+            return False
+        try:
+            status = self._client.call(obs_requests.GetRecordStatus())
+            if status.getOutputActive():
+                return True
+            # Recording stopped — try to restart
+            print("[OBS] Recording stopped unexpectedly — restarting...")
+            self._client.call(obs_requests.StartRecord())
+            time.sleep(1)
+            status2 = self._client.call(obs_requests.GetRecordStatus())
+            if status2.getOutputActive():
+                print("[OBS] Recording restarted successfully.")
+                return True
+            print("[OBS] Could not restart recording.")
+            return False
+        except Exception as e:
+            print(f"[OBS] ensure_recording error: {e}")
+            # Try full reconnect
+            try:
+                self.disconnect()
+                time.sleep(2)
+                if self.connect():
+                    self._client.call(obs_requests.StartRecord())
+                    print("[OBS] Reconnected and restarted recording.")
+                    return True
+            except Exception as e2:
+                print(f"[OBS] Reconnect failed: {e2}")
+            return False

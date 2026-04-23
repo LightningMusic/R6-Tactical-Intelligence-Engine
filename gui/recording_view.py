@@ -168,6 +168,13 @@ class RecordingView(QWidget):
             )
         self._update_start_button()
 
+    def _check_obs_health(self) -> None:
+        if not self._session_active:
+            return
+        if not self.obs.ensure_recording():
+            self._log_message("⚠ OBS recording check failed — see log above.")
+        else:
+            self._log_message("✓ OBS recording active.")
     # =====================================================
     # FOLDER
     # =====================================================
@@ -226,6 +233,13 @@ class RecordingView(QWidget):
         self._set_status("🔴 Recording...", "#e05555")
         self._log_message("Session started. OBS recording. Folder snapshot taken.")
 
+        # ── Watchdog timer — checks OBS is still recording every 60s ──
+        from PySide6.QtCore import QTimer
+        self._obs_watchdog = QTimer(self)
+        self._obs_watchdog.setInterval(60_000)   # every 60 seconds
+        self._obs_watchdog.timeout.connect(self._check_obs_health)
+        self._obs_watchdog.start()
+
     def _hotkey_triggered(self) -> None:
         if not self._session_active:
             if self._start_btn.isEnabled():
@@ -244,6 +258,9 @@ class RecordingView(QWidget):
     # =====================================================
 
     def _stop_session(self) -> None:
+        if hasattr(self, "_obs_watchdog"):
+            self._obs_watchdog.stop()
+
         if not self._session_manager:
             return
 

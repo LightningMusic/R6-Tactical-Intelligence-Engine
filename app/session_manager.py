@@ -202,23 +202,64 @@ class SessionManager:
         if self.recording_path is None:
             return
 
-        full_result = self._transcriber.transcribe(self.recording_path)
-        aligner     = TimelineAligner()
-        parser      = TranscriptParser()
-        repo        = Repository()
+        # ── Step 1: Transcribe the FULL recording once ────────────
+        if log_callback:
+            log_callback("Transcribing full recording (this may take several minutes)...")
+
+        full_result = self._transcriber.transcribe_full(
+            self.recording_path,
+            progress_callback=log_callback,
+        )
+
+        # ── Step 2: Diarize speakers across full recording ────────
+        if log_callback:
+            log_callback("Analyzing speaker patterns...")
+
+        all_segments = full_result.get("segments", [])
+        speakers = self._transcriber.diarize_speakers(all_segments, n_speakers=5)
+
+        if log_callback:
+            for spk, data in speakers.items():
+                log_callback(
+                    f"  {spk}: {data['word_count']} words | "
+                    f"{data['talk_time']:.0f}s talk time"
+                )
+
+        # ── Step 3: Get session start time for alignment ──────────
+        session_start_epoch: Optional[float] = None
+        if self.recording_path.exists():
+            session_start_epoch = self.recording_path.stat().st_mtime - (
+                self.recording_path.stat().st_size / (1024 * 1024) / 1.5 * 60
+            )
+            # Better: use the file creation time on Windows
+            try:
+                session_start_epoch = self.recording_path.stat().st_ctime
+            except Exception:
+                pass
+
+        # ── Step 4: Clip + store per-match transcript ─────────────
+        aligner  = TimelineAligner()
+        parser   = TranscriptParser()
+        repo     = Repository()
+        match_clips: list[dict] = []
 
         for i, (result, folder) in enumerate(zip(results, folders)):
             clipped: dict = {"text": "", "segments": []}
+            start_sec, end_sec = 0.0, 0.0
 
             try:
-                start_sec, end_sec = aligner.get_match_window(folder)
+                start_sec, end_sec = aligner.get_match_window(
+                    folder, session_start_epoch
+                )
                 clipped = self._transcriber.clip_to_match(
                     full_result, start_sec, end_sec
                 )
                 if log_callback:
+                    word_count = len(clipped.get("text", "").split())
                     log_callback(
                         f"Match {i+1} transcript: "
-                        f"{start_sec:.0f}s – {end_sec:.0f}s"
+                        f"{start_sec:.0f}s – {end_sec:.0f}s "
+                        f"({word_count} words)"
                     )
             except Exception as e:
                 if log_callback:
@@ -226,27 +267,61 @@ class SessionManager:
 
             text     = clipped.get("text", "")
             segments = clipped.get("segments", [])
-            parsed   = parser.parse_segments_list(segments, match_id=result.match_id)
-            storage  = parser.to_storage_dict(parsed)
+
+            # Parse callouts for this match window
+            parsed  = parser.parse_segments_list(segments, match_id=result.match_id)
+
+            # Build storage dict including speaker data
+            storage = parser.to_storage_dict(parsed)
+            storage["speakers"] = {
+                spk: {
+                    "word_count": data["word_count"],
+                    "talk_time":  round(data["talk_time"], 1),
+                    "top_words":  data["top_words"][:10],
+                }
+                for spk, data in speakers.items()
+            }
+
+            match_clips.append({
+                "match_id":  result.match_id,
+                "start_sec": start_sec,
+                "end_sec":   end_sec,
+                "text":      text,
+            })
 
             if result.match_id is not None:
                 try:
                     with repo.db.get_connection() as conn:
                         conn.execute(
-                            """
-                            INSERT INTO transcripts
+                            """INSERT INTO transcripts
                                 (match_id, raw_text, processed_segments_json)
                             VALUES (?, ?, ?)
-                            ON CONFLICT DO NOTHING
-                            """,
+                            ON CONFLICT DO NOTHING""",
                             (result.match_id, text, json.dumps(storage))
                         )
                         conn.commit()
                 except Exception as db_err:
-                    print(f"[SessionManager] DB transcript store failed: {db_err}")
+                    print(f"[SessionManager] Transcript store failed: {db_err}")
 
             result.transcript_text     = text
             result.transcript_segments = segments
+
+        # ── Step 5: Export full transcript TXT ───────────────────
+        try:
+            from app.config import TRANSCRIPTS_DIR
+            session_name = self.recording_path.stem.replace(" ", "_")
+            full_txt_path = TRANSCRIPTS_DIR / f"session_{session_name}_full.txt"
+            self._transcriber.export_full_transcript(
+                full_result,
+                match_clips,
+                full_txt_path,
+                speakers=speakers,
+            )
+            if log_callback:
+                log_callback(f"Full transcript exported → {full_txt_path.name}")
+        except Exception as e:
+            if log_callback:
+                log_callback(f"Full transcript export failed: {e}")
 
     # =====================================================
     # FOLDER SCAN

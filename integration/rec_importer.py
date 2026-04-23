@@ -343,32 +343,60 @@ class RecImporter:
                 our_team_index = player.get("teamIndex")
                 break
 
-        teams      = data.get("teams", [])
-        score_us:  Optional[int] = None
+        teams = data.get("teams", [])
+        score_us:   Optional[int] = None
         score_them: Optional[int] = None
-        our_side:  Optional[str] = None
-        outcome:   Optional[str] = None
+        our_side:   Optional[str] = None
+        outcome:    Optional[str] = None
 
-        for i, team in enumerate(teams):
-            role  = team.get("role", "").lower()
-            score = team.get("score")
-            won   = team.get("won", False)
+        if our_team_index is not None and len(teams) >= 2:
+            our_team   = teams[our_team_index]
+            other_index = 1 - our_team_index
+            their_team = teams[other_index]
 
-            if our_team_index is not None and i == our_team_index:
-                score_us = score
-                our_side = "attack" if role == "attack" else "defense"
-                outcome  = "win" if won else "loss"
+            role = our_team.get("role", "")
+            # r6-dissect role comes from TeamRole which is "Attack" or "Defense"
+            our_side = "attack" if str(role).lower() in ("attack", "1") else "defense"
+
+            score_us   = our_team.get("score")
+            score_them = their_team.get("score")
+
+            # Use won field directly from our team
+            our_won = our_team.get("won", False)
+
+            # Sanity check: if winCondition is on the other team, we lost
+            win_condition = our_team.get("winCondition", "")
+            their_win_condition = their_team.get("winCondition", "")
+
+            # If neither team has a win condition set, fall back to won boolean
+            # If the other team has a win condition and we don't, we lost
+            if their_win_condition and not win_condition:
+                outcome = "loss"
+            elif win_condition and not their_win_condition:
+                outcome = "win"
             else:
-                score_them = score
+                outcome = "win" if our_won else "loss"
+
+        else:
+            # Fallback: find winning team by score delta
+            if len(teams) == 2:
+                t0_won = teams[0].get("won", False)
+                t1_won = teams[1].get("won", False)
+                # Pick the team with the recording player
+                if our_team_index == 0:
+                    outcome  = "win" if t0_won else "loss"
+                    our_side = "attack" if str(teams[0].get("role","")).lower() in ("attack","1") else "defense"
+                else:
+                    outcome  = "win" if t1_won else "loss"
+                    our_side = "attack" if str(teams[1].get("role","")).lower() in ("attack","1") else "defense"
 
         map_data   = data.get("map", {})
         map_id_raw = map_data.get("id")
         map_name   = MAP_ID_LOOKUP.get(map_id_raw, map_data.get("name"))
 
-        # r6-dissect roundNumber is 0-indexed
         round_number = data.get("roundNumber", 0)
         if isinstance(round_number, int):
-            round_number = round_number + 1  # always convert to 1-indexed
+            round_number = round_number + 1
 
         round_obj = Round(
             round_id=None,
@@ -382,7 +410,7 @@ class RecImporter:
         )
 
         return round_obj, {
-            "map_name":  map_name,
-            "score_us":  score_us,
+            "map_name":   map_name,
+            "score_us":   score_us,
             "score_them": score_them,
         }
