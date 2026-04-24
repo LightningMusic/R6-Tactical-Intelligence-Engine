@@ -38,6 +38,9 @@ MAP_ID_LOOKUP: dict[int, str] = {
     108180662680: "Close Quarter",
     108180662968: "Favela",
     108180728456: "Donut",
+    430788891316: "Theme Park",  # ThemeParkY11 — showing as Map(430788891316)
+    409325881472: "Chalet",      # ChaletY11
+    436375283234: "Villa",       # VillaY10
 }
 
 MAX_RETRIES     = 5
@@ -351,44 +354,56 @@ class RecImporter:
 
         if our_team_index is not None and len(teams) >= 2:
             our_team   = teams[our_team_index]
-            other_index = 1 - our_team_index
-            their_team = teams[other_index]
+            other_idx  = 1 - our_team_index
+            their_team = teams[other_idx]
 
-            role = our_team.get("role", "")
-            # r6-dissect role comes from TeamRole which is "Attack" or "Defense"
-            our_side = "attack" if str(role).lower() in ("attack", "1") else "defense"
+            # Determine side from role field
+            role_raw = str(our_team.get("role", "")).lower()
+            our_side = "attack" if role_raw in ("attack", "1") else "defense"
 
             score_us   = our_team.get("score")
             score_them = their_team.get("score")
 
-            # Use won field directly from our team
-            our_won = our_team.get("won", False)
+            # ── Primary: use score delta to determine winner ───────
+            # R6: the team whose score increases by 1 won the round.
+            # startingScore is the score at the START of this round.
+            our_start   = our_team.get("startingScore",   score_us)
+            their_start = their_team.get("startingScore", score_them)
 
-            # Sanity check: if winCondition is on the other team, we lost
-            win_condition = our_team.get("winCondition", "")
-            their_win_condition = their_team.get("winCondition", "")
+            our_gained   = (score_us   or 0) - (our_start   or 0)
+            their_gained = (score_them or 0) - (their_start or 0)
 
-            # If neither team has a win condition set, fall back to won boolean
-            # If the other team has a win condition and we don't, we lost
-            if their_win_condition and not win_condition:
-                outcome = "loss"
-            elif win_condition and not their_win_condition:
+            if our_gained > their_gained:
                 outcome = "win"
+            elif their_gained > our_gained:
+                outcome = "loss"
             else:
-                outcome = "win" if our_won else "loss"
+                # ── Fallback 1: explicit won boolean ───────────────
+                our_won   = bool(our_team.get("won",   False))
+                their_won = bool(their_team.get("won", False))
 
-        else:
-            # Fallback: find winning team by score delta
-            if len(teams) == 2:
-                t0_won = teams[0].get("won", False)
-                t1_won = teams[1].get("won", False)
-                # Pick the team with the recording player
-                if our_team_index == 0:
-                    outcome  = "win" if t0_won else "loss"
-                    our_side = "attack" if str(teams[0].get("role","")).lower() in ("attack","1") else "defense"
+                if our_won and not their_won:
+                    outcome = "win"
+                elif their_won and not our_won:
+                    outcome = "loss"
                 else:
-                    outcome  = "win" if t1_won else "loss"
-                    our_side = "attack" if str(teams[1].get("role","")).lower() in ("attack","1") else "defense"
+                    # ── Fallback 2: winCondition presence ──────────
+                    # The team with a winCondition set is the winner
+                    our_wc   = our_team.get("winCondition",   "")
+                    their_wc = their_team.get("winCondition", "")
+
+                    if our_wc and not their_wc:
+                        outcome = "win"
+                    elif their_wc and not our_wc:
+                        outcome = "loss"
+                    else:
+                        # Final fallback — default to loss if ambiguous
+                        outcome = "loss"
+                        print(
+                            f"[RecImporter] Warning: could not determine outcome "
+                            f"reliably for round {data.get('roundNumber', '?')}. "
+                            f"Defaulting to loss."
+                        )
 
         map_data   = data.get("map", {})
         map_id_raw = map_data.get("id")

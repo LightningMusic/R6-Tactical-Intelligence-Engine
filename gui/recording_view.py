@@ -54,6 +54,75 @@ class RecordingView(QWidget):
         self._recording_path: str | None     = None
         self._build_ui()
 
+    def _shutdown_and_eject(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        confirm = QMessageBox.question(
+            self, "Shut Down & Eject",
+            "This will:\n"
+            "  1. Stop OBS recording (if active)\n"
+            "  2. Shut down the Ollama AI server\n"
+            "  3. Close R6 Analyzer\n"
+            "  4. Eject the USB drive\n\n"
+            "Proceed?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        self._log_message("Shutting down...")
+
+        # Stop recording if active
+        if self._session_active:
+            try:
+                if hasattr(self, "_obs_watchdog"):
+                    self._obs_watchdog.stop()
+                self.obs.stop_recording()
+                self._log_message("OBS recording stopped.")
+            except Exception as e:
+                self._log_message(f"OBS stop error: {e}")
+
+        # Stop Ollama
+        try:
+            from analysis.intel_engine import IntelEngine
+            _e = IntelEngine()
+            _e.shutdown()
+            self._log_message("Ollama server stopped.")
+        except Exception as e:
+            self._log_message(f"Ollama shutdown error: {e}")
+
+        # Disconnect OBS
+        try:
+            self.obs.disconnect()
+            self._log_message("OBS disconnected.")
+        except Exception:
+            pass
+
+        # Eject USB — find USB drive letter from config
+        try:
+            from app.config import BASE_DIR
+            drive = BASE_DIR.drive   # e.g. "E:"
+            if drive:
+                import subprocess
+                # PowerShell eject via WMI — no admin needed for removable drives
+                ps_cmd = (
+                    f"$vol = Get-WmiObject Win32_Volume -Filter "
+                    f"\"DriveLetter='{drive}'\"; "
+                    f"$vol.DriveLetter; "
+                    f"(New-Object -comObject Shell.Application)"
+                    f".Namespace(17).ParseName('{drive}\\').InvokeVerb('Eject')"
+                )
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+                    "-Command", ps_cmd],
+                    creationflags=0x08000000,
+                )
+                self._log_message(f"Ejecting {drive}...")
+        except Exception as e:
+            self._log_message(f"Eject error (close app manually): {e}")
+
+        # Give log a moment to show, then exit
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1500, lambda: __import__("sys").exit(0))
     # =====================================================
     # UI
     # =====================================================
@@ -109,6 +178,16 @@ class RecordingView(QWidget):
         self._stop_btn.setMinimumHeight(44)
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._stop_session)
+
+        # At the bottom of the button layout
+        shutdown_btn = QPushButton("⏏  Shut Down & Eject USB")
+        shutdown_btn.setMinimumHeight(38)
+        shutdown_btn.setStyleSheet(
+            "QPushButton { color: #e05555; border: 1px solid #e05555; }"
+            "QPushButton:hover { background: #3a1a1a; }"
+        )
+        shutdown_btn.clicked.connect(self._shutdown_and_eject)
+        layout.addWidget(shutdown_btn)
 
         btn_layout.addWidget(self._start_btn)
         btn_layout.addWidget(self._stop_btn)

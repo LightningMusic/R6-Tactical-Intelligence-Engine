@@ -10,6 +10,8 @@ from typing import Any, Optional, Callable
 
 from app.config import TRANSCRIPTS_DIR, WHISPER_MODEL_PATH
 
+# At top of file, define once:
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 def _ensure_console() -> None:
     if sys.stdout is None:
@@ -74,7 +76,7 @@ def _get_audio_duration(ffmpeg_path: Path, input_path: Path) -> float:
                 str(input_path),
             ],
             capture_output=True, text=True, timeout=30,
-            creationflags=0x08000000 if sys.platform == "win32" else 0,
+            creationflags=_CREATE_NO_WINDOW,
         )
         return float(result.stdout.strip())
     except Exception:
@@ -105,7 +107,7 @@ def _extract_audio_chunk(
             ],
             capture_output=True,
             timeout=120,
-            creationflags=0x08000000 if sys.platform == "win32" else 0,
+            creationflags=_CREATE_NO_WINDOW,
         )
         return result.returncode == 0 and output_path.exists()
     except Exception as e:

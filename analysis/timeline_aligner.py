@@ -108,21 +108,25 @@ class TimelineAligner:
         timestamps: list[float],
         session_start_epoch: float,
     ) -> tuple[float, float]:
-        """
-        Converts absolute epoch timestamps to seconds-since-session-start.
-        """
         first_round = timestamps[0]
         last_round  = timestamps[-1]
 
-        start_sec = max(
-            0.0,
-            (first_round - session_start_epoch) - self.PRE_BUFFER_SEC
-        )
-        end_sec = (
-            (last_round - session_start_epoch)
-            + self.ROUND_DURATION_ESTIMATE_SEC
-            + self.POST_BUFFER_SEC
-        )
+        start_offset = first_round - session_start_epoch
+        end_offset   = last_round  - session_start_epoch
+
+        # Sanity check — if timestamps are before session start, something is wrong
+        # Fall back to estimating from file mtimes
+        if start_offset < 0 or end_offset < 0:
+            print(
+                f"[TimelineAligner] Warning: round timestamps predate session start "
+                f"(offset={start_offset:.0f}s). Falling back to mtime estimation."
+            )
+            # Use relative positioning: assume matches started near beginning
+            # of session with a small buffer
+            return 0.0, (last_round - first_round) + self.ROUND_DURATION_ESTIMATE_SEC + self.POST_BUFFER_SEC
+
+        start_sec = max(0.0, start_offset - self.PRE_BUFFER_SEC)
+        end_sec   = end_offset + self.ROUND_DURATION_ESTIMATE_SEC + self.POST_BUFFER_SEC
 
         return start_sec, end_sec
 

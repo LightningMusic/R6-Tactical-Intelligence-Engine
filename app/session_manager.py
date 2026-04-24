@@ -48,6 +48,7 @@ class SessionManager:
         self,
         status_callback: Optional[Callable[[str], None]] = None,
     ) -> list[ImportResult]:
+        import threading
 
         def log(msg: str) -> None:
             print(f"[SessionManager] {msg}")
@@ -69,31 +70,37 @@ class SessionManager:
         stable_folders = self._filter_stable_folders(new_folders)
 
         if not stable_folders:
-            log("Folders found but not yet stable — try stopping again in a moment.")
+            log("Folders found but not yet stable.")
             return [ImportResult(
                 status=ImportStatus.CRITICAL_FAILURE,
                 error_message="New folders found but none were stable enough to read.",
             )]
 
         log(f"Importing {len(stable_folders)} stable folder(s)...")
-
-        # Pass log callback into importer so UI log updates during parsing
         self.importer._log = log
         results = self.importer.import_multiple_folders(
             stable_folders, log_callback=log
         )
 
-        # ── Auto-create match records for anything with rounds ──
+        # ── Create match records immediately ─────────────────────
         log("Creating match records...")
         self._auto_create_matches(results, log)
 
-        # ── Transcription ─────────────────────────────────────
+        # ── Start transcription in background — don't block ──────
         if self.transcribe and self.recording_path:
-            log("Starting transcription (this may take a few minutes)...")
-            try:
-                self._run_transcription(results, stable_folders, log_callback=log)
-            except Exception as e:
-                log(f"Transcription failed (non-fatal): {e}")
+            log("Starting transcription in background (will not block import)...")
+
+            def _transcribe_bg() -> None:
+                try:
+                    self._run_transcription(results, stable_folders, log_callback=log)
+                except Exception as e:
+                    log(f"Transcription error (non-fatal): {e}")
+
+            t = threading.Thread(target=_transcribe_bg, daemon=True, name="Transcription")
+            t.start()
+            # Don't join — let it run in background
+        elif self.transcribe and not self.recording_path:
+            log("No recording path — skipping transcription.")
 
         return results
 
@@ -226,16 +233,23 @@ class SessionManager:
                 )
 
         # ── Step 3: Get session start time for alignment ──────────
+        # Use the recording file's creation time — this is when OBS
+        # started writing, which is the true session start.
         session_start_epoch: Optional[float] = None
-        if self.recording_path.exists():
-            session_start_epoch = self.recording_path.stat().st_mtime - (
-                self.recording_path.stat().st_size / (1024 * 1024) / 1.5 * 60
-            )
-            # Better: use the file creation time on Windows
+
+        if self.recording_path and self.recording_path.exists():
             try:
+                # st_ctime on Windows = file creation time (not change time)
                 session_start_epoch = self.recording_path.stat().st_ctime
-            except Exception:
-                pass
+                import datetime as _dt
+                readable = _dt.datetime.fromtimestamp(session_start_epoch).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                if log_callback:
+                    log_callback(f"Session start (from recording): {readable}")
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"Could not read recording timestamp: {e}")
 
         # ── Step 4: Clip + store per-match transcript ─────────────
         aligner  = TimelineAligner()
