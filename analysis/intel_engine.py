@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import io
+import json
 import subprocess
 from typing import Optional, Callable
 
@@ -15,201 +16,285 @@ def _ensure_console() -> None:
         sys.stderr = io.StringIO()
 
 
-def _fix_frozen_paths() -> None:
-    if not getattr(sys, "frozen", False):
-        return
-    _ensure_console()
-    internal_dir = os.path.join(os.path.dirname(sys.executable), "_internal")
-    llama_lib    = os.path.join(internal_dir, "llama_cpp", "lib")
-    if os.path.isdir(llama_lib):
-        os.environ["PATH"] = llama_lib + os.pathsep + os.environ.get("PATH", "")
-        try:
-            os.add_dll_directory(llama_lib)
-        except (AttributeError, OSError):
-            pass
-        print(f"[AI] llama_cpp lib registered: {llama_lib}")
-    else:
-        print(f"[AI] WARNING: llama_cpp lib not at {llama_lib}")
-
-
 def _detect_hardware() -> tuple[int, int]:
-    """
-    Returns (n_gpu_layers, n_threads).
-    Detects NVIDIA GPU via nvidia-smi without admin rights.
-    Falls back gracefully to CPU.
-    """
-    # ── CPU threads ──────────────────────────────────────────
+    """Returns (n_gpu_layers, n_threads) for llama-cpp fallback."""
     try:
         import psutil
-        physical_cores = psutil.cpu_count(logical=False) or 8
-        # Use physical cores only — logical (HT) cores hurt LLM perf
-        n_threads = min(physical_cores, 16)
+        n_threads = min(psutil.cpu_count(logical=False) or 8, 16)
     except Exception:
         n_threads = 8
 
-    # ── NVIDIA GPU via nvidia-smi (no admin needed) ───────────
     try:
-        result = subprocess.run(
-            ["nvidia-smi",
-             "--query-gpu=name,memory.total,memory.free",
-             "--format=csv,noheader,nounits"],
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
             creationflags=0x08000000 if sys.platform == "win32" else 0,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
-            for line in lines:
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 3:
-                    gpu_name  = parts[0]
-                    total_mb  = int(parts[1])
-                    free_mb   = int(parts[2])
-                    # RTX 4060 has 8GB — use ~80% for model layers
-                    # Rule of thumb: ~100MB per layer for Q4_K_M models
-                    usable_mb    = int(free_mb * 0.80)
-                    gpu_layers   = min(usable_mb // 100, 40)
-                    gpu_layers   = max(gpu_layers, 20)
-                    print(
-                        f"[AI] GPU detected: {gpu_name} "
-                        f"({total_mb}MB total, {free_mb}MB free) "
-                        f"→ {gpu_layers} layers offloaded"
-                    )
-                    return gpu_layers, n_threads
-    except FileNotFoundError:
-        print("[AI] nvidia-smi not found — checking environment variables...")
-    except Exception as e:
-        print(f"[AI] GPU detection error: {e}")
+        if r.returncode == 0 and r.stdout.strip():
+            free_mb    = int(r.stdout.strip().splitlines()[0].strip())
+            gpu_layers = min(int(free_mb * 0.80 / 100), 40)
+            gpu_layers = max(gpu_layers, 20)
+            print(f"[AI] GPU: {free_mb}MB free → {gpu_layers} layers")
+            return gpu_layers, n_threads
+    except Exception:
+        pass
 
-    # ── Check environment GPU hints ───────────────────────────
-    if os.environ.get("CUDA_VISIBLE_DEVICES") not in (None, "", "-1"):
-        print("[AI] CUDA_VISIBLE_DEVICES set — assuming GPU available (20 layers)")
-        return 20, n_threads
-
-    if os.environ.get("HIP_VISIBLE_DEVICES") or os.environ.get("ROCR_VISIBLE_DEVICES"):
-        print("[AI] AMD GPU detected via env — 20 layers")
-        return 20, n_threads
-
-    print(f"[AI] CPU-only mode — {n_threads} threads")
     return 0, n_threads
 
 
-class IntelEngine:
-    MAX_RETRIES = 3
-    RETRY_DELAY = 1.0
+class _OllamaBackend:
+    """
+    Calls a locally running Ollama server.
+    Ollama auto-detects GPU, needs no admin, no AVX worries.
+    """
+
+    DEFAULT_MODEL  = "llama3.2:3b"
+    OLLAMA_URL     = "http://localhost:11434/api/generate"
+    CONNECT_TIMEOUT = 5
+    READ_TIMEOUT    = 300
+
+    def __init__(self, model: str = DEFAULT_MODEL) -> None:
+        self.model = model
+
+    def is_available(self) -> bool:
+        try:
+            import urllib.request
+            req = urllib.request.urlopen(
+                "http://localhost:11434/api/tags",
+                timeout=self.CONNECT_TIMEOUT,
+            )
+            return req.status == 200
+        except Exception:
+            return False
+
+    def model_is_pulled(self) -> bool:
+        try:
+            import urllib.request
+            req  = urllib.request.urlopen(
+                "http://localhost:11434/api/tags",
+                timeout=self.CONNECT_TIMEOUT,
+            )
+            data = json.loads(req.read().decode())
+            models = [m.get("name","") for m in data.get("models", [])]
+            return any(self.model.split(":")[0] in m for m in models)
+        except Exception:
+            return False
+
+    def ensure_model(self) -> bool:
+        """Pulls the model if not already present. Returns True on success."""
+        if self.model_is_pulled():
+            return True
+        print(f"[AI] Pulling Ollama model: {self.model} ...")
+        try:
+            import urllib.request
+            import urllib.error
+            body = json.dumps({"name": self.model}).encode()
+            req  = urllib.request.Request(
+                "http://localhost:11434/api/pull",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                for line in resp:
+                    try:
+                        d = json.loads(line.decode())
+                        status = d.get("status", "")
+                        if status:
+                            print(f"[AI] {status}")
+                    except Exception:
+                        pass
+            return self.model_is_pulled()
+        except Exception as e:
+            print(f"[AI] Model pull failed: {e}")
+            return False
+
+    def generate(self, prompt: str, max_tokens: int = 900) -> str:
+        import urllib.request
+        import urllib.error
+
+        body = json.dumps({
+            "model":  self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": 0.3,
+                "top_p":       0.9,
+                "stop":        ["[/INST]", "</s>"],
+            },
+        }).encode()
+
+        req = urllib.request.Request(
+            self.OLLAMA_URL,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.READ_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode())
+                return data.get("response", "").strip()
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Ollama request failed: {e}")
+
+
+class _LlamaCppBackend:
+    """
+    Fallback: direct llama-cpp-python if Ollama isn't running.
+    """
 
     def __init__(self) -> None:
-        self._llm  = None
+        self._llm        = None
         self._load_error: Optional[str] = None
 
-    def _load_model(self) -> None:
+    def load(self) -> None:
         if self._llm is not None:
             return
-        if self._load_error is not None:
+        if self._load_error:
             raise RuntimeError(self._load_error)
-
-        _fix_frozen_paths()
-        _ensure_console()
 
         if not MODEL_PATH.exists():
             self._load_error = (
-                f"No model found at {MODEL_PATH}\n"
-                "Place a Q4_K_M .gguf file there named 'model.gguf'."
+                f"No model at {MODEL_PATH}\n"
+                "Place a Q4_K_M GGUF file there named model.gguf"
             )
             raise FileNotFoundError(self._load_error)
 
         try:
             from llama_cpp import Llama
         except Exception as e:
-            msg = str(e)
-            if "0xc000001d" in msg or "illegal instruction" in msg.lower():
-                self._load_error = (
-                    f"Model load failed: {e}\n"
-                    "This usually means the bundled llama runtime is using CPU "
-                    "instructions the machine does not support.\n"
-                    "Fix: pip uninstall llama-cpp-python -y && "
-                    "pip install llama-cpp-python "
-                    "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124"
-                )
-            else:
-                self._load_error = f"Failed to import llama_cpp: {e}"
+            self._load_error = (
+                f"llama_cpp import failed: {e}\n"
+                "Try: pip install llama-cpp-python "
+                "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124"
+            )
             raise RuntimeError(self._load_error) from e
 
         from app.config import settings
         gpu_layers, n_threads = _detect_hardware()
-
-        # Allow settings override
         if settings.LLM_GPU_LAYERS > 0:
             gpu_layers = settings.LLM_GPU_LAYERS
-        if settings.LLM_N_THREADS > 0:
-            n_threads = settings.LLM_N_THREADS
-
-        n_ctx = settings.LLM_N_CTX
-
-        print(f"[AI] Loading: {MODEL_PATH.name}")
-        print(f"[AI] GPU layers={gpu_layers} | CTX={n_ctx} | Threads={n_threads}")
 
         try:
             self._llm = Llama(
                 model_path=str(MODEL_PATH),
                 n_gpu_layers=gpu_layers,
-                n_ctx=n_ctx,
+                n_ctx=settings.LLM_N_CTX,
                 n_threads=n_threads,
                 n_batch=512,
                 verbose=False,
-                use_mlock=False,   # never requires admin/root
+                use_mlock=False,
                 use_mmap=True,
             )
-            print("[AI] Model loaded successfully.")
+            print(f"[AI] llama-cpp loaded: {MODEL_PATH.name}")
         except Exception as e:
             self._load_error = f"Model load failed: {e}"
             raise RuntimeError(self._load_error) from e
 
+    def generate(self, prompt: str, max_tokens: int = 900) -> str:
+        self.load()
+        from llama_cpp import CreateCompletionResponse
+        from typing import cast
+        response = self._llm(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=0.3,
+            stop=["</s>", "[INST]", "[/INST]"],
+            echo=False,
+            stream=False,
+        )
+        result = cast("CreateCompletionResponse", response)
+        return result["choices"][0]["text"].strip()
+
+
+class IntelEngine:
+    """
+    AI analysis engine.
+    Priority: Ollama (best) → llama-cpp-python (fallback) → error message.
+    """
+
+    MAX_RETRIES = 2
+    RETRY_DELAY = 1.0
+
+    def __init__(self) -> None:
+        _ensure_console()
+        self._ollama     = _OllamaBackend()
+        self._llama_cpp  = _LlamaCppBackend()
+        self._backend: Optional[str] = None   # "ollama" | "llama_cpp" | None
+
+    def _select_backend(self) -> str:
+        if self._backend is not None:
+            return self._backend
+
+        # Try Ollama first
+        if self._ollama.is_available():
+            if not self._ollama.model_is_pulled():
+                print(f"[AI] Ollama running — pulling {self._ollama.model}...")
+                if self._ollama.ensure_model():
+                    self._backend = "ollama"
+                    print(f"[AI] Backend: Ollama ({self._ollama.model})")
+                    return self._backend
+            else:
+                self._backend = "ollama"
+                print(f"[AI] Backend: Ollama ({self._ollama.model})")
+                return self._backend
+
+        print("[AI] Ollama not available — trying llama-cpp-python...")
+
+        # Try llama-cpp
+        try:
+            self._llama_cpp.load()
+            self._backend = "llama_cpp"
+            print("[AI] Backend: llama-cpp-python")
+            return self._backend
+        except Exception as e:
+            print(f"[AI] llama-cpp also unavailable: {e}")
+            self._backend = "none"
+            return self._backend
+
     def generate(
         self,
         prompt: str,
-        max_tokens: int = 800,
-        temperature: float = 0.3,
-        stop: Optional[list] = None,
+        max_tokens: int = 900,
         progress_callback: Optional[Callable] = None,
     ) -> str:
-        try:
-            self._load_model()
-        except Exception as e:
-            return f"[AI unavailable: {e}]"
+        backend = self._select_backend()
 
-        if self._llm is None:
-            return "[AI] Model not available."
+        if backend == "none":
+            return (
+                "[AI unavailable]\n"
+                "To enable AI analysis, either:\n"
+                "  1. Install Ollama: https://ollama.com/download\n"
+                "     Then run: ollama pull llama3.2:3b\n"
+                "  2. Place a model.gguf in data/models/ and install\n"
+                "     a compatible llama-cpp-python wheel."
+            )
 
-        last_error = ""
         for attempt in range(1, self.MAX_RETRIES + 1):
             if progress_callback:
-                progress_callback(attempt, self.MAX_RETRIES,
-                                  f"Generating... {attempt}/{self.MAX_RETRIES}")
-            try:
-                response = self._llm(
-                    prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    stop=stop or ["</s>", "[INST]", "[/INST]"],
-                    echo=False,
-                    stream=False,
+                progress_callback(
+                    attempt, self.MAX_RETRIES,
+                    f"Generating via {backend}... ({attempt}/{self.MAX_RETRIES})"
                 )
-                from typing import cast
-                from llama_cpp import CreateCompletionResponse
-                result = cast("CreateCompletionResponse", response)
-                text   = result["choices"][0]["text"].strip()
+            try:
+                if backend == "ollama":
+                    text = self._ollama.generate(prompt, max_tokens)
+                else:
+                    text = self._llama_cpp.generate(prompt, max_tokens)
+
                 if text:
                     if progress_callback:
                         progress_callback(attempt, self.MAX_RETRIES, "Done.")
                     return text
-                last_error = "Empty response"
-            except Exception as e:
-                last_error = str(e)
-                print(f"[AI] Attempt {attempt} failed: {e}")
-            if attempt < self.MAX_RETRIES:
-                time.sleep(self.RETRY_DELAY)
 
-        return f"[AI] Failed after {self.MAX_RETRIES} attempts. Last: {last_error}"
+            except Exception as e:
+                print(f"[AI] Attempt {attempt} failed: {e}")
+                if attempt < self.MAX_RETRIES:
+                    time.sleep(self.RETRY_DELAY)
+
+        return "[AI] Generation failed after retries."
 
     def analyze_match(
         self,
@@ -242,7 +327,7 @@ class IntelEngine:
         prompt     = self._build_match_prompt(match, metrics, summary, tps, transcript)
 
         if progress_callback:
-            progress_callback(0, self.MAX_RETRIES, "Generating match summary...")
+            progress_callback(0, 1, "Generating match summary...")
 
         text = self.generate(prompt, max_tokens=900, progress_callback=progress_callback)
         self._store_metric(repo, match_id, "ai_match_summary", text)
@@ -285,6 +370,8 @@ class IntelEngine:
             results[name] = self.generate(prompt, max_tokens=400)
         return results
 
+    # ── Prompt builders ───────────────────────────────────────
+
     def _build_match_prompt(self, match, metrics, summary, tps, transcript) -> str:
         round_lines = []
         for r in match.rounds:
@@ -295,7 +382,6 @@ class IntelEngine:
                 f"{'WIN' if r.outcome=='win' else 'LOSS'} | "
                 f"{(r.site or '?'):<30} | K/D {k}/{d}"
             )
-        rounds_block = "\n".join(round_lines) or "  No data."
 
         player_lines = []
         for pid, data in summary.items():
@@ -308,77 +394,71 @@ class IntelEngine:
                 f"UE:{data['utility_efficiency']:.0%} "
                 f"TPS:{score:.3f}"
             )
-        players_block = "\n".join(player_lines) or "  No data."
 
         comms = ""
         if transcript:
             top_locs    = list(transcript.get("top_locations", {}).keys())[:5]
             top_actions = list(transcript.get("top_actions",   {}).keys())[:5]
             speakers    = transcript.get("speakers", {})
-            speaker_block = ""
-            if speakers:
-                for spk, stats in list(speakers.items())[:5]:
-                    speaker_block += (
-                        f"    {spk}: {stats.get('word_count',0)} words, "
-                        f"top: {', '.join(stats.get('top_words',[])[:3])}\n"
-                    )
+            spk_lines   = ""
+            for spk, sd in list(speakers.items())[:5]:
+                spk_lines += (
+                    f"    {spk}: {sd.get('word_count',0)} words, "
+                    f"top: {', '.join(sd.get('top_words',[])[:4])}\n"
+                )
             comms = (
-                f"\nCOMMUNICATIONS\n==============\n"
-                f"  Words spoken : {transcript.get('word_count', 0)}\n"
-                f"  Locations    : {', '.join(top_locs) or 'none'}\n"
-                f"  Actions      : {', '.join(top_actions) or 'none'}\n"
-                f"  Silence gaps : {transcript.get('coord_gaps', 0)} (>8s)\n"
+                "\nCOMMUNICATIONS\n==============\n"
+                f"  Words       : {transcript.get('word_count',0)}\n"
+                f"  Locations   : {', '.join(top_locs) or 'none'}\n"
+                f"  Actions     : {', '.join(top_actions) or 'none'}\n"
+                f"  Coord gaps  : {transcript.get('coord_gaps',0)} (>8s silences)\n"
             )
-            if speaker_block:
-                comms += f"  Speakers:\n{speaker_block}"
+            if spk_lines:
+                comms += f"  Speakers:\n{spk_lines}"
 
         return (
             "[INST] You are an elite Rainbow Six Siege tactical analyst. "
             "Be specific, cite data, no filler.\n\n"
             f"MATCH: vs {match.opponent_name} on {match.map} "
-            f"| Result: {(match.result or 'In Progress').upper()}\n\n"
+            f"| {(match.result or 'In Progress').upper()}\n\n"
             "METRICS\n=======\n"
-            f"  Win Rate             {metrics['win_rate']:.0%}\n"
-            f"  Attack Win Rate      {metrics['attack_win_rate']:.0%}\n"
-            f"  Defense Win Rate     {metrics['defense_win_rate']:.0%}\n"
-            f"  Engagement Win Rate  {metrics['engagement_win_rate']:.0%}\n"
-            f"  Drone Efficiency     {metrics['drone_efficiency']:.0%}\n"
-            f"  Reinforcement Usage  {metrics['reinforcement_rate']:.0%}\n"
-            f"  Man Advantage Conv   {metrics['man_advantage']:.0%}\n"
-            f"  Clutch Rate          {metrics['clutch_rate']:.0%}\n\n"
-            "ROUNDS\n======\n" + rounds_block + "\n\n"
+            f"  Win Rate {metrics['win_rate']:.0%} | "
+            f"Atk {metrics['attack_win_rate']:.0%} | "
+            f"Def {metrics['defense_win_rate']:.0%} | "
+            f"Eng {metrics['engagement_win_rate']:.0%}\n"
+            f"  Drone Eff {metrics['drone_efficiency']:.0%} | "
+            f"Reinf {metrics['reinforcement_rate']:.0%} | "
+            f"ManAdv {metrics['man_advantage']:.0%} | "
+            f"Clutch {metrics['clutch_rate']:.0%}\n\n"
+            "ROUNDS\n======\n" + "\n".join(round_lines) + "\n\n"
             "PLAYERS (EW=EngWin% SR=Survival% UE=Utility% TPS=score)\n"
             "=========================================================\n"
-            + players_block + "\n"
+            + "\n".join(player_lines) + "\n"
             + comms + "\n"
-            "TASK\n====\n"
-            "Write a tactical debrief in EXACTLY this structure:\n\n"
-            "## MATCH SUMMARY\n(2 sentences: result + overall tone)\n\n"
-            "## STRENGTHS\n1. (stat evidence)\n2. (stat evidence)\n\n"
-            "## WEAKNESSES\n1. (stat evidence)\n2. (stat evidence)\n\n"
+            "TASK: Write a debrief in EXACTLY this structure:\n\n"
+            "## MATCH SUMMARY\n(2 sentences: result and overall tone)\n\n"
+            "## STRENGTHS\n1. (with stat)\n2. (with stat)\n\n"
+            "## WEAKNESSES\n1. (with stat)\n2. (with stat)\n\n"
             "## ADJUSTMENTS\n1. (actionable)\n2. (actionable)\n3. (actionable)\n\n"
             "## STANDOUT PLAYERS\n"
-            "Best TPS: (name + why)\nNeeds work: (name + why)\n\n"
-            "## COMMS ANALYSIS\n(If comms data available: who called most, "
-            "any coordination gaps, key callout patterns)\n\n"
+            "Best TPS: (name + why)\n"
+            "Needs work: (name + why)\n\n"
+            "## COMMS ANALYSIS\n"
+            "(Who called most, coordination gaps, key callout patterns)\n\n"
             "Cite round numbers and metrics. No generic advice.\n[/INST]"
         )
 
     def _build_player_prompt(self, stat, pdata: dict, tps_score: float) -> str:
         return (
-            "[INST] You are a Rainbow Six Siege performance coach. "
-            "Be direct and specific.\n\n"
-            f"PLAYER: {stat.player.name} | Op: {stat.operator.name} ({stat.operator.side})\n\n"
-            "STATS\n=====\n"
-            f"K/D/A           : {pdata.get('kills',0)}/{pdata.get('deaths',0)}/{pdata.get('assists',0)}\n"
-            f"K/D Ratio       : {pdata.get('kd_ratio',0.0):.2f}\n"
-            f"Engagement Win% : {pdata.get('engagement_win_rate',0.0):.0%}\n"
-            f"Survival Rate   : {pdata.get('survival_rate',0.0):.0%}\n"
-            f"Utility Eff%    : {pdata.get('utility_efficiency',0.0):.0%}\n"
-            f"Plant Success%  : {pdata.get('plant_success_rate',0.0):.0%}\n"
-            f"Rounds Played   : {pdata.get('rounds_played',1)}\n"
-            f"TPS Score       : {tps_score:.3f}/1.0\n\n"
-            "Respond in EXACTLY this format (under 80 words):\n"
+            "[INST] You are a Rainbow Six Siege performance coach. Direct and specific.\n\n"
+            f"PLAYER: {stat.player.name} | {stat.operator.name} ({stat.operator.side})\n"
+            f"K/D/A: {pdata.get('kills',0)}/{pdata.get('deaths',0)}/{pdata.get('assists',0)} | "
+            f"KD:{pdata.get('kd_ratio',0.0):.2f} | "
+            f"EW:{pdata.get('engagement_win_rate',0.0):.0%} | "
+            f"SR:{pdata.get('survival_rate',0.0):.0%} | "
+            f"UE:{pdata.get('utility_efficiency',0.0):.0%} | "
+            f"TPS:{tps_score:.3f}\n\n"
+            "Respond in EXACTLY this format:\n"
             "STRENGTH: [one thing done well — cite one stat]\n"
             "WEAKNESS: [one area to improve — cite one stat]\n"
             "DRILL: [one concrete 10-minute practice drill]\n[/INST]"
@@ -387,7 +467,6 @@ class IntelEngine:
     def _get_transcript_summary(self, match_id: int) -> dict:
         try:
             from database.repositories import Repository
-            import json
             repo = Repository()
             with repo.db.get_connection() as conn:
                 row = conn.execute(

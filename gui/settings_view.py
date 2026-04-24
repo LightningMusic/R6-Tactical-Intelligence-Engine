@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QFileDialog, QTabWidget, QComboBox, QAbstractItemView
 )
 from PySide6.QtCore import Qt
-
+from app.config import settings
 
 class SettingsView(QWidget):
 
@@ -204,8 +204,9 @@ class SettingsView(QWidget):
         self._gpu_layers_spin.setRange(0, 100)
         self._gpu_layers_spin.setSpecialValueText("0 (CPU only)")
         self._ctx_spin = QSpinBox()
-        self._ctx_spin.setRange(512, 16384)
-        self._ctx_spin.setSingleStep(512)
+        self._ctx_spin.setRange(1024, 16384)
+        n_ctx = settings.LLM_N_CTX
+        self._ctx_spin.setValue(n_ctx)
         self._threads_spin = QSpinBox()
         self._threads_spin.setRange(1, 32)
         llm_form.addRow("GPU Layers:",   self._gpu_layers_spin)
