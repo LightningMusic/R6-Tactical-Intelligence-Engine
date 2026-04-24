@@ -25,14 +25,19 @@ def initialize_system() -> None:
     print("✅ System initialization complete.")
 
 
+import atexit
+
 def main() -> None:
     initialize_system()
-
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
-
     window = MainWindow()
     window.show()
+
+    # Shut down Ollama server cleanly when app exits
+    from analysis.intel_engine import IntelEngine
+    _intel = IntelEngine()
+    atexit.register(_intel.shutdown)
 
     sys.exit(app.exec())
 

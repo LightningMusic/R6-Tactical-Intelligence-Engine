@@ -6,7 +6,7 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Any, Optional, Callable
 
 from app.config import TRANSCRIPTS_DIR, WHISPER_MODEL_PATH
 
@@ -35,7 +35,6 @@ def _fix_whisper_assets() -> None:
 
 
 def _find_ffmpeg() -> Optional[Path]:
-    """Returns path to ffmpeg executable or None."""
     import shutil
     found = shutil.which("ffmpeg")
     if found:
@@ -52,7 +51,36 @@ def _find_ffmpeg() -> Optional[Path]:
                     + os.environ.get("PATH", "")
                 )
                 return candidate
+    # Also check next to main script in dev mode
+    dev_path = Path(__file__).parent.parent / "ffmpeg.exe"
+    if dev_path.exists():
+        return dev_path
     return None
+
+
+def _get_audio_duration(ffmpeg_path: Path, input_path: Path) -> float:
+    """Returns duration in seconds using ffprobe."""
+    ffprobe = Path(str(ffmpeg_path).replace("ffmpeg.exe", "ffprobe.exe"))
+    if not ffprobe.exists():
+        ffprobe = Path(str(ffmpeg_path).replace("ffmpeg", "ffprobe"))
+
+    try:
+        result = subprocess.run(
+            [
+                str(ffprobe) if ffprobe.exists() else "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(input_path),
+            ],
+            capture_output=True, text=True, timeout=30,
+            creationflags=0x08000000 if sys.platform == "win32" else 0,
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        # Fallback estimate: ~1.5 MB/min for MP4
+        mb = input_path.stat().st_size / (1024 * 1024)
+        return (mb / 1.5) * 60.0
 
 
 def _extract_audio_chunk(
@@ -62,70 +90,46 @@ def _extract_audio_chunk(
     start_sec: float,
     duration_sec: float,
 ) -> bool:
-    """Extracts a mono 16kHz audio chunk from video using ffmpeg."""
     try:
         result = subprocess.run(
             [
-                str(ffmpeg_path),
-                "-y",                          # overwrite
-                "-ss", str(start_sec),
-                "-t",  str(duration_sec),
+                str(ffmpeg_path), "-y",
+                "-ss", f"{start_sec:.3f}",
+                "-t",  f"{duration_sec:.3f}",
                 "-i",  str(input_path),
-                "-vn",                         # no video
-                "-ac", "1",                    # mono
-                "-ar", "16000",                # 16kHz (Whisper native)
-                "-acodec", "pcm_s16le",        # uncompressed WAV
+                "-vn",          # drop video
+                "-ac", "1",     # mono
+                "-ar", "16000", # 16 kHz — Whisper native
+                "-acodec", "pcm_s16le",
                 str(output_path),
             ],
             capture_output=True,
             timeout=120,
             creationflags=0x08000000 if sys.platform == "win32" else 0,
         )
-        return result.returncode == 0
+        return result.returncode == 0 and output_path.exists()
     except Exception as e:
-        print(f"[Whisper] ffmpeg chunk extraction failed: {e}")
+        print(f"[Whisper] ffmpeg extraction failed: {e}")
         return False
-
-
-def _get_audio_duration(ffmpeg_path: Path, input_path: Path) -> float:
-    """Returns duration of audio/video file in seconds."""
-    try:
-        result = subprocess.run(
-            [
-                str(ffmpeg_path).replace("ffmpeg", "ffprobe")
-                if "ffmpeg" in str(ffmpeg_path)
-                else "ffprobe",
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(input_path),
-            ],
-            capture_output=True, text=True, timeout=30,
-        )
-        return float(result.stdout.strip())
-    except Exception:
-        # Fallback: estimate from file size (1.5MB per minute for MP4)
-        mb = input_path.stat().st_size / (1024 * 1024)
-        return mb / 1.5 * 60
 
 
 class WhisperTranscriber:
 
-    CHUNK_DURATION_SEC = 600   # 10-minute chunks — manageable memory per chunk
-    MAX_CHUNK_MB       = 500   # don't bother chunking below this file size
+    CHUNK_DURATION_SEC = 600  # 10-minute chunks
 
     def __init__(self) -> None:
-        self._model    = None
-        self._ffmpeg   = None
+        self._model: Any    = None   # whisper.Whisper — typed as Any to avoid import-time issues
+        self._ffmpeg: Optional[Path] = None
 
     def _get_ffmpeg(self) -> Path:
         if self._ffmpeg is None:
             self._ffmpeg = _find_ffmpeg()
         if self._ffmpeg is None:
             raise RuntimeError(
-                "ffmpeg not found. Place ffmpeg.exe next to R6Analyzer.exe.\n"
-                "Download from: https://www.gyan.dev/ffmpeg/builds/ "
-                "(ffmpeg-release-essentials.zip)"
+                "ffmpeg not found.\n"
+                "Place ffmpeg.exe next to R6Analyzer.exe on the USB.\n"
+                "Download: https://www.gyan.dev/ffmpeg/builds/ "
+                "(ffmpeg-release-essentials.zip → bin/ffmpeg.exe)"
             )
         return self._ffmpeg
 
@@ -136,7 +140,7 @@ class WhisperTranscriber:
         _fix_whisper_assets()
 
         try:
-            import whisper
+            import whisper  # type: ignore[import-untyped]
         except ImportError:
             raise ImportError(
                 "openai-whisper not installed.\n"
@@ -148,33 +152,38 @@ class WhisperTranscriber:
         if not WHISPER_MODEL_PATH.exists():
             raise FileNotFoundError(
                 f"Whisper model not found at {WHISPER_MODEL_PATH}\n"
-                "Download with: python -c \"import whisper; "
+                "Download it by running once in your venv:\n"
+                "  python -c \"import whisper; "
                 "whisper.load_model('small', download_root='data/models/')\""
             )
 
-        # Confirm ffmpeg exists before loading model
+        # Confirm ffmpeg before loading the model
         self._get_ffmpeg()
 
         size = settings.WHISPER_MODEL_SIZE
-        print(f"[Whisper] Loading '{size}' model...")
+        print(f"[Whisper] Loading '{size}' model from {WHISPER_MODEL_PATH.parent} ...")
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            self._model = whisper.load_model(
+            self._model = whisper.load_model(   # type: ignore[attr-defined]
                 size,
                 download_root=str(WHISPER_MODEL_PATH.parent),
             )
         print("[Whisper] Model ready.")
+
+    # =====================================================
+    # FULL CHUNKED TRANSCRIPTION
+    # =====================================================
 
     def transcribe_full(
         self,
         audio_path: Path,
         language: str = "en",
         progress_callback: Optional[Callable[[str], None]] = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """
-        Transcribes the full recording using chunked processing.
-        Handles large MP4 files by extracting 10-minute audio chunks.
+        Transcribes the full recording in 10-minute chunks.
+        Returns a combined dict with 'text' and 'segments'.
         """
         _ensure_console()
         self._load_model()
@@ -182,64 +191,55 @@ class WhisperTranscriber:
         if not audio_path.exists():
             raise FileNotFoundError(f"Recording not found: {audio_path}")
 
-        ffmpeg = self._get_ffmpeg()
-        mb     = audio_path.stat().st_size / (1024 * 1024)
-
-        if progress_callback:
-            progress_callback(
-                f"Preparing transcription: {audio_path.name} ({mb:.0f} MB)..."
-            )
-
-        # Get total duration
+        ffmpeg       = self._get_ffmpeg()
+        mb           = audio_path.stat().st_size / (1024 * 1024)
         duration_sec = _get_audio_duration(ffmpeg, audio_path)
-        print(f"[Whisper] Recording duration: {duration_sec/60:.1f} minutes")
 
+        n_chunks = max(1, int(duration_sec / self.CHUNK_DURATION_SEC) + 1)
+        msg = (
+            f"Recording: {duration_sec / 60:.1f} min ({mb:.0f} MB) — "
+            f"processing in {n_chunks} chunk(s)..."
+        )
+        print(f"[Whisper] {msg}")
         if progress_callback:
-            progress_callback(
-                f"Recording: {duration_sec/60:.1f} min — "
-                f"processing in {int(duration_sec/self.CHUNK_DURATION_SEC)+1} chunks..."
-            )
+            progress_callback(msg)
 
-        # Process in chunks
-        all_segments: list[dict] = []
-        full_text_parts: list[str] = []
+        all_segments: list[dict[str, Any]] = []
+        full_text_parts: list[str]         = []
         chunk_start = 0.0
         chunk_num   = 0
-
-        import whisper
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
 
             while chunk_start < duration_sec:
-                chunk_num   += 1
-                chunk_end    = min(chunk_start + self.CHUNK_DURATION_SEC, duration_sec)
-                chunk_dur    = chunk_end - chunk_start
-                chunk_file   = tmp_path / f"chunk_{chunk_num:03d}.wav"
+                chunk_num  += 1
+                chunk_end   = min(chunk_start + self.CHUNK_DURATION_SEC, duration_sec)
+                chunk_dur   = chunk_end - chunk_start
+                chunk_file  = tmp_path / f"chunk_{chunk_num:03d}.wav"
 
-                pct = int(chunk_start / duration_sec * 100)
-                msg = (
-                    f"Transcribing chunk {chunk_num} "
+                pct = int(chunk_start / duration_sec * 100) if duration_sec > 0 else 0
+                progress_msg = (
+                    f"Transcribing chunk {chunk_num}/{n_chunks} "
                     f"({chunk_start/60:.0f}–{chunk_end/60:.0f} min) [{pct}%]..."
                 )
-                print(f"[Whisper] {msg}")
+                print(f"[Whisper] {progress_msg}")
                 if progress_callback:
-                    progress_callback(msg)
+                    progress_callback(progress_msg)
 
-                # Extract audio chunk
                 ok = _extract_audio_chunk(
                     ffmpeg, audio_path, chunk_file,
-                    chunk_start, chunk_dur
+                    chunk_start, chunk_dur,
                 )
 
-                if not ok or not chunk_file.exists():
+                if not ok:
                     print(f"[Whisper] Chunk {chunk_num} extraction failed — skipping")
                     chunk_start += self.CHUNK_DURATION_SEC
                     continue
 
-                # Transcribe chunk
                 try:
-                    chunk_result = self._model.transcribe(
+                    # self._model.transcribe is typed as Any so Pylance won't complain
+                    raw: dict[str, Any] = self._model.transcribe(   # type: ignore[union-attr]
                         str(chunk_file),
                         language=language,
                         verbose=False,
@@ -254,22 +254,31 @@ class WhisperTranscriber:
                     )
 
                     # Offset timestamps by chunk start
-                    for seg in chunk_result.get("segments", []):
-                        seg["start"] += chunk_start
-                        seg["end"]   += chunk_start
-                        if "words" in seg:
-                            for w in seg["words"]:
-                                w["start"] += chunk_start
-                                w["end"]   += chunk_start
-                        all_segments.append(seg)
+                    for seg in raw.get("segments", []):
+                        seg_dict: dict[str, Any] = dict(seg)
+                        seg_dict["start"] = float(seg_dict.get("start", 0.0)) + chunk_start
+                        seg_dict["end"]   = float(seg_dict.get("end",   0.0)) + chunk_start
 
-                    chunk_text = chunk_result.get("text", "").strip()
+                        words_raw = seg_dict.get("words")
+                        if isinstance(words_raw, list):
+                            offset_words: list[dict[str, Any]] = []
+                            for w in words_raw:
+                                w2: dict[str, Any] = dict(w)
+                                w2["start"] = float(w2.get("start", 0.0)) + chunk_start
+                                w2["end"]   = float(w2.get("end",   0.0)) + chunk_start
+                                offset_words.append(w2)
+                            seg_dict["words"] = offset_words
+
+                        all_segments.append(seg_dict)
+
+                    chunk_text: str = raw.get("text", "") or ""
+                    chunk_text = chunk_text.strip()
                     if chunk_text:
                         full_text_parts.append(chunk_text)
 
                     print(
                         f"[Whisper] Chunk {chunk_num}: "
-                        f"{len(chunk_result.get('segments',[]))} segments, "
+                        f"{len(raw.get('segments', []))} segs, "
                         f"{len(chunk_text.split())} words"
                     )
 
@@ -277,148 +286,166 @@ class WhisperTranscriber:
                     print(f"[Whisper] Chunk {chunk_num} transcription error: {e}")
 
                 finally:
-                    # Clean up chunk immediately to free disk space
                     try:
-                        chunk_file.unlink()
+                        chunk_file.unlink(missing_ok=True)
                     except Exception:
                         pass
 
                 chunk_start += self.CHUNK_DURATION_SEC
 
-        full_text = " ".join(full_text_parts)
+        full_text  = " ".join(full_text_parts)
         total_words = len(full_text.split())
-
-        print(
-            f"[Whisper] Full transcription complete: "
-            f"{len(all_segments)} segments, {total_words} words"
+        done_msg    = (
+            f"Transcription complete: {total_words} words, "
+            f"{len(all_segments)} segments."
         )
+        print(f"[Whisper] {done_msg}")
         if progress_callback:
-            progress_callback(
-                f"Transcription complete: {total_words} words across "
-                f"{len(all_segments)} segments."
-            )
+            progress_callback(done_msg)
 
-        return {
-            "text":     full_text,
-            "segments": all_segments,
-            "language": language,
-        }
+        return {"text": full_text, "segments": all_segments, "language": language}
 
-    def transcribe(self, audio_path: Path, language: str = "en") -> dict:
+    def transcribe(self, audio_path: Path, language: str = "en") -> dict[str, Any]:
         """Backwards-compatible wrapper."""
         return self.transcribe_full(audio_path, language)
 
+    # =====================================================
+    # CLIP TO MATCH WINDOW
+    # =====================================================
+
     def clip_to_match(
         self,
-        full_result: dict,
+        full_result: dict[str, Any],
         match_start_sec: float,
         match_end_sec: float,
-    ) -> dict:
-        segments = full_result.get("segments", [])
-        clipped  = []
+    ) -> dict[str, Any]:
+        segments: list[Any] = full_result.get("segments") or []
+        clipped: list[dict[str, Any]] = []
 
         for seg in segments:
-            seg_start = seg.get("start", 0.0)
-            seg_end   = seg.get("end",   0.0)
+            if not isinstance(seg, dict):
+                continue
+
+            seg_start = float(seg.get("start") or 0.0)
+            seg_end   = float(seg.get("end")   or 0.0)
 
             if seg_end < match_start_sec or seg_start > match_end_sec:
                 continue
 
-            if "words" in seg:
-                words_in_window = [
-                    w for w in seg["words"]
-                    if w.get("start", 0) >= match_start_sec
-                    and w.get("end", 0)   <= match_end_sec
-                ]
-                if words_in_window:
-                    seg2 = dict(seg)
-                    seg2["words"] = words_in_window
-                    seg2["text"]  = " ".join(w.get("word","") for w in words_in_window)
-                    seg2["start"] = words_in_window[0]["start"]
-                    seg2["end"]   = words_in_window[-1]["end"]
-                    clipped.append(seg2)
+            words_raw = seg.get("words")
+            if isinstance(words_raw, list):
+                words_in: list[dict[str, Any]] = []
+                for w in words_raw:
+                    if not isinstance(w, dict):
+                        continue
+                    w_start = float(w.get("start") or 0.0)
+                    w_end   = float(w.get("end")   or 0.0)
+                    if w_start >= match_start_sec and w_end <= match_end_sec:
+                        words_in.append(w)
+
+                if words_in:
+                    new_seg: dict[str, Any] = dict(seg)
+                    new_seg["words"] = words_in
+                    new_seg["text"]  = " ".join(
+                        str(w.get("word") or "") for w in words_in
+                    )
+                    new_seg["start"] = float(words_in[0].get("start") or 0.0)
+                    new_seg["end"]   = float(words_in[-1].get("end")  or 0.0)
+                    clipped.append(new_seg)
             else:
-                clipped.append(seg)
+                clipped.append(dict(seg))
 
         return {
-            "text":     " ".join(s["text"].strip() for s in clipped),
+            "text":     " ".join(
+                str(s.get("text") or "").strip() for s in clipped
+            ),
             "segments": clipped,
         }
 
+    # =====================================================
+    # SPEAKER DIARIZATION
+    # =====================================================
+
     def diarize_speakers(
         self,
-        segments: list[dict],
+        segments: list[Any],
         n_speakers: int = 5,
-    ) -> dict:
-        """
-        Heuristic speaker separation by silence gaps.
-        Returns speaker → stats dict.
-        """
+    ) -> dict[str, dict[str, Any]]:
         if not segments:
             return {}
 
         SILENCE_THRESHOLD = 1.5
-        speakers: dict[str, dict] = {}
-        current_speaker = "Speaker_1"
-        speaker_num     = 1
-        last_end        = 0.0
         STOP_WORDS = {
             "the","a","an","is","it","in","on","to","i","we","and",
             "of","for","at","be","was","are","do","get","go","got",
             "im","its","uh","um","ok","okay","yeah","yep","yes","no",
         }
 
+        speakers: dict[str, dict[str, Any]] = {}
+        current_speaker = "Speaker_1"
+        speaker_num     = 1
+        last_end        = 0.0
+
         for seg in segments:
-            start = seg.get("start", 0.0)
-            text  = seg.get("text", "").strip()
+            if not isinstance(seg, dict):
+                continue
+
+            start = float(seg.get("start") or 0.0)
+            text  = str(seg.get("text") or "").strip()
             if not text:
                 continue
 
             gap = start - last_end
             if gap > SILENCE_THRESHOLD:
-                speaker_num    = (speaker_num % n_speakers) + 1
+                speaker_num     = (speaker_num % n_speakers) + 1
                 current_speaker = f"Speaker_{speaker_num}"
 
             if current_speaker not in speakers:
                 speakers[current_speaker] = {
-                    "segments":   [],
+                    "segments":  [],
                     "word_count": 0,
-                    "top_words":  [],
-                    "talk_time":  0.0,
+                    "top_words": [],
+                    "talk_time": 0.0,
                 }
 
-            words    = text.split()
-            duration = seg.get("end", start) - start
+            duration = float(seg.get("end") or start) - start
             speakers[current_speaker]["segments"].append({
                 "start": start,
-                "end":   seg.get("end", start),
+                "end":   float(seg.get("end") or start),
                 "text":  text,
             })
-            speakers[current_speaker]["word_count"] += len(words)
+            speakers[current_speaker]["word_count"] += len(text.split())
             speakers[current_speaker]["talk_time"]  += duration
-            last_end = seg.get("end", start)
+            last_end = float(seg.get("end") or start)
 
-        for spk, data in speakers.items():
+        # Compute top words per speaker
+        for spk_data in speakers.values():
             freq: dict[str, int] = {}
-            for seg_data in data["segments"]:
-                for w in seg_data["text"].lower().split():
+            for seg_item in spk_data["segments"]:
+                for w in str(seg_item.get("text", "")).lower().split():
                     w = w.strip(".,!?-")
                     if w and w not in STOP_WORDS and len(w) > 2:
                         freq[w] = freq.get(w, 0) + 1
-            data["top_words"] = sorted(freq, key=freq.get, reverse=True)[:10]
+            spk_data["top_words"] = sorted(
+                freq.keys(), key=lambda k: freq[k], reverse=True
+            )[:10]
 
         return speakers
 
+    # =====================================================
+    # EXPORT FULL TRANSCRIPT
+    # =====================================================
+
     def export_full_transcript(
         self,
-        full_result: dict,
-        match_clips: list[dict],
+        full_result: dict[str, Any],
+        match_clips: list[dict[str, Any]],
         output_path: Path,
-        speakers: Optional[dict] = None,
+        speakers: Optional[dict[str, dict[str, Any]]] = None,
     ) -> Path:
         import textwrap
 
-        lines = [
+        lines: list[str] = [
             "=" * 70,
             "  R6 TACTICAL INTELLIGENCE — FULL SESSION TRANSCRIPT",
             "=" * 70,
@@ -427,7 +454,7 @@ class WhisperTranscriber:
             "─" * 40,
         ]
 
-        full_text = full_result.get("text", "").strip()
+        full_text = str(full_result.get("text") or "").strip()
         if full_text:
             lines.extend(textwrap.wrap(full_text, width=80))
         else:
@@ -436,9 +463,9 @@ class WhisperTranscriber:
 
         for i, clip in enumerate(match_clips):
             match_id  = clip.get("match_id", i + 1)
-            start_sec = clip.get("start_sec", 0)
-            end_sec   = clip.get("end_sec",   0)
-            text      = clip.get("text", "").strip()
+            start_sec = float(clip.get("start_sec") or 0.0)
+            end_sec   = float(clip.get("end_sec")   or 0.0)
+            text      = str(clip.get("text") or "").strip()
 
             lines += [
                 f"MATCH {match_id}  [{start_sec:.0f}s – {end_sec:.0f}s]",
@@ -452,13 +479,13 @@ class WhisperTranscriber:
 
         if speakers:
             lines += ["SPEAKER BREAKDOWN", "─" * 40]
-            for spk, data in sorted(speakers.items()):
-                lines.append(
-                    f"{spk}:  {data['word_count']} words | "
-                    f"{data['talk_time']:.0f}s talk time"
-                )
-                if data["top_words"]:
-                    lines.append(f"  Top callouts: {', '.join(data['top_words'][:8])}")
+            for spk, spk_data in sorted(speakers.items()):
+                wc   = int(spk_data.get("word_count") or 0)
+                tt   = float(spk_data.get("talk_time") or 0.0)
+                top  = list(spk_data.get("top_words") or [])[:8]
+                lines.append(f"{spk}:  {wc} words | {tt:.0f}s talk time")
+                if top:
+                    lines.append(f"  Top callouts: {', '.join(top)}")
             lines.append("")
 
         lines.append("=" * 70)
@@ -468,7 +495,7 @@ class WhisperTranscriber:
         print(f"[Whisper] Full transcript → {output_path}")
         return output_path
 
-    def save_transcript(self, result: dict, match_id: int) -> Path:
+    def save_transcript(self, result: dict[str, Any], match_id: int) -> Path:
         TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         out_path = TRANSCRIPTS_DIR / f"match_{match_id}_transcript.json"
         with open(out_path, "w", encoding="utf-8") as f:

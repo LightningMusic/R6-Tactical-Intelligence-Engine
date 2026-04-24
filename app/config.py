@@ -41,6 +41,11 @@ R6_DISSECT_PATH    = INTEGRATION_DIR / "bin" / "r6-dissect.exe"
 OBS_DIR            = BASE_DIR.parent / "OBS-Studio"
 OBS_EXE_PATH       = OBS_DIR / "bin" / "64bit" / "obs64.exe"
 
+# Ollama portable — sits next to R6Analyzer on the USB
+OLLAMA_DIR     = BASE_DIR.parent / "ollama"
+OLLAMA_EXE     = OLLAMA_DIR / "ollama.exe"
+OLLAMA_MODELS  = BASE_DIR / "data" / "ollama_models"  # store models on USB too
+
 
 # ── Settings singleton ────────────────────────────────────────
 
