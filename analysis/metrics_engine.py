@@ -149,17 +149,24 @@ class MetricsEngine:
             return 0.0
 
         total_start = 0
-        total_lost = 0
-        
+        total_lost  = 0
+        has_data    = False
+
         for r in rounds:
-            # By checking here again or using the filtered list, 
-            # we ensure Pylance knows 'resources' is present.
             res = r.resources
             if res:
                 total_start += res.team_drones_start
-                total_lost += res.team_drones_lost
-                
+                total_lost  += res.team_drones_lost
+                if res.team_drones_lost > 0:
+                    has_data = True
+
+        # If no drone loss was ever recorded, we have no real data
+        # (imported rounds default to 0 lost — don't report as 100% efficient)
+        if not has_data:
+            return 0.0
+
         return 1.0 - self._safe_div(total_lost, total_start)
+
 
     def reinforcement_usage_rate(self) -> float:
         rounds = [
@@ -170,14 +177,20 @@ class MetricsEngine:
             return 0.0
 
         total_start = 0
-        total_used = 0
-        
+        total_used  = 0
+        has_data    = False
+
         for r in rounds:
             res = r.resources
             if res:
                 total_start += res.team_reinforcements_start
-                total_used += res.team_reinforcements_used
-                
+                total_used  += res.team_reinforcements_used
+                if res.team_reinforcements_used > 0:
+                    has_data = True
+
+        if not has_data:
+            return 0.0
+
         return self._safe_div(total_used, total_start)
 
     # ============================================================

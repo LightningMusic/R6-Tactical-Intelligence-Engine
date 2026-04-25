@@ -194,26 +194,22 @@ class SessionManager:
                 result.match_id = match_id
                 result.map_id   = map_id
 
-                # Insert rounds
+                # Inside _auto_create_matches, replace the resources block:
                 for round_obj in result.rounds:
                     round_obj.match_id = match_id
 
-                    if round_obj.side == "attack":
-                        resources = RoundResources(
-                            resource_id=None, round_id=0, side="attack",
-                            team_drones_start=10,        # ← must be 10, schema CHECK constraint
-                            team_drones_lost=0,
-                            team_reinforcements_start=10, # ← must be 10 too
-                            team_reinforcements_used=0,
-                        )
-                    else:
-                        resources = RoundResources(
-                            resource_id=None, round_id=0, side="defense",
-                            team_drones_start=10,        # ← must be 10
-                            team_drones_lost=0,
-                            team_reinforcements_start=10, # ← must be 10
-                            team_reinforcements_used=0,
-                        )
+                    # Both start values must always be 10 — schema CHECK constraint
+                    # The "used/lost" values are 0 since we don't have that data from
+                    # the replay importer (only manual entry has those)
+                    resources = RoundResources(
+                        resource_id=None,
+                        round_id=0,
+                        side=round_obj.side,
+                        team_drones_start=10,
+                        team_drones_lost=0,
+                        team_reinforcements_start=10,
+                        team_reinforcements_used=0,
+                    )
                     round_id = repo.insert_round(round_obj, match_id)
                     repo.insert_round_resources(resources, round_id)
 

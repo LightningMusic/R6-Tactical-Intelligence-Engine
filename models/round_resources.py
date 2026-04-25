@@ -27,42 +27,28 @@ class RoundResources:
     # ----------------------------------
 
     def validate(self) -> None:
-        """
-        Raises ValueError if invalid state detected.
-        """
-
         if self.side not in ("attack", "defense"):
             raise ValueError("Side must be 'attack' or 'defense'.")
 
-        # Attack validation
-        if self.side == "attack":
-            if self.team_drones_start != 10:
-                raise ValueError("Attack must start with 10 drones.")
+        if self.team_drones_start != 10:
+            raise ValueError("Must start with 10 drones.")
+        if self.team_drones_lost < 0:
+            raise ValueError("Drone loss cannot be negative.")
+        if self.team_drones_lost > self.team_drones_start:
+            raise ValueError("Drone loss cannot exceed starting drones.")
 
-            if self.team_drones_lost < 0:
-                raise ValueError("Drone loss cannot be negative.")
+        if self.team_reinforcements_start != 10:
+            raise ValueError("Must start with 10 reinforcements.")
+        if self.team_reinforcements_used < 0:
+            raise ValueError("Reinforcements used cannot be negative.")
+        if self.team_reinforcements_used > self.team_reinforcements_start:
+            raise ValueError("Reinforcements used cannot exceed starting amount.")
 
-            if self.team_drones_lost > self.team_drones_start:
-                raise ValueError("Drone loss cannot exceed starting drones.")
-
-            # Defense fields must remain unused
-            if self.team_reinforcements_used != 0:
-                raise ValueError("Reinforcements cannot be used on attack.")
-
-        # Defense validation
-        if self.side == "defense":
-            if self.team_reinforcements_start != 10:
-                raise ValueError("Defense must start with 10 reinforcements.")
-
-            if self.team_reinforcements_used < 0:
-                raise ValueError("Reinforcements used cannot be negative.")
-
-            if self.team_reinforcements_used > self.team_reinforcements_start:
-                raise ValueError("Reinforcements used cannot exceed starting amount.")
-
-            # Attack fields must remain unused
-            if self.team_drones_lost != 0:
-                raise ValueError("Drones cannot be lost on defense.")
+        # Side-specific: only the active resource should be non-zero
+        if self.side == "attack" and self.team_reinforcements_used > 0:
+            raise ValueError("Reinforcements cannot be used on attack.")
+        if self.side == "defense" and self.team_drones_lost > 0:
+            raise ValueError("Drones cannot be lost on defense.")
 
     # ----------------------------------
     # Derived Helpers

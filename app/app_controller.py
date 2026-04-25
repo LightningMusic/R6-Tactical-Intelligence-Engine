@@ -66,35 +66,16 @@ class AppController:
         )
         match_id = self.repo.insert_match(match)
 
-        # ── Save each parsed round ────────────────────────────────
-        for round_obj in result.rounds:
-            round_obj.match_id = match_id
-
-            # Rounds from rec_importer have no resources yet — default them
-            side = round_obj.side
-            if side == "attack":
-                resources = RoundResources(
-                    resource_id=None,
-                    round_id=0,
-                    side=side,
-                    team_drones_start=10,
-                    team_drones_lost=0,
-                    team_reinforcements_start=0,
-                    team_reinforcements_used=0,
-                )
-            else:
-                resources = RoundResources(
-                    resource_id=None,
-                    round_id=0,
-                    side=side,
-                    team_drones_start=0,
-                    team_drones_lost=0,
-                    team_reinforcements_start=10,
-                    team_reinforcements_used=0,
-                )
-
-            round_id = self.repo.insert_round(round_obj, match_id)
-            self.repo.insert_round_resources(resources, round_id)
+        # Replace the entire resources block in save_imported_match:
+        resources = RoundResources(
+            resource_id=None,
+            round_id=0,
+            side=round_obj.side,
+            team_drones_start=10,
+            team_drones_lost=0,
+            team_reinforcements_start=10,
+            team_reinforcements_used=0,
+        )
 
             # Player stats are empty from rec_importer for now —
             # they will be filled in manually via match_view if needed.

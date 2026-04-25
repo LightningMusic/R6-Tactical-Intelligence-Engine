@@ -353,20 +353,17 @@ class RecImporter:
         outcome:    Optional[str] = None
 
         if our_team_index is not None and len(teams) >= 2:
-            our_team   = teams[our_team_index]
-            other_idx  = 1 - our_team_index
-            their_team = teams[other_idx]
+            our_team    = teams[our_team_index]
+            other_idx   = 1 - our_team_index
+            their_team  = teams[other_idx]
 
-            # Determine side from role field
             role_raw = str(our_team.get("role", "")).lower()
             our_side = "attack" if role_raw in ("attack", "1") else "defense"
 
             score_us   = our_team.get("score")
             score_them = their_team.get("score")
 
-            # ── Primary: use score delta to determine winner ───────
-            # R6: the team whose score increases by 1 won the round.
-            # startingScore is the score at the START of this round.
+            # ── Primary: score delta ───────────────────────────────
             our_start   = our_team.get("startingScore",   score_us)
             their_start = their_team.get("startingScore", score_them)
 
@@ -378,7 +375,7 @@ class RecImporter:
             elif their_gained > our_gained:
                 outcome = "loss"
             else:
-                # ── Fallback 1: explicit won boolean ───────────────
+                # ── Fallback 1: won boolean ────────────────────────
                 our_won   = bool(our_team.get("won",   False))
                 their_won = bool(their_team.get("won", False))
 
@@ -387,22 +384,22 @@ class RecImporter:
                 elif their_won and not our_won:
                     outcome = "loss"
                 else:
-                    # ── Fallback 2: winCondition presence ──────────
-                    # The team with a winCondition set is the winner
-                    our_wc   = our_team.get("winCondition",   "")
-                    their_wc = their_team.get("winCondition", "")
+                    # ── Fallback 2: winCondition ───────────────────
+                    our_wc   = str(our_team.get("winCondition",   "") or "")
+                    their_wc = str(their_team.get("winCondition", "") or "")
 
                     if our_wc and not their_wc:
                         outcome = "win"
                     elif their_wc and not our_wc:
                         outcome = "loss"
                     else:
-                        # Final fallback — default to loss if ambiguous
+                        # Final fallback
                         outcome = "loss"
                         print(
-                            f"[RecImporter] Warning: could not determine outcome "
-                            f"reliably for round {data.get('roundNumber', '?')}. "
-                            f"Defaulting to loss."
+                            f"[RecImporter] Warning: ambiguous outcome for round "
+                            f"{data.get('roundNumber','?')} — defaulting to loss. "
+                            f"our_wc={our_wc!r} their_wc={their_wc!r} "
+                            f"our_won={our_won} their_won={their_won}"
                         )
 
         map_data   = data.get("map", {})
@@ -412,6 +409,35 @@ class RecImporter:
         round_number = data.get("roundNumber", 0)
         if isinstance(round_number, int):
             round_number = round_number + 1
+
+        # ── Extract player kill/death stats from the replay ───────
+        # r6-dissect exposes per-player stats in data["players"]
+        # and also sometimes in data["stats"] or data["matchFeedback"]
+        # We pull what we can and store it in meta for the caller.
+        player_stats_raw: list[dict] = []
+        our_team_kills = 0
+
+        for player in data.get("players", []):
+            team_idx = player.get("teamIndex", -1)
+            stats    = player.get("stats", {}) or {}
+
+            kills   = int(stats.get("kills",   0) or 0)
+            deaths  = int(stats.get("deaths",  0) or 0)
+            assists = int(stats.get("assists", 0) or 0)
+
+            player_stats_raw.append({
+                "id":        player.get("id"),
+                "username":  player.get("username", ""),
+                "teamIndex": team_idx,
+                "kills":     kills,
+                "deaths":    deaths,
+                "assists":   assists,
+                "operator":  player.get("operator", {}).get("name", ""),
+                "side":      "attack" if team_idx == (our_team_index or 0) else "defense",
+            })
+
+            if team_idx == our_team_index:
+                our_team_kills += kills
 
         round_obj = Round(
             round_id=None,
@@ -425,7 +451,10 @@ class RecImporter:
         )
 
         return round_obj, {
-            "map_name":   map_name,
-            "score_us":   score_us,
-            "score_them": score_them,
+            "map_name":          map_name,
+            "score_us":          score_us,
+            "score_them":        score_them,
+            "player_stats_raw":  player_stats_raw,
+            "our_team_index":    our_team_index,
+            "our_team_kills":    our_team_kills,
         }
