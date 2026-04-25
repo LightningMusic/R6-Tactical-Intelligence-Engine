@@ -8,6 +8,9 @@ from obswebsocket import requests as obs_requests
 
 from app.config import RECORDINGS_DIR, OBS_EXE_PATH, settings
 
+# Add these constants near the top of obs_controller.py
+SCENE_COMMS = "R6_Comms"    # Discord audio capture scene
+SCENE_GAME  = "R6_Game"     # Game capture scene for streaming/recording
 
 def _obs_is_running() -> bool:
     for proc in psutil.process_iter(["name"]):
@@ -26,7 +29,9 @@ class OBSController:
     Re-reads credentials from settings at connect time so Settings
     changes take effect without restarting the app.
     """
-
+    # Add these constants near the top of obs_controller.py
+    SCENE_COMMS = "R6_Comms"    # Discord audio capture scene
+    SCENE_GAME  = "R6_Game"     # Game capture scene for streaming/recording
     LAUNCH_WAIT_SEC    = 12   # max seconds to wait for OBS to open
     CONNECT_RETRIES    = 4    # websocket connection attempts after launch
     CONNECT_RETRY_WAIT = 2    # seconds between websocket retries
@@ -131,6 +136,168 @@ class OBSController:
     def is_connected(self) -> bool:
         return self._connected
 
+
+    def setup_scenes(self) -> bool:
+        """
+        Creates/verifies both OBS scenes.
+        Call once after connecting to OBS.
+        
+        R6_Comms scene:
+        - Application Audio Capture → Discord
+        - Used during sessions for comms recording
+        
+        R6_Game scene:  
+        - Game Capture → Rainbow Six Siege
+        - Optional Audio Capture → Desktop (for personal recordings/streaming)
+        - Used for personal video recording or Twitch streaming
+        """
+        if not self._connected or self._client is None:
+            print("[OBS] Not connected — cannot set up scenes.")
+            return False
+
+        try:
+            # ── Get existing scenes ───────────────────────────────
+            scene_list = self._client.call(obs_requests.GetSceneList())
+            existing   = {
+                s.get("sceneName", "")
+                for s in (scene_list.getScenes() or [])
+            }
+
+            # ── Create Comms scene if missing ─────────────────────
+            if SCENE_COMMS not in existing:
+                self._client.call(
+                    obs_requests.CreateScene(sceneName=SCENE_COMMS)
+                )
+                print(f"[OBS] Created scene: {SCENE_COMMS}")
+                # Add Application Audio Capture source for Discord
+                self._client.call(obs_requests.CreateInput(
+                    sceneName=SCENE_COMMS,
+                    inputName="Discord_Audio",
+                    inputKind="wasapi_process_output_capture",
+                    inputSettings={
+                        "window": "Discord.exe",
+                        "use_device_timing": True,
+                    },
+                    sceneItemEnabled=True,
+                ))
+                print(f"[OBS] Added Discord audio source to {SCENE_COMMS}")
+            else:
+                print(f"[OBS] Scene exists: {SCENE_COMMS}")
+
+            # ── Create Game scene if missing ──────────────────────
+            if SCENE_GAME not in existing:
+                self._client.call(
+                    obs_requests.CreateScene(sceneName=SCENE_GAME)
+                )
+                print(f"[OBS] Created scene: {SCENE_GAME}")
+                # Add Game Capture source for R6
+                self._client.call(obs_requests.CreateInput(
+                    sceneName=SCENE_GAME,
+                    inputName="R6_Game_Capture",
+                    inputKind="game_capture",
+                    inputSettings={
+                        "capture_mode": "window",
+                        "window":       "Rainbow Six Siege [RainbowSix.exe]",
+                        "allow_transparency": False,
+                    },
+                    sceneItemEnabled=True,
+                ))
+                # Add Desktop Audio for personal recordings
+                self._client.call(obs_requests.CreateInput(
+                    sceneName=SCENE_GAME,
+                    inputName="Desktop_Audio",
+                    inputKind="wasapi_output_capture",
+                    inputSettings={},
+                    sceneItemEnabled=True,
+                ))
+                print(f"[OBS] Added game capture and audio to {SCENE_GAME}")
+            else:
+                print(f"[OBS] Scene exists: {SCENE_GAME}")
+
+            return True
+
+        except Exception as e:
+            print(f"[OBS] Scene setup error: {e}")
+            print("[OBS] Create scenes manually in OBS if auto-setup fails.")
+            return False
+
+
+    def start_comms_recording(self) -> bool:
+        """Switch to comms scene and start recording."""
+        if not self._connected or self._client is None:
+            return False
+        try:
+            self._client.call(
+                obs_requests.SetCurrentProgramScene(sceneName=SCENE_COMMS)
+            )
+            status = self._client.call(obs_requests.GetRecordStatus())
+            if not status.getOutputActive():
+                self._client.call(obs_requests.StartRecord())
+                print(f"[OBS] Comms recording started (scene: {SCENE_COMMS})")
+            return True
+        except Exception as e:
+            print(f"[OBS] Comms recording error: {e}")
+            return False
+
+
+    def start_game_recording(self) -> bool:
+        """Switch to game scene and start recording (for personal/streaming use)."""
+        if not self._connected or self._client is None:
+            return False
+        try:
+            self._client.call(
+                obs_requests.SetCurrentProgramScene(sceneName=SCENE_GAME)
+            )
+            status = self._client.call(obs_requests.GetRecordStatus())
+            if not status.getOutputActive():
+                self._client.call(obs_requests.StartRecord())
+                print(f"[OBS] Game recording started (scene: {SCENE_GAME})")
+            return True
+        except Exception as e:
+            print(f"[OBS] Game recording error: {e}")
+            return False
+
+
+    def start_streaming(self) -> bool:
+        """Start Twitch stream using R6_Game scene."""
+        if not self._connected or self._client is None:
+            return False
+        try:
+            self._client.call(
+                obs_requests.SetCurrentProgramScene(sceneName=SCENE_GAME)
+            )
+            self._client.call(obs_requests.StartStream())
+            print("[OBS] Twitch stream started.")
+            return True
+        except Exception as e:
+            print(f"[OBS] Stream start error: {e}")
+            return False
+
+
+    def stop_streaming(self) -> bool:
+        if not self._connected or self._client is None:
+            return False
+        try:
+            self._client.call(obs_requests.StopStream())
+            print("[OBS] Stream stopped.")
+            return True
+        except Exception as e:
+            print(f"[OBS] Stream stop error: {e}")
+            return False
+
+
+    def get_stream_status(self) -> dict:
+        if not self._connected or self._client is None:
+            return {"streaming": False, "recording": False}
+        try:
+            rec    = self._client.call(obs_requests.GetRecordStatus())
+            stream = self._client.call(obs_requests.GetStreamStatus())
+            return {
+                "recording":  bool(rec.getOutputActive()),
+                "streaming":  bool(stream.getOutputActive()),
+            }
+        except Exception:
+            return {"streaming": False, "recording": False}
     # =====================================================
     # RECORDING
     # =====================================================

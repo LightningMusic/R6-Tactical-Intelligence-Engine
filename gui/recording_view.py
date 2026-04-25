@@ -52,6 +52,8 @@ class RecordingView(QWidget):
         self._session_manager: SessionManager | None = None
         self._thread: QThread | None         = None
         self._recording_path: str | None     = None
+        self._game_recording_active = False
+        self._streaming_active      = False
         self._build_ui()
 
     def _shutdown_and_eject(self) -> None:
@@ -179,6 +181,30 @@ class RecordingView(QWidget):
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._stop_session)
 
+        # ── Game recording / streaming row ────────────────────────
+        game_layout = QHBoxLayout()
+
+        self._game_rec_btn = QPushButton("🎬  Start Game Recording")
+        self._game_rec_btn.setMinimumHeight(38)
+        self._game_rec_btn.setEnabled(False)
+        self._game_rec_btn.clicked.connect(self._toggle_game_recording)
+        game_layout.addWidget(self._game_rec_btn)
+
+        self._stream_btn = QPushButton("📡  Start Stream")
+        self._stream_btn.setMinimumHeight(38)
+        self._stream_btn.setEnabled(False)
+        self._stream_btn.clicked.connect(self._toggle_stream)
+        game_layout.addWidget(self._stream_btn)
+
+        layout.addLayout(game_layout)
+
+        # Scene setup button
+        setup_btn = QPushButton("⚙  Set Up OBS Scenes (run once)")
+        setup_btn.setMinimumHeight(32)
+        setup_btn.setStyleSheet("font-size: 10px; color: #888;")
+        setup_btn.clicked.connect(self._setup_obs_scenes)
+        layout.addWidget(setup_btn)
+
         # At the bottom of the button layout
         shutdown_btn = QPushButton("⏏  Shut Down & Eject USB")
         shutdown_btn.setMinimumHeight(38)
@@ -254,6 +280,61 @@ class RecordingView(QWidget):
             self._log_message("⚠ OBS recording check failed — see log above.")
         else:
             self._log_message("✓ OBS recording active.")
+
+    def _setup_obs_scenes(self) -> None:
+        if not self.obs.is_connected:
+            QMessageBox.warning(self, "OBS", "Connect to OBS first.")
+            return
+        ok = self.obs.setup_scenes()
+        if ok:
+            self._log_message("✅ OBS scenes configured: R6_Comms + R6_Game")
+            QMessageBox.information(
+                self, "OBS Scenes",
+                "Created scenes:\n"
+                "  R6_Comms — Discord audio (used during sessions)\n"
+                "  R6_Game  — Game capture (for personal recordings / streaming)\n\n"
+                "You can customise sources further in OBS."
+            )
+        else:
+            self._log_message(
+                "⚠ Auto scene setup failed — create R6_Comms and R6_Game "
+                "manually in OBS."
+            )
+
+    def _toggle_game_recording(self) -> None:
+        if not self._game_recording_active:
+            if self.obs.start_game_recording():
+                self._game_recording_active = True
+                self._game_rec_btn.setText("⏹  Stop Game Recording")
+                self._log_message("Game recording started (R6_Game scene).")
+            else:
+                self._log_message("Failed to start game recording.")
+        else:
+            self.obs.stop_recording()
+            self._game_recording_active = False
+            self._game_rec_btn.setText("🎬  Start Game Recording")
+            self._log_message("Game recording stopped.")
+
+    def _toggle_stream(self) -> None:
+        if not self._streaming_active:
+            if self.obs.start_streaming():
+                self._streaming_active = True
+                self._stream_btn.setText("⏹  Stop Stream")
+                self._stream_btn.setStyleSheet(
+                    "QPushButton { color: #e05555; border: 1px solid #e05555; }"
+                )
+                self._log_message("🔴 Twitch stream started (R6_Game scene).")
+            else:
+                self._log_message(
+                    "Stream failed. Configure Twitch key in OBS: "
+                    "Settings → Stream → Service: Twitch → Stream Key."
+                )
+        else:
+            self.obs.stop_streaming()
+            self._streaming_active = False
+            self._stream_btn.setText("📡  Start Stream")
+            self._stream_btn.setStyleSheet("")
+            self._log_message("Stream stopped.")
     # =====================================================
     # FOLDER
     # =====================================================
@@ -273,6 +354,9 @@ class RecordingView(QWidget):
     def _update_start_button(self) -> None:
         ready = self.obs.is_connected and self._replay_folder is not None
         self._start_btn.setEnabled(ready)
+        obs_ready = self.obs.is_connected
+        self._game_rec_btn.setEnabled(obs_ready)
+        self._stream_btn.setEnabled(obs_ready)
 
     # =====================================================
     # SESSION START

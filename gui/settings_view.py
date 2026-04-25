@@ -37,6 +37,7 @@ class SettingsView(QWidget):
         tabs.addTab(self._build_maps_tab(),      "🗺  Maps")
         tabs.addTab(self._build_matches_tab(),   "📋  Match Manager")
         tabs.addTab(self._build_ai_tab(),        "🤖  AI / Models")
+        tabs.addTab(self._build_discord_tab(), "🎙  Discord")
         layout.addWidget(tabs)
 
     def _build_general_tab(self) -> QWidget:
@@ -231,6 +232,99 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
+    def _build_discord_tab(self) -> QWidget:
+        from PySide6.QtWidgets import QWidget, QVBoxLayout, QGroupBox, QFormLayout
+        from PySide6.QtWidgets import QLineEdit, QPushButton, QLabel, QMessageBox
+
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(16)
+
+        info = QLabel(
+            "Discord per-user voice capture gives accurate speaker identification.\n"
+            "Each player's mic becomes a separate audio track, then Whisper\n"
+            "transcribes each individually — no guessing who said what.\n\n"
+            "Requirements: pip install discord.py[voice] PyNaCl"
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #aaa; font-size: 11px;")
+        layout.addWidget(info)
+
+        bot_group = QGroupBox("Discord Bot Settings")
+        form = QFormLayout(bot_group)
+
+        self._discord_token_edit = QLineEdit()
+        self._discord_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._discord_token_edit.setPlaceholderText("Bot token from discord.com/developers")
+        form.addRow("Bot Token:", self._discord_token_edit)
+
+        self._discord_channel_edit = QLineEdit()
+        self._discord_channel_edit.setPlaceholderText("Voice channel ID (right-click channel → Copy ID)")
+        form.addRow("Channel ID:", self._discord_channel_edit)
+
+        layout.addWidget(bot_group)
+
+        status_group = QGroupBox("Setup Guide")
+        status_layout = QVBoxLayout(status_group)
+        guide = QLabel(
+            "1. Go to discord.com/developers/applications\n"
+            "2. New Application → Bot → Reset Token → copy it\n"
+            "3. Enable: Server Members Intent + Voice States Intent\n"
+            "4. OAuth2 → URL Generator → scopes: bot → permissions:\n"
+            "   Connect, Speak, Use Voice Activity\n"
+            "5. Copy the generated URL, open it, add bot to your server\n"
+            "6. Enable Developer Mode in Discord (Settings → Advanced)\n"
+            "7. Right-click your voice channel → Copy Channel ID\n"
+            "8. Paste token and channel ID above and save."
+        )
+        guide.setStyleSheet("font-size: 10px; color: #888;")
+        status_layout.addWidget(guide)
+        layout.addWidget(status_group)
+
+        test_btn = QPushButton("Test Discord Bot Connection")
+        test_btn.clicked.connect(self._test_discord)
+        layout.addWidget(test_btn)
+
+        save_btn = QPushButton("Save Discord Settings")
+        save_btn.clicked.connect(self._save_discord)
+        layout.addWidget(save_btn)
+
+        layout.addStretch()
+
+        # Load existing values
+        from app.config import settings
+        self._discord_token_edit.setText(str(settings.get("discord_bot_token") or ""))
+        self._discord_channel_edit.setText(str(settings.get("discord_channel_id") or ""))
+
+        return w
+
+
+    def _save_discord(self) -> None:
+        from app.config import settings
+        from PySide6.QtWidgets import QMessageBox
+        token      = self._discord_token_edit.text().strip()
+        channel_id = self._discord_channel_edit.text().strip()
+        settings.set_many({
+            "discord_bot_token":  token,
+            "discord_channel_id": int(channel_id) if channel_id.isdigit() else 0,
+        })
+        settings.save()
+        QMessageBox.information(self, "Saved", "Discord settings saved.")
+
+
+    def _test_discord(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        from integration.discord_capture import DiscordCapture
+        if not DiscordCapture.is_available():
+            QMessageBox.warning(
+                self, "Missing Dependencies",
+                DiscordCapture.install_instructions()
+            )
+            return
+        QMessageBox.information(
+            self, "Discord",
+            "Dependencies found. Bot will connect when you start a session."
+        )
     # =====================================================
     # LOAD
     # =====================================================

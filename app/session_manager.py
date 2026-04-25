@@ -1,11 +1,23 @@
+import time
+import json
 from pathlib import Path
 from typing import Callable, Optional
-import time
-
 from integration.rec_importer import RecImporter
 from integration.whisper_transcriber import WhisperTranscriber
 from models.import_result import ImportResult, ImportStatus
 from models.round_resources import RoundResources
+from integration.discord_capture import DiscordCapture
+from app.config import settings
+from database.repositories import Repository
+from models.match import Match
+from datetime import datetime
+from analysis.transcript_parser import TranscriptParser
+from analysis.timeline_aligner import TimelineAligner
+from app.config import TRANSCRIPTS_DIR
+
+        
+        
+        
 
 
 class SessionManager:
@@ -32,6 +44,9 @@ class SessionManager:
         self.stability_checks = stability_checks
         self._snapshot: set[Path] = set()
         self._transcriber: Optional[WhisperTranscriber] = None
+        
+        self._discord = DiscordCapture()
+        self._discord_user_files: dict[str, Path] = {}
 
     # =====================================================
     # SESSION START
@@ -39,6 +54,32 @@ class SessionManager:
 
     def start_session(self) -> None:
         self._snapshot = self._scan_match_folders()
+
+    def start_discord_capture(
+        self,
+        log_callback: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        
+        token      = str(settings.get("discord_bot_token")  or "")
+        channel_id = int(settings.get("discord_channel_id") or 0)
+
+        if not token or not channel_id:
+            if log_callback:
+                log_callback(
+                    "[Discord] Not configured — using heuristic speaker detection. "
+                    "Set token and channel ID in Settings → Discord for named speakers."
+                )
+            return False
+
+        session_name = f"session_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        return self._discord.start_capture(token, channel_id, session_name, log_callback)
+
+
+    def stop_discord_capture(
+        self,
+        log_callback: Optional[Callable[[str], None]] = None,
+    ) -> dict[str, Path]:
+        return self._discord.stop_capture(log_callback)
 
     # =====================================================
     # SESSION END
@@ -118,9 +159,7 @@ class SessionManager:
         create a match record in the DB and attach the match_id
         to the result. Works for both SUCCESS and PARTIAL_FAILURE.
         """
-        from database.repositories import Repository
-        from models.match import Match
-        from datetime import datetime
+
 
         repo = Repository()
 
@@ -196,10 +235,7 @@ class SessionManager:
         folders: list[Path],
         log_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
-        from analysis.timeline_aligner import TimelineAligner
-        from analysis.transcript_parser import TranscriptParser
-        from database.repositories import Repository
-        import json
+
 
         if self._transcriber is None:
             if log_callback:
@@ -320,9 +356,38 @@ class SessionManager:
             result.transcript_text     = text
             result.transcript_segments = segments
 
+        # ── Step 5: Per-user transcription (Discord audio) ────────
+        per_user_attributed: list[dict] = []
+        user_names = self._discord.get_user_names()
+
+        if self._discord_user_files:
+            if log_callback:
+                log_callback(
+                    f"Transcribing {len(self._discord_user_files)} "
+                    "Discord speaker tracks..."
+                )
+            per_user_results = self._transcriber.transcribe_per_user(
+                self._discord_user_files,
+                progress_callback=log_callback,
+            )
+            per_user_attributed = self._transcriber.build_attributed_transcript(
+                per_user_results
+            )
+
+            # Save full attributed transcript
+            if per_user_attributed and self.recording_path:
+                session_name = self.recording_path.stem.replace(" ", "_")
+                attr_path    = TRANSCRIPTS_DIR / f"session_{session_name}_speakers.txt"
+                attr_path.write_text(
+                    self._transcriber.format_attributed_transcript(per_user_attributed),
+                    encoding="utf-8",
+                )
+                if log_callback:
+                    log_callback(f"Speaker transcript → {attr_path.name}")
+
         # ── Step 5: Export full transcript TXT ───────────────────
         try:
-            from app.config import TRANSCRIPTS_DIR
+            
             session_name = self.recording_path.stem.replace(" ", "_")
             full_txt_path = TRANSCRIPTS_DIR / f"session_{session_name}_full.txt"
             self._transcriber.export_full_transcript(

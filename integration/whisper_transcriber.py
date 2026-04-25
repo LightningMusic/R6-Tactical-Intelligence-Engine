@@ -311,6 +311,108 @@ class WhisperTranscriber:
         """Backwards-compatible wrapper."""
         return self.transcribe_full(audio_path, language)
 
+    def transcribe_per_user(
+        self,
+        user_audio_files: dict[str, Path],
+        language: str = "en",
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> dict[str, dict]:
+        """
+        Transcribes each user's individual audio file.
+        Returns {display_name: whisper_result_dict}.
+        """
+        _ensure_console()
+        self._load_model()
+
+        results: dict[str, dict] = {}
+
+        for i, (name, wav_path) in enumerate(user_audio_files.items()):
+            if not wav_path.exists():
+                continue
+
+            mb  = wav_path.stat().st_size / (1024 * 1024)
+            msg = f"Transcribing {name} ({mb:.1f} MB) [{i+1}/{len(user_audio_files)}]..."
+            print(f"[Whisper] {msg}")
+            if progress_callback:
+                progress_callback(msg)
+
+            try:
+                result: dict = self._model.transcribe(  # type: ignore[union-attr]
+                    str(wav_path),
+                    language=language,
+                    verbose=False,
+                    fp16=False,
+                    word_timestamps=True,
+                    beam_size=5,
+                    temperature=0.0,
+                    condition_on_previous_text=True,
+                    no_speech_threshold=0.5,
+                )
+                results[name] = result
+                word_count = len((result.get("text") or "").split())
+                print(f"[Whisper] {name}: {word_count} words")
+            except Exception as e:
+                print(f"[Whisper] Failed for {name}: {e}")
+
+        return results
+
+
+    def build_attributed_transcript(
+        self,
+        per_user_results: dict[str, dict],
+    ) -> list[dict]:
+        """
+        Merges per-user transcripts into a single chronological list,
+        each item tagged with the speaker's name.
+        Format: [{speaker, start, end, text}, ...]
+        """
+        all_segments: list[dict] = []
+
+        for speaker_name, result in per_user_results.items():
+            for seg in (result.get("segments") or []):
+                if not isinstance(seg, dict):
+                    continue
+                text = str(seg.get("text") or "").strip()
+                if not text:
+                    continue
+                all_segments.append({
+                    "speaker": speaker_name,
+                    "start":   float(seg.get("start") or 0.0),
+                    "end":     float(seg.get("end")   or 0.0),
+                    "text":    text,
+                })
+
+        # Sort chronologically
+        all_segments.sort(key=lambda s: s["start"])
+        return all_segments
+
+
+    def format_attributed_transcript(
+        self,
+        attributed: list[dict],
+        match_start_sec: float = 0.0,
+        match_end_sec: float   = float("inf"),
+    ) -> str:
+        """
+        Formats an attributed transcript as readable text.
+        Optionally clips to a match time window.
+        """
+        lines: list[str] = []
+
+        for seg in attributed:
+            start = seg["start"]
+            end   = seg["end"]
+
+            if end < match_start_sec or start > match_end_sec:
+                continue
+
+            mins = int(start // 60)
+            secs = int(start % 60)
+            lines.append(
+                f"[{mins:02d}:{secs:02d}] {seg['speaker']}: {seg['text']}"
+            )
+
+        return "\n".join(lines)
     # =====================================================
     # CLIP TO MATCH WINDOW
     # =====================================================

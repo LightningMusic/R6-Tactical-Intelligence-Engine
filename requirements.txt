@@ -15,3 +15,8 @@ obs-websocket-py>=1.0.0
 # System
 psutil>=5.9.0
 watchdog>=4.0.0
+
+# Discord per-user audio capture (optional — enables speaker identification)
+# Install: pip install discord.py[voice] PyNaCl
+# discord.py>=2.3.0
+# PyNaCl>=1.5.0

@@ -22,6 +22,7 @@ import time
 import struct
 import wave
 import threading
+import discord # type: ignore[import-untyped]
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -248,7 +249,7 @@ class _PerUserSink:
         self._lock         = lock
         self._log_callback = log_callback
 
-    def write(self, data: object, user: object) -> None:
+    def write(self, data: "discord.VoiceData", user: "discord.User") -> None:
         try:
             import discord  # type: ignore[import-untyped]
             if not isinstance(data, discord.VoiceData):
