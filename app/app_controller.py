@@ -66,16 +66,23 @@ class AppController:
         )
         match_id = self.repo.insert_match(match)
 
-        # Replace the entire resources block in save_imported_match:
-        resources = RoundResources(
-            resource_id=None,
-            round_id=0,
-            side=round_obj.side,
-            team_drones_start=10,
-            team_drones_lost=0,
-            team_reinforcements_start=10,
-            team_reinforcements_used=0,
-        )
+        # ── Save each parsed round ────────────────────────────────
+        for round_obj in result.rounds:
+            round_obj.match_id = match_id
+
+            # Both start values must always be 10 — schema CHECK constraint
+            resources = RoundResources(
+                resource_id=None,
+                round_id=0,
+                side=round_obj.side,
+                team_drones_start=10,
+                team_drones_lost=0,
+                team_reinforcements_start=10,
+                team_reinforcements_used=0,
+            )
+
+            round_id = self.repo.insert_round(round_obj, match_id)
+            self.repo.insert_round_resources(resources, round_id)
 
             # Player stats are empty from rec_importer for now —
             # they will be filled in manually via match_view if needed.
