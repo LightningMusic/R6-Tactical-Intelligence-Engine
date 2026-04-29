@@ -157,12 +157,8 @@ if errorlevel 8 (
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0sync_deploy_assets.ps1" -UsbDest "%USB_DEST%" -ModelSrc "%MODEL_SRC%"
-if errorlevel 1 (
-    set "DEPLOY_WARNINGS=1"
-)
-if errorlevel 2 (
-    set "DEPLOY_WARNINGS=1"
-)
+set "ASSET_SYNC_EXIT=%ERRORLEVEL%"
+if not "%ASSET_SYNC_EXIT%"=="0" set "DEPLOY_WARNINGS=1"
 
 echo.
 echo ============================================================
@@ -230,5 +226,5 @@ if "%EXIT_CODE%"=="0" (
 echo  %FINAL_MESSAGE%
 echo ============================================================
 echo.
-pause
+if not defined R6_SKIP_PAUSE pause
 exit /b %EXIT_CODE%

@@ -132,7 +132,7 @@ echo  Run  : python main.py
 echo  Build: build_and_deploy.bat
 echo ============================================
 echo.
-pause
+if not defined R6_SKIP_PAUSE pause
 exit /b 0
 
 :resolve_python
@@ -171,5 +171,5 @@ echo ============================================
 echo  Setup failed.
 echo ============================================
 echo.
-pause
+if not defined R6_SKIP_PAUSE pause
 exit /b 1
