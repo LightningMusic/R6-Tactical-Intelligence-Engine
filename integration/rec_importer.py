@@ -40,24 +40,23 @@ MAP_ID_LOOKUP: dict[int, str] = {
     108180662968: "Favela",
     108180728456: "Donut",
     # ── Y10/Y11 reworks ───────────────────────────────────────
-    413779563590: "Bank",           # BankY10
-    407987100456: "Border",         # BorderY10
-    407558616688: "Chalet",         # ChaletY10
-    407193663917: "Clubhouse",      # ClubHouseY10
-    413845419788: "Kafe Dostoyevsky", # KafeDostoyevskyY10
-    417890697769: "Lair",           # LairY10
-    418119057546: "Nighthaven Labs", # NighthavenLabsY10
-    418126004176: "Consulate",      # ConsulateY10
-    409325881472: "Chalet",         # ChaletY11
-    436375283234: "Villa",          # VillaY10
-    430788891316: "Theme Park",     # ThemeParkY11
-    398899676157: "Fortress",       # FortressY10
-    423767322185: "Skyscraper",     # SkyscraperY10/Y11
-    409880628150: "Oregon",         # OregonY10
-    412551493246: "Coastline",      # CoastlineY10
-    415956890521: "Outback",        # OutbackY10
-    419662876236: "Border",         # BorderY11
-    422790217276: "Clubhouse",      # ClubhouseY11
+    413779563590: "Bank",
+    407987100456: "Border",
+    407558616688: "Chalet",
+    407193663917: "Clubhouse",
+    413845419788: "Kafe Dostoyevsky",
+    418119057546: "Nighthaven Labs",
+    418126004176: "Consulate",
+    409325881472: "Chalet",
+    436375283234: "Villa",
+    430788891316: "Theme Park",
+    398899676157: "Fortress",
+    423767322185: "Skyscraper",
+    409880628150: "Oregon",
+    412551493246: "Coastline",
+    415956890521: "Outback",
+    419662876236: "Border",
+    422790217276: "Clubhouse",
 }
 
 MAX_RETRIES     = 5
@@ -181,7 +180,7 @@ class RecImporter:
     def import_multiple_folders(
         self,
         folders: list[Path],
-        max_workers: int = 1,       # ignored — always sequential
+        max_workers: int = 1,
         log_callback: Optional[Callable[[str], None]] = None,
     ) -> list[ImportResult]:
         results: list[ImportResult] = []
@@ -249,8 +248,6 @@ class RecImporter:
                     ]
                     panic_msg = panic_lines[0] if panic_lines else stderr[:150]
 
-                    # Only skip retries for unknown operator — that's truly unrecoverable
-                    # with the old binary. Index errors and other panics may be transient.
                     if "role unknown for operator" in panic_msg.lower():
                         self._log(
                             f"    r6-dissect crashed: {panic_msg}\n"
@@ -258,7 +255,6 @@ class RecImporter:
                         )
                         return None, f"r6-dissect outdated: {panic_msg}"
                     else:
-                        # All other panics: log and retry normally
                         last_error = f"r6-dissect panic: {panic_msg}"
                         self._log(f"    Attempt {attempt}: {last_error}")
                         continue
@@ -313,15 +309,10 @@ class RecImporter:
     def _parse_json_safe(
         self, text: str, filename: str
     ) -> Optional[dict]:
-        """
-        Parses JSON from text, handling leading garbage.
-        Returns None if no valid JSON found.
-        """
         text = text.strip()
         if not text:
             return None
 
-        # Find the first '{' — skip any BOM or debug output before JSON
         json_start = text.find("{")
         if json_start == -1:
             self._log(f"    No JSON object found in output for {filename}")
@@ -330,8 +321,6 @@ class RecImporter:
         try:
             return json.loads(text[json_start:])
         except json.JSONDecodeError as e:
-            # Try to find a complete JSON object
-            # r6-dissect sometimes writes multiple objects
             brace_depth = 0
             json_end    = -1
             for i, ch in enumerate(text[json_start:], start=json_start):
@@ -351,9 +340,15 @@ class RecImporter:
             return None
 
     # =====================================================
-    # INTERNAL: Parse one round's data
+    # STATIC HELPERS — properly declared
     # =====================================================
 
+    @staticmethod
+    def _safe_int(value: object) -> Optional[int]:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _determine_win_type(our_team: dict, their_team: dict) -> str:
@@ -363,48 +358,39 @@ class RecImporter:
         our_wc   = norm(our_team.get("winCondition"))
         their_wc = norm(their_team.get("winCondition"))
 
-        role_raw = norm(our_team.get("role")).lower()
-        our_is_attack = role_raw in ("attack", "1")
-
-        wc = our_wc or their_wc  # fallback if only one exists
+        wc = our_wc or their_wc
 
         if not wc:
             return "unknown"
 
-        # ── Normalize win types ──
         if wc == "KilledOpponents":
             return "kill"
-
         if wc in ("DefusedBomb", "DisabledDefuser"):
             return "plant"
-
         if wc == "Time":
             return "time"
-
         if wc in ("ExtractedHostage", "ProtectedHostage"):
             return "hostage"
-
         if wc == "SecuredArea":
             return "secure"
 
         return "other"
-    def _safe_int(value: object) -> Optional[int]:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+
+    @staticmethod
     def _determine_outcome(our_team: dict, their_team: dict, round_num: object) -> str:
         def norm(x: object) -> str:
             return str(x or "").strip()
 
-        # ── Safe ints ─────────────────────────
         our_score   = RecImporter._safe_int(our_team.get("score"))
         their_score = RecImporter._safe_int(their_team.get("score"))
-        our_start   = RecImporter._safe_int(our_team.get("startingScore", our_score))
-        their_start = RecImporter._safe_int(their_team.get("startingScore", their_score))
+        our_start   = RecImporter._safe_int(our_team.get("startingScore")) \
+                      if our_team.get("startingScore") is not None else our_score
+        their_start = RecImporter._safe_int(their_team.get("startingScore")) \
+                      if their_team.get("startingScore") is not None else their_score
 
-        # ── Strategy 1: Score delta (most reliable) ──
-        if None not in (our_score, their_score, our_start, their_start):
+        # Strategy 1: Score delta
+        if (our_score is not None and their_score is not None
+                and our_start is not None and their_start is not None):
             our_gained   = our_score   - our_start
             their_gained = their_score - their_start
 
@@ -413,7 +399,7 @@ class RecImporter:
             if their_gained > our_gained:
                 return "loss"
 
-        # ── Strategy 2: Explicit won flag ──
+        # Strategy 2: Explicit won flag
         our_won   = our_team.get("won")
         their_won = their_team.get("won")
 
@@ -422,70 +408,51 @@ class RecImporter:
         if their_won is True and our_won is not True:
             return "loss"
 
-        # ── Strategy 3: Role-aware winCondition ──
+        # Strategy 3: Role-aware winCondition
         our_wc   = norm(our_team.get("winCondition"))
         their_wc = norm(their_team.get("winCondition"))
 
-        role_raw = norm(our_team.get("role")).lower()
+        role_raw      = norm(our_team.get("role")).lower()
         our_is_attack = role_raw in ("attack", "1")
 
-        ATTACK_WIN = {
-            "KilledOpponents",
-            "DefusedBomb",
-            "ExtractedHostage",
-            "SecuredArea",
-        }
+        ATTACK_WIN  = {"KilledOpponents", "DefusedBomb", "ExtractedHostage", "SecuredArea"}
+        DEFENSE_WIN = {"DisabledDefuser", "KilledOpponents", "Time", "ProtectedHostage"}
 
-        DEFENSE_WIN = {
-            "DisabledDefuser",
-            "KilledOpponents",
-            "Time",
-            "ProtectedHostage",
-        }
-
-        def is_attack_win(cond: str) -> bool:
-            return cond in ATTACK_WIN
-
-        def is_defense_win(cond: str) -> bool:
-            return cond in DEFENSE_WIN
-
-        # Only our team has condition
         if our_wc and not their_wc:
             if our_is_attack:
-                return "win" if is_attack_win(our_wc) else "loss"
+                return "win" if our_wc in ATTACK_WIN else "loss"
             else:
-                return "win" if is_defense_win(our_wc) else "loss"
+                return "win" if our_wc in DEFENSE_WIN else "loss"
 
-        # Only enemy has condition
         if their_wc and not our_wc:
             if our_is_attack:
-                return "loss" if is_defense_win(their_wc) else "win"
+                return "loss" if their_wc in DEFENSE_WIN else "win"
             else:
-                return "loss" if is_attack_win(their_wc) else "win"
+                return "loss" if their_wc in ATTACK_WIN else "win"
 
-        # Both have conditions (rare but happens with r6-dissect weirdness)
         if our_wc and their_wc:
             if our_is_attack:
-                if is_attack_win(our_wc) and not is_attack_win(their_wc):
+                if our_wc in ATTACK_WIN and their_wc not in ATTACK_WIN:
                     return "win"
-                if is_attack_win(their_wc) and not is_attack_win(our_wc):
+                if their_wc in ATTACK_WIN and our_wc not in ATTACK_WIN:
                     return "loss"
             else:
-                if is_defense_win(our_wc) and not is_defense_win(their_wc):
+                if our_wc in DEFENSE_WIN and their_wc not in DEFENSE_WIN:
                     return "win"
-                if is_defense_win(their_wc) and not is_defense_win(our_wc):
+                if their_wc in DEFENSE_WIN and our_wc not in DEFENSE_WIN:
                     return "loss"
 
-        # ── Final fallback ──
         print(
             f"[RecImporter] Warning: ambiguous outcome for round {round_num}. "
             f"our_wc={our_wc!r} their_wc={their_wc!r} "
             f"our_won={our_won} their_won={their_won} "
             f"→ defaulting to loss"
         )
-
         return "loss"
 
+    # =====================================================
+    # INTERNAL: Parse one round's data
+    # =====================================================
 
     def _parse_round(self, data: dict) -> tuple[Round, dict]:
         recording_player_id           = data.get("recordingPlayerID")
@@ -500,7 +467,7 @@ class RecImporter:
         score_us:   Optional[int] = None
         score_them: Optional[int] = None
         our_side:   Optional[str] = None
-        outcome:    Optional[str] = None
+        outcome:    str           = "loss"
 
         if our_team_index is not None and len(teams) >= 2:
             our_team   = teams[our_team_index]
@@ -510,20 +477,17 @@ class RecImporter:
             role_raw = str(our_team.get("role", "")).lower()
             our_side = "attack" if role_raw in ("attack", "1") else "defense"
 
-            score_us   = our_team.get("score")
-            score_them = their_team.get("score")
+            score_us   = RecImporter._safe_int(our_team.get("score"))
+            score_them = RecImporter._safe_int(their_team.get("score"))
 
             outcome = RecImporter._determine_outcome(
                 our_team, their_team,
                 data.get("roundNumber", "?")
             )
-
-            win_type = RecImporter._determine_win_type(our_team, their_team)
         else:
             # Can't find recording player — try to guess from teams
             if len(teams) == 2:
                 t0_won = teams[0].get("won", False)
-                t1_won = teams[1].get("won", False)
                 our_side = "attack"
                 outcome  = "win" if t0_won else "loss"
                 print(
@@ -543,13 +507,13 @@ class RecImporter:
             assists  = int(stats.get("assists", 0) or 0)
 
             player_stats_raw.append({
-                "id":       player.get("id"),
-                "username": player.get("username", ""),
+                "id":        player.get("id"),
+                "username":  player.get("username", ""),
                 "teamIndex": team_idx,
-                "kills":    kills,
-                "deaths":   deaths,
-                "assists":  assists,
-                "operator": (player.get("operator") or {}).get("name", ""),
+                "kills":     kills,
+                "deaths":    deaths,
+                "assists":   assists,
+                "operator":  (player.get("operator") or {}).get("name", ""),
             })
 
             if team_idx == our_team_index:
@@ -569,8 +533,7 @@ class RecImporter:
             round_number=max(1, round_number),
             side=our_side or "attack",
             site=data.get("site", ""),
-            outcome=outcome or "loss",
-            win_type=win_type,
+            outcome=outcome,
             resources=None,
             player_stats=[],
         )

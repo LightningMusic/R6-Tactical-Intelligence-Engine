@@ -38,6 +38,7 @@ class SettingsView(QWidget):
         tabs.addTab(self._build_matches_tab(),   "📋  Match Manager")
         tabs.addTab(self._build_ai_tab(),        "🤖  AI / Models")
         tabs.addTab(self._build_discord_tab(), "🎙  Discord")
+        tabs.addTab(self._build_twitch_tab(), "📡  Twitch")
         layout.addWidget(tabs)
 
     def _build_general_tab(self) -> QWidget:
@@ -325,6 +326,113 @@ class SettingsView(QWidget):
             self, "Discord",
             "Dependencies found. Bot will connect when you start a session."
         )
+
+    # =====================================================
+    # Twitch Tab Builder
+    # =====================================================
+    def _build_twitch_tab(self) -> QWidget:
+        from PySide6.QtWidgets import (
+            QWidget, QVBoxLayout, QGroupBox, QFormLayout,
+            QLineEdit, QPushButton, QLabel, QCheckBox, QMessageBox
+        )
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(16)
+
+        info = QLabel(
+            "Configure Twitch streaming settings.\n"
+            "Set your stream key in OBS: Settings → Stream → Service: Twitch → Stream Key.\n"
+            "The settings below control how R6 Analyzer manages your stream."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #aaa; font-size: 11px;")
+        layout.addWidget(info)
+
+        stream_group = QGroupBox("Twitch Stream Settings")
+        form = QFormLayout(stream_group)
+
+        self._twitch_channel_edit = QLineEdit()
+        self._twitch_channel_edit.setPlaceholderText("Your Twitch channel name (e.g. shroud)")
+        form.addRow("Channel Name:", self._twitch_channel_edit)
+
+        self._twitch_title_edit = QLineEdit()
+        self._twitch_title_edit.setPlaceholderText("Stream title (optional auto-set)")
+        form.addRow("Stream Title:", self._twitch_title_edit)
+
+        self._twitch_auto_start_cb = QCheckBox("Auto-start stream when session starts")
+        form.addRow("", self._twitch_auto_start_cb)
+
+        self._twitch_auto_stop_cb = QCheckBox("Auto-stop stream when session ends")
+        form.addRow("", self._twitch_auto_stop_cb)
+
+        layout.addWidget(stream_group)
+
+        obs_reminder = QGroupBox("OBS Stream Key Setup")
+        obs_layout = QVBoxLayout(obs_reminder)
+        guide = QLabel(
+            "1. Open OBS → Settings → Stream\n"
+            "2. Service: Twitch\n"
+            "3. Click 'Get Stream Key' or paste your key from:\n"
+            "   dashboard.twitch.tv → Settings → Stream → Primary Stream key\n"
+            "4. Click Apply → OK\n"
+            "5. Use '📡 Start Stream' in the Recording tab to go live."
+        )
+        guide.setStyleSheet("font-size: 10px; color: #888;")
+        obs_layout.addWidget(guide)
+        layout.addWidget(obs_reminder)
+
+        test_btn = QPushButton("Test OBS Stream Connection")
+        test_btn.clicked.connect(self._test_twitch_obs)
+        layout.addWidget(test_btn)
+
+        save_btn = QPushButton("Save Twitch Settings")
+        save_btn.clicked.connect(self._save_twitch)
+        layout.addWidget(save_btn)
+
+        layout.addStretch()
+
+        # Load existing values
+        from app.config import settings as app_settings
+        self._twitch_channel_edit.setText(str(app_settings.get("twitch_channel") or ""))
+        self._twitch_title_edit.setText(str(app_settings.get("twitch_title") or ""))
+        self._twitch_auto_start_cb.setChecked(bool(app_settings.get("twitch_auto_start")))
+        self._twitch_auto_stop_cb.setChecked(bool(app_settings.get("twitch_auto_stop")))
+
+        return w
+
+    def _save_twitch(self) -> None:
+        from app.config import settings as app_settings
+        from PySide6.QtWidgets import QMessageBox
+        app_settings.set_many({
+            "twitch_channel":    self._twitch_channel_edit.text().strip(),
+            "twitch_title":      self._twitch_title_edit.text().strip(),
+            "twitch_auto_start": self._twitch_auto_start_cb.isChecked(),
+            "twitch_auto_stop":  self._twitch_auto_stop_cb.isChecked(),
+        })
+        app_settings.save()
+        QMessageBox.information(self, "Saved", "Twitch settings saved.")
+
+    def _test_twitch_obs(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        try:
+            from integration.obs_controller import OBSController
+            obs = OBSController()
+            if obs.connect():
+                status = obs.get_stream_status()
+                obs.disconnect()
+                streaming = status.get("streaming", False)
+                recording = status.get("recording", False)
+                QMessageBox.information(
+                    self, "OBS Status",
+                    f"OBS connected ✅\n"
+                    f"Currently streaming: {'Yes 🔴' if streaming else 'No'}\n"
+                    f"Currently recording: {'Yes 🔴' if recording else 'No'}\n\n"
+                    f"Use '📡 Start Stream' in the Recording tab to go live."
+                )
+            else:
+                QMessageBox.warning(self, "OBS", "Could not connect to OBS ❌")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
     # =====================================================
     # LOAD
     # =====================================================
@@ -337,6 +445,7 @@ class SettingsView(QWidget):
         self._load_matches()
         self._load_ai_settings()
         self._check_model_status()
+        self._load_discord_settings()
 
     def _load_general_settings(self) -> None:
         from app.config import settings
@@ -411,6 +520,11 @@ class SettingsView(QWidget):
                 )
         except Exception as e:
             print(f"[Settings] Failed to load matches: {e}")
+
+    def _load_discord_settings(self) -> None:
+        from app.config import settings
+        self._discord_token_edit.setText(str(settings.get("discord_bot_token") or ""))
+        self._discord_channel_edit.setText(str(settings.get("discord_channel_id") or ""))
 
     def _load_ai_settings(self) -> None:
         from app.config import settings

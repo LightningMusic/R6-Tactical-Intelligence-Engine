@@ -57,72 +57,110 @@ class RecordingView(QWidget):
         self._build_ui()
 
     def _shutdown_and_eject(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
-        confirm = QMessageBox.question(
-            self, "Shut Down & Eject",
-            "This will:\n"
-            "  1. Stop OBS recording (if active)\n"
-            "  2. Shut down the Ollama AI server\n"
-            "  3. Close R6 Analyzer\n"
-            "  4. Eject the USB drive\n\n"
-            "Proceed?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
+            from PySide6.QtWidgets import QMessageBox
+            confirm = QMessageBox.question(
+                self, "Shut Down & Eject",
+                "This will:\n"
+                "  1. Stop OBS recording (if active)\n"
+                "  2. Terminate OBS process\n"
+                "  3. Shut down the Ollama AI server\n"
+                "  4. Close R6 Analyzer\n"
+                "  5. Eject the USB drive\n\n"
+                "Proceed?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
 
-        self._log_message("Shutting down...")
+            self._log_message("Shutting down...")
 
-        # ── Step 1: Stop OBS watchdog ─────────────────────────────
-        if hasattr(self, "_obs_watchdog"):
-            self._obs_watchdog.stop()
+            # ── Step 1: Stop OBS watchdog ─────────────────────────────
+            if hasattr(self, "_obs_watchdog"):
+                self._obs_watchdog.stop()
 
-        # ── Step 2: Stop OBS recording ────────────────────────────
-        if self._session_active:
+            # ── Step 2: Stop OBS recording via websocket ──────────────
+            if self._session_active:
+                try:
+                    self.obs.stop_recording()
+                    self._log_message("OBS recording stopped.")
+                except Exception as e:
+                    self._log_message(f"OBS stop error: {e}")
+
+            # ── Step 3: Disconnect OBS websocket ──────────────────────
             try:
-                self.obs.stop_recording()
-                self._log_message("OBS recording stopped.")
+                self.obs.disconnect()
+                self._log_message("OBS disconnected.")
+            except Exception:
+                pass
+
+            # ── Step 4: Kill OBS process entirely ─────────────────────
+            try:
+                import psutil
+                killed = 0
+                for proc in psutil.process_iter(["name", "pid"]):
+                    try:
+                        if proc.info["name"] and "obs64" in proc.info["name"].lower():
+                            proc.terminate()
+                            killed += 1
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                if killed:
+                    self._log_message(f"OBS process terminated ({killed} instance(s)).")
+                else:
+                    self._log_message("OBS process not found (already closed).")
             except Exception as e:
-                self._log_message(f"OBS stop error: {e}")
+                self._log_message(f"OBS process kill error: {e}")
 
-        # ── Step 3: Disconnect OBS websocket ──────────────────────
-        try:
-            self.obs.disconnect()
-            self._log_message("OBS disconnected.")
-        except Exception:
-            pass
+            # ── Step 5: Stop Ollama via IntelEngine + kill process ─────
+            try:
+                from analysis.intel_engine import IntelEngine
+                _e = IntelEngine()
+                _e.shutdown()
+                self._log_message("Ollama server stopped via API.")
+            except Exception as e:
+                self._log_message(f"Ollama shutdown error: {e}")
 
-        # ── Step 4: Stop Ollama server ────────────────────────────
-        try:
-            from analysis.intel_engine import IntelEngine
-            _e = IntelEngine()
-            _e.shutdown()
-            self._log_message("Ollama server stopped.")
-        except Exception as e:
-            self._log_message(f"Ollama shutdown error: {e}")
+            # Kill ollama.exe process directly as backup
+            try:
+                import psutil
+                killed = 0
+                for proc in psutil.process_iter(["name", "pid"]):
+                    try:
+                        name = proc.info["name"] or ""
+                        if "ollama" in name.lower():
+                            proc.terminate()
+                            killed += 1
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                if killed:
+                    self._log_message(f"Ollama process terminated ({killed} instance(s)).")
+            except Exception as e:
+                self._log_message(f"Ollama process kill error: {e}")
 
-        # ── Step 5: Eject USB ─────────────────────────────────────
-        try:
-            from app.config import BASE_DIR
-            import subprocess
-            drive = BASE_DIR.drive   # e.g. "E:"
-            if drive and drive != "C:":
-                ps_cmd = (
-                    f"(New-Object -comObject Shell.Application)"
-                    f".Namespace(17).ParseName('{drive}\\').InvokeVerb('Eject')"
-                )
-                subprocess.Popen(
-                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
-                    "-Command", ps_cmd],
-                    creationflags=0x08000000,
-                )
-                self._log_message(f"Ejecting {drive}...")
-        except Exception as e:
-            self._log_message(f"Eject error: {e}")
+            # ── Step 6: Eject USB ─────────────────────────────────────
+            try:
+                from app.config import BASE_DIR
+                import subprocess
+                drive = BASE_DIR.drive   # e.g. "E:"
+                if drive and drive.upper() != "C:":
+                    ps_cmd = (
+                        f"(New-Object -comObject Shell.Application)"
+                        f".Namespace(17).ParseName('{drive}\\').InvokeVerb('Eject')"
+                    )
+                    subprocess.Popen(
+                        ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+                        "-Command", ps_cmd],
+                        creationflags=0x08000000,
+                    )
+                    self._log_message(f"Ejecting {drive}...")
+                else:
+                    self._log_message("Skipping eject (running from C: drive).")
+            except Exception as e:
+                self._log_message(f"Eject error: {e}")
 
-        # ── Step 6: Exit after brief delay so log updates ─────────
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(2000, lambda: __import__("sys").exit(0))
+            # ── Step 7: Exit after brief delay so log updates ─────────
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(2000, lambda: __import__("sys").exit(0))
     # =====================================================
     # UI
     # =====================================================

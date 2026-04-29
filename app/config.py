@@ -70,6 +70,12 @@ class _Settings:
         "stability_checks":   4,
         "transcribe_auto":    True,
         "r6_replay_folder":   None,
+        "twitch_channel":    "",
+        "twitch_title":      "",
+        "twitch_auto_start": False,
+        "twitch_auto_stop":  False,
+        "discord_bot_token": "",
+        "discord_channel_id": "",
     }
 
     def __init__(self) -> None:
