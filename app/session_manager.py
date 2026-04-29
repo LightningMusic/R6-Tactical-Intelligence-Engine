@@ -264,24 +264,49 @@ class SessionManager:
                     f"{data['talk_time']:.0f}s talk time"
                 )
 
-        # ── Step 3: Get session start time for alignment ──────────
-        # Use the recording file's creation time — this is when OBS
-        # started writing, which is the true session start.
+        # ── Step 3: Get session start time ───────────────────────
         session_start_epoch: Optional[float] = None
 
         if self.recording_path and self.recording_path.exists():
-            try:
-                # st_ctime on Windows = file creation time (not change time)
-                session_start_epoch = self.recording_path.stat().st_ctime
-                import datetime as _dt
-                readable = _dt.datetime.fromtimestamp(session_start_epoch).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-                if log_callback:
-                    log_callback(f"Session start (from recording): {readable}")
-            except Exception as e:
-                if log_callback:
-                    log_callback(f"Could not read recording timestamp: {e}")
+            # Strategy 1: parse timestamp from OBS filename
+            # OBS names files like "2026-04-27 16-38-48.mp4"
+            import re as _re
+            stem = self.recording_path.stem  # "2026-04-27 16-38-48"
+            m = _re.match(
+                r"(\d{4}-\d{2}-\d{2})\s+(\d{2}-\d{2}-\d{2})", stem
+            )
+            if m:
+                try:
+                    import datetime as _dt
+                    date_str = m.group(1)
+                    time_str = m.group(2).replace("-", ":")
+                    dt = _dt.datetime.strptime(
+                        f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S"
+                    )
+                    # OBS saves in local time
+                    session_start_epoch = dt.timestamp()
+                    if log_callback:
+                        log_callback(
+                            f"Session start (from filename): "
+                            f"{dt.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                except Exception as e:
+                    if log_callback:
+                        log_callback(f"Could not parse filename timestamp: {e}")
+
+            # Strategy 2: file creation time
+            if session_start_epoch is None:
+                try:
+                    session_start_epoch = self.recording_path.stat().st_ctime
+                    import datetime as _dt
+                    readable = _dt.datetime.fromtimestamp(
+                        session_start_epoch
+                    ).strftime("%Y-%m-%d %H:%M:%S")
+                    if log_callback:
+                        log_callback(f"Session start (from ctime): {readable}")
+                except Exception as e:
+                    if log_callback:
+                        log_callback(f"Could not read file ctime: {e}")
 
         # ── Step 4: Clip + store per-match transcript ─────────────
         aligner  = TimelineAligner()
@@ -435,3 +460,88 @@ class SessionManager:
             for f in folder.glob("*.rec")
             if f.exists()
         )
+    
+    def cleanup_old_recordings(
+        self,
+        keep_latest_n: int = 3,
+        log_callback: Optional[Callable[[str], None]] = None,
+    ) -> int:
+        """
+        Deletes old recording files to free USB space.
+        Keeps the most recent `keep_latest_n` recordings.
+        Returns number of files deleted.
+        """
+        from app.config import RECORDINGS_DIR
+
+        def log(msg: str) -> None:
+            print(f"[Cleanup] {msg}")
+            if log_callback:
+                log_callback(msg)
+
+        recordings = sorted(
+            [
+                f for f in RECORDINGS_DIR.glob("*.mp4")
+                if f.is_file()
+            ] + [
+                f for f in RECORDINGS_DIR.glob("*.mkv")
+                if f.is_file()
+            ],
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,   # newest first
+        )
+
+        if len(recordings) <= keep_latest_n:
+            log(
+                f"Only {len(recordings)} recording(s) found — "
+                f"nothing to delete (keeping {keep_latest_n})."
+            )
+            return 0
+
+        to_delete = recordings[keep_latest_n:]
+        deleted   = 0
+
+        for f in to_delete:
+            try:
+                mb = f.stat().st_size / (1024 * 1024)
+                f.unlink()
+                log(f"Deleted: {f.name} ({mb:.0f} MB)")
+                deleted += 1
+            except Exception as e:
+                log(f"Could not delete {f.name}: {e}")
+
+        total_freed = sum(
+            0 for f in to_delete
+        )   # already deleted, can't stat
+        log(f"Cleanup complete: {deleted} file(s) deleted.")
+        return deleted
+
+
+    def get_storage_usage(self) -> dict:
+        """Returns dict with storage info for the USB drive."""
+        from app.config import BASE_DIR, RECORDINGS_DIR, DATA_DIR
+        import shutil
+
+        result: dict = {}
+
+        try:
+            usage = shutil.disk_usage(str(BASE_DIR))
+            result["total_gb"]   = round(usage.total / (1024**3), 1)
+            result["used_gb"]    = round(usage.used  / (1024**3), 1)
+            result["free_gb"]    = round(usage.free  / (1024**3), 1)
+            result["percent_used"] = round(usage.used / usage.total * 100, 1)
+        except Exception:
+            result["error"] = "Could not read disk usage"
+
+        # Recording sizes
+        try:
+            recordings = list(RECORDINGS_DIR.glob("*.mp4")) + \
+                        list(RECORDINGS_DIR.glob("*.mkv"))
+            result["recording_count"] = len(recordings)
+            result["recordings_gb"]   = round(
+                sum(f.stat().st_size for f in recordings) / (1024**3), 2
+            )
+        except Exception:
+            result["recording_count"] = 0
+            result["recordings_gb"]   = 0.0
+
+        return result

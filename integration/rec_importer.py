@@ -12,6 +12,7 @@ from models.round import Round
 
 
 MAP_ID_LOOKUP: dict[int, str] = {
+    # ── Original maps ─────────────────────────────────────────
     417890697769: "Clubhouse",
     108179795804: "Bank",
     108179870768: "Border",
@@ -38,9 +39,25 @@ MAP_ID_LOOKUP: dict[int, str] = {
     108180662680: "Close Quarter",
     108180662968: "Favela",
     108180728456: "Donut",
-    430788891316: "Theme Park",  # ThemeParkY11 — showing as Map(430788891316)
-    409325881472: "Chalet",      # ChaletY11
-    436375283234: "Villa",       # VillaY10
+    # ── Y10/Y11 reworks ───────────────────────────────────────
+    413779563590: "Bank",           # BankY10
+    407987100456: "Border",         # BorderY10
+    407558616688: "Chalet",         # ChaletY10
+    407193663917: "Clubhouse",      # ClubHouseY10
+    413845419788: "Kafe Dostoyevsky", # KafeDostoyevskyY10
+    417890697769: "Lair",           # LairY10
+    418119057546: "Nighthaven Labs", # NighthavenLabsY10
+    418126004176: "Consulate",      # ConsulateY10
+    409325881472: "Chalet",         # ChaletY11
+    436375283234: "Villa",          # VillaY10
+    430788891316: "Theme Park",     # ThemeParkY11
+    398899676157: "Fortress",       # FortressY10
+    423767322185: "Skyscraper",     # SkyscraperY10/Y11
+    409880628150: "Oregon",         # OregonY10
+    412551493246: "Coastline",      # CoastlineY10
+    415956890521: "Outback",        # OutbackY10
+    419662876236: "Border",         # BorderY11
+    422790217276: "Clubhouse",      # ClubhouseY11
 }
 
 MAX_RETRIES     = 5
@@ -337,6 +354,139 @@ class RecImporter:
     # INTERNAL: Parse one round's data
     # =====================================================
 
+
+    @staticmethod
+    def _determine_win_type(our_team: dict, their_team: dict) -> str:
+        def norm(x: object) -> str:
+            return str(x or "").strip()
+
+        our_wc   = norm(our_team.get("winCondition"))
+        their_wc = norm(their_team.get("winCondition"))
+
+        role_raw = norm(our_team.get("role")).lower()
+        our_is_attack = role_raw in ("attack", "1")
+
+        wc = our_wc or their_wc  # fallback if only one exists
+
+        if not wc:
+            return "unknown"
+
+        # ── Normalize win types ──
+        if wc == "KilledOpponents":
+            return "kill"
+
+        if wc in ("DefusedBomb", "DisabledDefuser"):
+            return "plant"
+
+        if wc == "Time":
+            return "time"
+
+        if wc in ("ExtractedHostage", "ProtectedHostage"):
+            return "hostage"
+
+        if wc == "SecuredArea":
+            return "secure"
+
+        return "other"
+    def _safe_int(value: object) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    def _determine_outcome(our_team: dict, their_team: dict, round_num: object) -> str:
+        def norm(x: object) -> str:
+            return str(x or "").strip()
+
+        # ── Safe ints ─────────────────────────
+        our_score   = RecImporter._safe_int(our_team.get("score"))
+        their_score = RecImporter._safe_int(their_team.get("score"))
+        our_start   = RecImporter._safe_int(our_team.get("startingScore", our_score))
+        their_start = RecImporter._safe_int(their_team.get("startingScore", their_score))
+
+        # ── Strategy 1: Score delta (most reliable) ──
+        if None not in (our_score, their_score, our_start, their_start):
+            our_gained   = our_score   - our_start
+            their_gained = their_score - their_start
+
+            if our_gained > their_gained:
+                return "win"
+            if their_gained > our_gained:
+                return "loss"
+
+        # ── Strategy 2: Explicit won flag ──
+        our_won   = our_team.get("won")
+        their_won = their_team.get("won")
+
+        if our_won is True and their_won is not True:
+            return "win"
+        if their_won is True and our_won is not True:
+            return "loss"
+
+        # ── Strategy 3: Role-aware winCondition ──
+        our_wc   = norm(our_team.get("winCondition"))
+        their_wc = norm(their_team.get("winCondition"))
+
+        role_raw = norm(our_team.get("role")).lower()
+        our_is_attack = role_raw in ("attack", "1")
+
+        ATTACK_WIN = {
+            "KilledOpponents",
+            "DefusedBomb",
+            "ExtractedHostage",
+            "SecuredArea",
+        }
+
+        DEFENSE_WIN = {
+            "DisabledDefuser",
+            "KilledOpponents",
+            "Time",
+            "ProtectedHostage",
+        }
+
+        def is_attack_win(cond: str) -> bool:
+            return cond in ATTACK_WIN
+
+        def is_defense_win(cond: str) -> bool:
+            return cond in DEFENSE_WIN
+
+        # Only our team has condition
+        if our_wc and not their_wc:
+            if our_is_attack:
+                return "win" if is_attack_win(our_wc) else "loss"
+            else:
+                return "win" if is_defense_win(our_wc) else "loss"
+
+        # Only enemy has condition
+        if their_wc and not our_wc:
+            if our_is_attack:
+                return "loss" if is_defense_win(their_wc) else "win"
+            else:
+                return "loss" if is_attack_win(their_wc) else "win"
+
+        # Both have conditions (rare but happens with r6-dissect weirdness)
+        if our_wc and their_wc:
+            if our_is_attack:
+                if is_attack_win(our_wc) and not is_attack_win(their_wc):
+                    return "win"
+                if is_attack_win(their_wc) and not is_attack_win(our_wc):
+                    return "loss"
+            else:
+                if is_defense_win(our_wc) and not is_defense_win(their_wc):
+                    return "win"
+                if is_defense_win(their_wc) and not is_defense_win(our_wc):
+                    return "loss"
+
+        # ── Final fallback ──
+        print(
+            f"[RecImporter] Warning: ambiguous outcome for round {round_num}. "
+            f"our_wc={our_wc!r} their_wc={their_wc!r} "
+            f"our_won={our_won} their_won={their_won} "
+            f"→ defaulting to loss"
+        )
+
+        return "loss"
+
+
     def _parse_round(self, data: dict) -> tuple[Round, dict]:
         recording_player_id           = data.get("recordingPlayerID")
         our_team_index: Optional[int] = None
@@ -353,9 +503,9 @@ class RecImporter:
         outcome:    Optional[str] = None
 
         if our_team_index is not None and len(teams) >= 2:
-            our_team    = teams[our_team_index]
-            other_idx   = 1 - our_team_index
-            their_team  = teams[other_idx]
+            our_team   = teams[our_team_index]
+            other_idx  = 1 - our_team_index
+            their_team = teams[other_idx]
 
             role_raw = str(our_team.get("role", "")).lower()
             our_side = "attack" if role_raw in ("attack", "1") else "defense"
@@ -363,44 +513,47 @@ class RecImporter:
             score_us   = our_team.get("score")
             score_them = their_team.get("score")
 
-            # ── Primary: score delta ───────────────────────────────
-            our_start   = our_team.get("startingScore",   score_us)
-            their_start = their_team.get("startingScore", score_them)
+            outcome = RecImporter._determine_outcome(
+                our_team, their_team,
+                data.get("roundNumber", "?")
+            )
 
-            our_gained   = (score_us   or 0) - (our_start   or 0)
-            their_gained = (score_them or 0) - (their_start or 0)
+            win_type = RecImporter._determine_win_type(our_team, their_team)
+        else:
+            # Can't find recording player — try to guess from teams
+            if len(teams) == 2:
+                t0_won = teams[0].get("won", False)
+                t1_won = teams[1].get("won", False)
+                our_side = "attack"
+                outcome  = "win" if t0_won else "loss"
+                print(
+                    f"[RecImporter] Warning: could not find recording player "
+                    f"in round {data.get('roundNumber','?')} — guessing from team 0"
+                )
 
-            if our_gained > their_gained:
-                outcome = "win"
-            elif their_gained > our_gained:
-                outcome = "loss"
-            else:
-                # ── Fallback 1: won boolean ────────────────────────
-                our_won   = bool(our_team.get("won",   False))
-                their_won = bool(their_team.get("won", False))
+        # ── Extract per-player stats ──────────────────────────────
+        player_stats_raw: list[dict] = []
+        our_team_kills = 0
 
-                if our_won and not their_won:
-                    outcome = "win"
-                elif their_won and not our_won:
-                    outcome = "loss"
-                else:
-                    # ── Fallback 2: winCondition ───────────────────
-                    our_wc   = str(our_team.get("winCondition",   "") or "")
-                    their_wc = str(their_team.get("winCondition", "") or "")
+        for player in data.get("players", []):
+            team_idx = player.get("teamIndex", -1)
+            stats    = player.get("stats", {}) or {}
+            kills    = int(stats.get("kills",   0) or 0)
+            deaths   = int(stats.get("deaths",  0) or 0)
+            assists  = int(stats.get("assists", 0) or 0)
 
-                    if our_wc and not their_wc:
-                        outcome = "win"
-                    elif their_wc and not our_wc:
-                        outcome = "loss"
-                    else:
-                        # Final fallback
-                        outcome = "loss"
-                        print(
-                            f"[RecImporter] Warning: ambiguous outcome for round "
-                            f"{data.get('roundNumber','?')} — defaulting to loss. "
-                            f"our_wc={our_wc!r} their_wc={their_wc!r} "
-                            f"our_won={our_won} their_won={their_won}"
-                        )
+            player_stats_raw.append({
+                "id":       player.get("id"),
+                "username": player.get("username", ""),
+                "teamIndex": team_idx,
+                "kills":    kills,
+                "deaths":   deaths,
+                "assists":  assists,
+                "operator": (player.get("operator") or {}).get("name", ""),
+            })
+
+            if team_idx == our_team_index:
+                our_team_kills += kills
 
         map_data   = data.get("map", {})
         map_id_raw = map_data.get("id")
@@ -410,35 +563,6 @@ class RecImporter:
         if isinstance(round_number, int):
             round_number = round_number + 1
 
-        # ── Extract player kill/death stats from the replay ───────
-        # r6-dissect exposes per-player stats in data["players"]
-        # and also sometimes in data["stats"] or data["matchFeedback"]
-        # We pull what we can and store it in meta for the caller.
-        player_stats_raw: list[dict] = []
-        our_team_kills = 0
-
-        for player in data.get("players", []):
-            team_idx = player.get("teamIndex", -1)
-            stats    = player.get("stats", {}) or {}
-
-            kills   = int(stats.get("kills",   0) or 0)
-            deaths  = int(stats.get("deaths",  0) or 0)
-            assists = int(stats.get("assists", 0) or 0)
-
-            player_stats_raw.append({
-                "id":        player.get("id"),
-                "username":  player.get("username", ""),
-                "teamIndex": team_idx,
-                "kills":     kills,
-                "deaths":    deaths,
-                "assists":   assists,
-                "operator":  player.get("operator", {}).get("name", ""),
-                "side":      "attack" if team_idx == (our_team_index or 0) else "defense",
-            })
-
-            if team_idx == our_team_index:
-                our_team_kills += kills
-
         round_obj = Round(
             round_id=None,
             match_id=None,
@@ -446,15 +570,15 @@ class RecImporter:
             side=our_side or "attack",
             site=data.get("site", ""),
             outcome=outcome or "loss",
+            win_type=win_type,
             resources=None,
             player_stats=[],
         )
 
         return round_obj, {
-            "map_name":          map_name,
-            "score_us":          score_us,
-            "score_them":        score_them,
-            "player_stats_raw":  player_stats_raw,
-            "our_team_index":    our_team_index,
-            "our_team_kills":    our_team_kills,
+            "map_name":         map_name,
+            "score_us":         score_us,
+            "score_them":       score_them,
+            "player_stats_raw": player_stats_raw,
+            "our_team_kills":   our_team_kills,
         }

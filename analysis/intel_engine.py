@@ -477,86 +477,131 @@ class IntelEngine:
 
     # ── Prompt builders ───────────────────────────────────────
 
-    def _build_match_prompt(
-        self,
-        match: Any,
-        metrics: dict[str, float],
-        summary: dict[int, Any],
-        tps: dict[int, float],
-        transcript: dict[str, Any],
-    ) -> str:
-        round_lines: list[str] = []
+    def _build_match_prompt(self, match, metrics, summary, tps, transcript) -> str:
+        wins   = sum(1 for r in match.rounds if r.outcome == "win")
+        losses = sum(1 for r in match.rounds if r.outcome == "loss")
+
+        # ── Round table ───────────────────────────────────────────
+        round_lines = []
         for r in match.rounds:
             k = sum(p.kills  for p in r.player_stats)
             d = sum(p.deaths for p in r.player_stats)
+            a = sum(p.assists for p in r.player_stats)
+            kd_str = f"{k}K/{d}D/{a}A"
             round_lines.append(
-                f"  R{r.round_number:02d} | {r.side:<8} | "
-                f"{'WIN' if r.outcome=='win' else 'LOSS'} | "
-                f"{str(r.site or '?'):<30} | K/D {k}/{d}"
+                f"  R{r.round_number:02d}  "
+                f"{'ATK' if r.side == 'attack' else 'DEF'}  "
+                f"{'WIN ✓' if r.outcome == 'win' else 'LOSS ✗'}  "
+                f"{kd_str:<10}  {r.site or 'Unknown site'}"
             )
 
-        player_lines: list[str] = []
-        for pid, data in summary.items():
+        # ── Player table ──────────────────────────────────────────
+        player_lines = []
+        sorted_players = sorted(
+            summary.items(),
+            key=lambda x: float(tps.get(x[0], 0.0)),
+            reverse=True,
+        )
+        for pid, data in sorted_players:
             score = float(tps.get(pid, 0.0))
+            kd    = float(data.get("kd_ratio", 0.0))
+            ew    = float(data.get("engagement_win_rate", 0.0))
+            sr    = float(data.get("survival_rate", 0.0))
+            k     = int(data.get("kills", 0))
+            d_    = int(data.get("deaths", 0))
+            a     = int(data.get("assists", 0))
+            rp    = int(data.get("rounds_played", 1))
             player_lines.append(
-                f"  {str(data['player'].name):<18} "
-                f"K:{int(data['kills']):>2} D:{int(data['deaths']):>2} "
-                f"A:{int(data['assists']):>2} | "
-                f"EW:{float(data['engagement_win_rate']):.0%} "
-                f"SR:{float(data['survival_rate']):.0%} "
-                f"UE:{float(data['utility_efficiency']):.0%} "
-                f"TPS:{score:.3f}"
+                f"  {str(data['player'].name):<16} "
+                f"K/D/A: {k}/{d_}/{a}  "
+                f"(KD {kd:.2f}  EW {ew:.0%}  SR {sr:.0%}  "
+                f"TPS {score:.2f})  "
+                f"{rp} rounds"
             )
 
-        comms = ""
-        if transcript:
+        # ── Comms section ─────────────────────────────────────────
+        comms_section = ""
+        if transcript and int(transcript.get("word_count", 0)) > 0:
             top_locs    = list(transcript.get("top_locations", {}).keys())[:5]
             top_actions = list(transcript.get("top_actions",   {}).keys())[:5]
+            gaps        = int(transcript.get("coord_gaps", 0))
+            words       = int(transcript.get("word_count", 0))
             speakers    = dict(transcript.get("speakers", {}))
-            spk_lines   = ""
+
+            speaker_lines = []
             for spk, sd in list(speakers.items())[:5]:
-                wc   = int(sd.get("word_count", 0))
-                top  = list(sd.get("top_words", []))[:4]
-                spk_lines += f"    {spk}: {wc} words, top: {', '.join(top)}\n"
-            comms = (
-                "\nCOMMUNICATIONS\n==============\n"
-                f"  Words       : {int(transcript.get('word_count', 0))}\n"
-                f"  Locations   : {', '.join(top_locs) or 'none'}\n"
-                f"  Actions     : {', '.join(top_actions) or 'none'}\n"
-                f"  Coord gaps  : {int(transcript.get('coord_gaps', 0))} (>8s silences)\n"
+                wc  = int(sd.get("word_count", 0))
+                top = list(sd.get("top_words", []))[:3]
+                speaker_lines.append(
+                    f"    {spk}: {wc} words — "
+                    f"top callouts: {', '.join(top) or 'none'}"
+                )
+
+            comms_section = (
+                f"\nCOMMS SUMMARY\n"
+                f"  Total words spoken : {words}\n"
+                f"  Top locations      : {', '.join(top_locs) or 'none'}\n"
+                f"  Top actions        : {', '.join(top_actions) or 'none'}\n"
+                f"  Silence gaps (>8s) : {gaps}\n"
             )
-            if spk_lines:
-                comms += f"  Speakers:\n{spk_lines}"
+            if speaker_lines:
+                comms_section += "  Speakers:\n" + "\n".join(speaker_lines) + "\n"
 
         return (
-            "[INST] You are an elite Rainbow Six Siege tactical analyst. "
-            "Be specific, cite data, no filler.\n\n"
-            f"MATCH: vs {match.opponent_name} on {match.map} "
-            f"| {str(match.result or 'In Progress').upper()}\n\n"
-            "METRICS\n=======\n"
-            f"  Win {metrics['win_rate']:.0%} | "
-            f"Atk {metrics['attack_win_rate']:.0%} | "
-            f"Def {metrics['defense_win_rate']:.0%} | "
-            f"Eng {metrics['engagement_win_rate']:.0%} | "
-            f"Drone {metrics['drone_efficiency']:.0%} | "
-            f"Reinf {metrics['reinforcement_rate']:.0%} | "
-            f"ManAdv {metrics['man_advantage']:.0%} | "
-            f"Clutch {metrics['clutch_rate']:.0%}\n\n"
-            "ROUNDS\n======\n" + "\n".join(round_lines) + "\n\n"
-            "PLAYERS (EW=EngWin% SR=Survival% UE=Utility% TPS=score)\n"
-            "=========================================================\n"
+            f"You are an analyst for a Rainbow Six Siege esports team. "
+            f"Write a clear post-match debrief based on the data below.\n\n"
+
+            f"MATCH OVERVIEW\n"
+            f"  Opponent : {match.opponent_name}\n"
+            f"  Map      : {match.map}\n"
+            f"  Score    : {wins}–{losses}  "
+            f"({'WIN' if match.result == 'win' else 'LOSS' if match.result == 'loss' else 'INCOMPLETE'})\n\n"
+
+            f"TEAM STATS\n"
+            f"  Win Rate    : {metrics['win_rate']:.0%}  "
+            f"(Attack {metrics['attack_win_rate']:.0%} / "
+            f"Defense {metrics['defense_win_rate']:.0%})\n"
+            f"  Engagement  : {metrics['engagement_win_rate']:.0%} win rate in gunfights\n"
+            f"  Man Adv Conv: {metrics['man_advantage']:.0%}  "
+            f"(when up in numbers, converting to round win)\n"
+            f"  Clutch Rate : {metrics['clutch_rate']:.0%}\n\n"
+
+            f"ROUND BY ROUND\n"
+            + "\n".join(round_lines) + "\n\n"
+
+            f"PLAYER PERFORMANCE  (sorted by TPS score, higher = better)\n"
             + "\n".join(player_lines) + "\n"
-            + comms + "\n"
-            "TASK: Write a debrief in EXACTLY this structure:\n\n"
-            "## MATCH SUMMARY\n(2 sentences)\n\n"
-            "## STRENGTHS\n1. (with stat)\n2. (with stat)\n\n"
-            "## WEAKNESSES\n1. (with stat)\n2. (with stat)\n\n"
-            "## ADJUSTMENTS\n1. (actionable)\n2. (actionable)\n3. (actionable)\n\n"
-            "## STANDOUT PLAYERS\n"
-            "Best TPS: (name + why)\nNeeds work: (name + why)\n\n"
-            "## COMMS ANALYSIS\n"
-            "(Who called most, gaps, patterns — if no comms data, skip.)\n\n"
-            "Cite round numbers and metrics. No generic advice.\n[/INST]"
+            + comms_section + "\n"
+
+            f"INSTRUCTIONS\n"
+            f"Write your debrief using exactly these sections. "
+            f"Reference specific round numbers and player names. "
+            f"Be direct — no filler phrases.\n\n"
+
+            f"## MATCH SUMMARY\n"
+            f"Two sentences: result and overall performance.\n\n"
+
+            f"## WHAT WORKED\n"
+            f"1. [Specific strength with evidence from the data]\n"
+            f"2. [Specific strength with evidence from the data]\n\n"
+
+            f"## WHAT NEEDS FIXING\n"
+            f"1. [Specific problem with evidence from the data]\n"
+            f"2. [Specific problem with evidence from the data]\n\n"
+
+            f"## ADJUSTMENTS FOR NEXT MATCH\n"
+            f"1. [Concrete actionable change]\n"
+            f"2. [Concrete actionable change]\n"
+            f"3. [Concrete actionable change]\n\n"
+
+            f"## PLAYER SPOTLIGHT\n"
+            f"Best performer: [name and why, cite one stat]\n"
+            f"Focus player  : [name and one specific thing to work on]\n\n"
+
+            f"## COMMUNICATION\n"
+            f"[If comms data present: note who spoke most, "
+            f"any coordination gaps, key callout patterns. "
+            f"If no comms data, write: No comms data recorded this session.]\n"
         )
 
     def _build_player_prompt(

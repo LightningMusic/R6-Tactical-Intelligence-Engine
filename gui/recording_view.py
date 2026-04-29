@@ -73,17 +73,26 @@ class RecordingView(QWidget):
 
         self._log_message("Shutting down...")
 
-        # Stop recording if active
+        # ── Step 1: Stop OBS watchdog ─────────────────────────────
+        if hasattr(self, "_obs_watchdog"):
+            self._obs_watchdog.stop()
+
+        # ── Step 2: Stop OBS recording ────────────────────────────
         if self._session_active:
             try:
-                if hasattr(self, "_obs_watchdog"):
-                    self._obs_watchdog.stop()
                 self.obs.stop_recording()
                 self._log_message("OBS recording stopped.")
             except Exception as e:
                 self._log_message(f"OBS stop error: {e}")
 
-        # Stop Ollama
+        # ── Step 3: Disconnect OBS websocket ──────────────────────
+        try:
+            self.obs.disconnect()
+            self._log_message("OBS disconnected.")
+        except Exception:
+            pass
+
+        # ── Step 4: Stop Ollama server ────────────────────────────
         try:
             from analysis.intel_engine import IntelEngine
             _e = IntelEngine()
@@ -92,24 +101,13 @@ class RecordingView(QWidget):
         except Exception as e:
             self._log_message(f"Ollama shutdown error: {e}")
 
-        # Disconnect OBS
-        try:
-            self.obs.disconnect()
-            self._log_message("OBS disconnected.")
-        except Exception:
-            pass
-
-        # Eject USB — find USB drive letter from config
+        # ── Step 5: Eject USB ─────────────────────────────────────
         try:
             from app.config import BASE_DIR
+            import subprocess
             drive = BASE_DIR.drive   # e.g. "E:"
-            if drive:
-                import subprocess
-                # PowerShell eject via WMI — no admin needed for removable drives
+            if drive and drive != "C:":
                 ps_cmd = (
-                    f"$vol = Get-WmiObject Win32_Volume -Filter "
-                    f"\"DriveLetter='{drive}'\"; "
-                    f"$vol.DriveLetter; "
                     f"(New-Object -comObject Shell.Application)"
                     f".Namespace(17).ParseName('{drive}\\').InvokeVerb('Eject')"
                 )
@@ -120,11 +118,11 @@ class RecordingView(QWidget):
                 )
                 self._log_message(f"Ejecting {drive}...")
         except Exception as e:
-            self._log_message(f"Eject error (close app manually): {e}")
+            self._log_message(f"Eject error: {e}")
 
-        # Give log a moment to show, then exit
+        # ── Step 6: Exit after brief delay so log updates ─────────
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(1500, lambda: __import__("sys").exit(0))
+        QTimer.singleShot(2000, lambda: __import__("sys").exit(0))
     # =====================================================
     # UI
     # =====================================================
@@ -168,6 +166,21 @@ class RecordingView(QWidget):
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._status_label.setStyleSheet("font-size: 14px; color: #888;")
         layout.addWidget(self._status_label)
+
+        # ── Storage indicator ─────────────────────────────────────
+        self._storage_label = QLabel("💾 Checking storage...")
+        self._storage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._storage_label.setStyleSheet("font-size: 11px; color: #888;")
+        layout.addWidget(self._storage_label)
+        self._refresh_storage_display()
+
+        # ── Storage management ────────────────────────────────────
+        storage_layout = QHBoxLayout()
+        cleanup_btn = QPushButton("🗑  Clean Old Recordings")
+        cleanup_btn.setMinimumHeight(32)
+        cleanup_btn.clicked.connect(self._cleanup_recordings)
+        storage_layout.addWidget(cleanup_btn)
+        layout.addLayout(storage_layout)
 
         # Buttons
         btn_layout = QHBoxLayout()
@@ -547,3 +560,102 @@ class RecordingView(QWidget):
         # Auto-scroll to bottom
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+
+    # =====================================================
+    # Clean Old Storage
+    # =====================================================
+    def _refresh_storage_display(self) -> None:
+        """Update the storage indicator."""
+        try:
+            from app.config import BASE_DIR, RECORDINGS_DIR
+            import shutil
+            usage = shutil.disk_usage(str(BASE_DIR))
+            free_gb  = usage.free  / (1024**3)
+            total_gb = usage.total / (1024**3)
+            pct_used = usage.used  / usage.total * 100
+
+            recordings = list(RECORDINGS_DIR.glob("*.mp4")) + \
+                        list(RECORDINGS_DIR.glob("*.mkv"))
+            rec_gb = sum(f.stat().st_size for f in recordings) / (1024**3)
+
+            color = "#55e07a"        # green
+            if pct_used > 80:
+                color = "#e0a830"    # yellow
+            if pct_used > 90:
+                color = "#e05555"    # red
+
+            self._storage_label.setText(
+                f"💾 USB: {free_gb:.1f} GB free of {total_gb:.0f} GB  "
+                f"({pct_used:.0f}% used)  |  "
+                f"Recordings: {rec_gb:.1f} GB ({len(recordings)} files)"
+            )
+            self._storage_label.setStyleSheet(
+                f"font-size: 11px; color: {color};"
+            )
+        except Exception:
+            self._storage_label.setText("💾 Storage info unavailable")
+
+    def _cleanup_recordings(self) -> None:
+        """Delete old recordings, keeping the 3 most recent."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        from app.config import RECORDINGS_DIR
+
+        # Show what's there first
+        recordings = sorted(
+            list(RECORDINGS_DIR.glob("*.mp4")) +
+            list(RECORDINGS_DIR.glob("*.mkv")),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+
+        if not recordings:
+            QMessageBox.information(self, "Cleanup", "No recordings found.")
+            return
+
+        total_gb = sum(f.stat().st_size for f in recordings) / (1024**3)
+
+        keep_n, ok = QInputDialog.getInt(
+            self,
+            "Clean Old Recordings",
+            f"Found {len(recordings)} recording(s) using {total_gb:.1f} GB.\n\n"
+            f"Keep how many most recent recordings?",
+            3, 1, len(recordings), 1
+        )
+        if not ok:
+            return
+
+        to_delete = recordings[keep_n:]
+        if not to_delete:
+            QMessageBox.information(
+                self, "Cleanup",
+                f"Nothing to delete — only {len(recordings)} recording(s) found."
+            )
+            return
+
+        delete_gb = sum(f.stat().st_size for f in to_delete) / (1024**3)
+        confirm = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Delete {len(to_delete)} recording(s) ({delete_gb:.1f} GB)?\n\n"
+            + "\n".join(f.name for f in to_delete[:5])
+            + ("\n..." if len(to_delete) > 5 else ""),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        deleted = 0
+        for f in to_delete:
+            try:
+                f.unlink()
+                self._log_message(f"Deleted: {f.name}")
+                deleted += 1
+            except Exception as e:
+                self._log_message(f"Could not delete {f.name}: {e}")
+
+        self._log_message(f"✅ Cleaned {deleted} recording(s), freed {delete_gb:.1f} GB.")
+        self._refresh_storage_display()
+        QMessageBox.information(
+            self, "Done",
+            f"Deleted {deleted} recording(s), freed approximately {delete_gb:.1f} GB."
+        )
