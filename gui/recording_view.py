@@ -3,7 +3,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QObject, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QTextEdit, QFileDialog, QMessageBox
+    QPushButton, QTextEdit, QFileDialog, QMessageBox, QInputDialog
 )
 from torch import layout
 
@@ -528,7 +528,6 @@ class RecordingView(QWidget):
 
         statuses = {r.status for r in results}
 
-        # Log summary
         for r in results:
             self._log_message(
                 f"  {r.status.value}: {len(r.rounds)} rounds"
@@ -539,7 +538,6 @@ class RecordingView(QWidget):
         if ImportStatus.CRITICAL_FAILURE in statuses and all(
             r.status == ImportStatus.CRITICAL_FAILURE for r in results
         ):
-            # Everything failed — no match created
             self._log_message("All imports critically failed — going to Manual Entry.")
             QMessageBox.warning(
                 self, "Import Failed",
@@ -549,17 +547,18 @@ class RecordingView(QWidget):
             self.navigate_to_match_input.emit()
             return
 
-        # At least some rounds parsed — match records were auto-created
-        # Find the best result to route with
-        success_results = [r for r in results if r.status == ImportStatus.SUCCESS]
-        partial_results = [r for r in results if r.status == ImportStatus.PARTIAL_FAILURE]
+        # ── Prompt for opponent name for each created match ───────
+        success_results  = [r for r in results if r.status == ImportStatus.SUCCESS]
+        partial_results  = [r for r in results if r.status == ImportStatus.PARTIAL_FAILURE]
+        created_results  = [r for r in results if r.match_id is not None]
+
+        if created_results:
+            self._prompt_opponent_names(created_results)
 
         if success_results:
             last_match_id = success_results[-1].match_id
             if last_match_id is not None:
-                self._log_message(
-                    f"Routing to Analysis (match {last_match_id})."
-                )
+                self._log_message(f"Routing to Analysis (match {last_match_id}).")
                 self.navigate_to_analysis.emit(last_match_id)
             else:
                 self.navigate_to_match_input.emit()
@@ -576,6 +575,42 @@ class RecordingView(QWidget):
                 f"Missing data shown in Manual Entry."
             )
             self.navigate_to_match_input_partial.emit(partial)
+
+    def _prompt_opponent_names(self, results: list) -> None:
+        """Ask the user to name each imported match before routing."""
+        from database.repositories import Repository
+        repo = Repository()
+
+        for result in results:
+            if result.match_id is None:
+                continue
+
+            map_display = result.map_name or "Unknown"
+            rounds_display = len(result.rounds)
+
+            opponent, ok = QInputDialog.getText(
+                self,
+                "Name This Match",
+                f"Match {result.match_id} imported:\n"
+                f"  Map: {map_display}  |  {rounds_display} rounds\n\n"
+                f"Who did you play against?\n"
+                f"(Leave blank to keep as 'Imported')",
+            )
+
+            if ok and opponent.strip():
+                try:
+                    with repo.db.get_connection() as conn:
+                        conn.execute(
+                            "UPDATE matches SET opponent_name = ? WHERE match_id = ?",
+                            (opponent.strip(), result.match_id)
+                        )
+                        conn.commit()
+                    self._log_message(
+                        f"Match {result.match_id} named: vs {opponent.strip()}"
+                    )
+                except Exception as e:
+                    self._log_message(f"Could not save opponent name: {e}")
+
 
     def _on_import_error(self, message: str) -> None:
         self._session_active = False

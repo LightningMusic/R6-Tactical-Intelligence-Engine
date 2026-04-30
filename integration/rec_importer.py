@@ -57,6 +57,7 @@ MAP_ID_LOOKUP: dict[int, str] = {
     415956890521: "Outback",
     419662876236: "Border",
     422790217276: "Clubhouse",
+    434715462383: "Oregon",
 }
 
 MAX_RETRIES     = 5

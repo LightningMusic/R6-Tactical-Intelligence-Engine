@@ -48,12 +48,6 @@ def _detect_hardware() -> tuple[int, int]:
 # =====================================================
 
 class _OllamaBackend:
-    """
-    Runs Ollama from a portable exe on the USB.
-    No installation needed — just extract ollama-windows-amd64.zip to E:/ollama/
-    Models are stored in data/ollama_models/ on the USB.
-    """
-
     DEFAULT_MODEL   = "llama3.2:3b"
     API_BASE        = "http://localhost:11434"
     CONNECT_TIMEOUT = 5
@@ -64,10 +58,7 @@ class _OllamaBackend:
         self.model    = str(settings.get("ollama_model") or self.DEFAULT_MODEL)
         self._process: Optional[subprocess.Popen[bytes]] = None  # type: ignore[type-arg]
 
-    # ── Server lifecycle ──────────────────────────────────────
-
     def _start_server(self) -> bool:
-        """Start Ollama server from the USB portable exe."""
         if not OLLAMA_EXE.exists():
             print(
                 f"[AI] Ollama exe not found at {OLLAMA_EXE}\n"
@@ -80,16 +71,12 @@ class _OllamaBackend:
         if self.is_running():
             return True
 
-        # Tell Ollama where to store models (USB, not user profile)
         env = os.environ.copy()
         env["OLLAMA_MODELS"] = str(OLLAMA_MODELS)
         env["OLLAMA_HOST"]   = "127.0.0.1:11434"
-
         OLLAMA_MODELS.mkdir(parents=True, exist_ok=True)
 
         print(f"[AI] Starting Ollama server from {OLLAMA_EXE} ...")
-        print(f"[AI] Model storage: {OLLAMA_MODELS}")
-
         try:
             self._process = subprocess.Popen(
                 [str(OLLAMA_EXE), "serve"],
@@ -106,7 +93,6 @@ class _OllamaBackend:
             print(f"[AI] Failed to start Ollama: {e}")
             return False
 
-        # Wait for server to become ready
         for i in range(20):
             time.sleep(1)
             if self.is_running():
@@ -141,8 +127,6 @@ class _OllamaBackend:
                 pass
             self._process = None
 
-    # ── Model management ──────────────────────────────────────
-
     def model_is_available(self) -> bool:
         try:
             import urllib.request
@@ -161,7 +145,6 @@ class _OllamaBackend:
             return False
 
     def pull_model(self) -> bool:
-        """Pull model into USB storage. Shows progress."""
         print(f"[AI] Pulling model: {self.model} → {OLLAMA_MODELS}")
         try:
             import urllib.request
@@ -198,8 +181,6 @@ class _OllamaBackend:
         print(f"[AI] Model {self.model} not yet downloaded.")
         return self.pull_model()
 
-    # ── Generation ────────────────────────────────────────────
-
     def generate(self, prompt: str, max_tokens: int = 900) -> str:
         import urllib.request
         import urllib.error
@@ -210,7 +191,7 @@ class _OllamaBackend:
             "stream": False,
             "options": {
                 "num_predict": max_tokens,
-                "temperature": 0.3,
+                "temperature": 0.2,
                 "top_p":       0.9,
                 "stop":        ["[/INST]", "</s>"],
             },
@@ -295,7 +276,7 @@ class _LlamaCppBackend:
         response: Any = self._llm(
             prompt,
             max_tokens=max_tokens,
-            temperature=0.3,
+            temperature=0.2,
             stop=["</s>", "[INST]", "[/INST]"],
             echo=False,
             stream=False,
@@ -312,12 +293,6 @@ class _LlamaCppBackend:
 # =====================================================
 
 class IntelEngine:
-    """
-    AI analysis engine.
-    Tries Ollama (portable, GPU-accelerated) first,
-    falls back to llama-cpp-python if Ollama isn't available.
-    """
-
     MAX_RETRIES = 2
     RETRY_DELAY = 1.0
 
@@ -331,7 +306,6 @@ class IntelEngine:
         if self._backend is not None:
             return self._backend
 
-        # Try to start/connect Ollama
         if self._ollama.ensure_running():
             if self._ollama.ensure_model():
                 self._backend = "ollama"
@@ -339,7 +313,6 @@ class IntelEngine:
                 return self._backend
             print("[AI] Ollama running but model pull failed.")
 
-        # Fallback to llama-cpp
         print("[AI] Falling back to llama-cpp-python...")
         try:
             self._llama_cpp.load()
@@ -354,7 +327,7 @@ class IntelEngine:
     def generate(
         self,
         prompt: str,
-        max_tokens: int = 900,
+        max_tokens: int = 1100,
         progress_callback: Optional[Callable[..., Any]] = None,
     ) -> str:
         backend = self._select_backend()
@@ -431,7 +404,7 @@ class IntelEngine:
         if progress_callback:
             progress_callback(0, 1, "Generating match summary...")
 
-        text = self.generate(prompt, max_tokens=900, progress_callback=progress_callback)
+        text = self.generate(prompt, max_tokens=1100, progress_callback=progress_callback)
         self._store_metric(repo, match_id, "ai_match_summary", text)
         return {"ai_match_summary": text}
 
@@ -480,6 +453,18 @@ class IntelEngine:
     def _build_match_prompt(self, match, metrics, summary, tps, transcript) -> str:
         wins   = sum(1 for r in match.rounds if r.outcome == "win")
         losses = sum(1 for r in match.rounds if r.outcome == "loss")
+        total  = len(match.rounds)
+
+        # ── Determine side-switch point ───────────────────────────
+        # In ranked: sides swap after round 6 (first to 4 wins, max 7 rounds)
+        # We detect it from the data itself: find first round where side changes
+        side_switch = None
+        if match.rounds:
+            prev_side = match.rounds[0].side
+            for r in match.rounds[1:]:
+                if r.side != prev_side:
+                    side_switch = r.round_number
+                    break
 
         # ── Round table ───────────────────────────────────────────
         round_lines = []
@@ -487,18 +472,29 @@ class IntelEngine:
             k = sum(p.kills  for p in r.player_stats)
             d = sum(p.deaths for p in r.player_stats)
             a = sum(p.assists for p in r.player_stats)
-            kd_str = f"{k}K/{d}D/{a}A"
+            # Only show K/D/A if stats were actually recorded
+            if r.player_stats:
+                kda = f"{k}K/{d}D/{a}A"
+            else:
+                kda = "no stats recorded"
+            side_label = "ATK" if r.side == "attack" else "DEF"
+            outcome_label = "WIN ✓" if r.outcome == "win" else "LOSS ✗"
+            switch_note = " ← SIDE SWITCH" if side_switch and r.round_number == side_switch else ""
             round_lines.append(
-                f"  R{r.round_number:02d}  "
-                f"{'ATK' if r.side == 'attack' else 'DEF'}  "
-                f"{'WIN ✓' if r.outcome == 'win' else 'LOSS ✗'}  "
-                f"{kd_str:<10}  {r.site or 'Unknown site'}"
+                f"  R{r.round_number:02d}  {side_label}  "
+                f"{outcome_label}  {kda:<16}  {r.site or 'Unknown site'}{switch_note}"
             )
 
         # ── Player table ──────────────────────────────────────────
+        # Only include players that have actual stats recorded
+        players_with_stats = {
+            pid: data for pid, data in summary.items()
+            if data.get("rounds_played", 0) > 0
+        }
+
         player_lines = []
         sorted_players = sorted(
-            summary.items(),
+            players_with_stats.items(),
             key=lambda x: float(tps.get(x[0], 0.0)),
             reverse=True,
         )
@@ -511,16 +507,25 @@ class IntelEngine:
             d_    = int(data.get("deaths", 0))
             a     = int(data.get("assists", 0))
             rp    = int(data.get("rounds_played", 1))
+            name  = str(data["player"].name)
             player_lines.append(
-                f"  {str(data['player'].name):<16} "
+                f"  {name:<16} "
                 f"K/D/A: {k}/{d_}/{a}  "
-                f"(KD {kd:.2f}  EW {ew:.0%}  SR {sr:.0%}  "
+                f"(KD {kd:.2f}  EWR {ew:.0%}  Survival {sr:.0%}  "
                 f"TPS {score:.2f})  "
                 f"{rp} rounds"
             )
 
+        no_stats_note = ""
+        if not players_with_stats:
+            no_stats_note = (
+                "\n  NOTE: No player stats were recorded for this match.\n"
+                "  Rounds were imported from replay but manual stat entry was not completed.\n"
+                "  Analysis will be based on round outcomes only.\n"
+            )
+
         # ── Comms section ─────────────────────────────────────────
-        comms_section = ""
+        comms_section = "  No comms data recorded this session.\n"
         if transcript and int(transcript.get("word_count", 0)) > 0:
             top_locs    = list(transcript.get("top_locations", {}).keys())[:5]
             top_actions = list(transcript.get("top_actions",   {}).keys())[:5]
@@ -534,75 +539,83 @@ class IntelEngine:
                 top = list(sd.get("top_words", []))[:3]
                 speaker_lines.append(
                     f"    {spk}: {wc} words — "
-                    f"top callouts: {', '.join(top) or 'none'}"
+                    f"top words: {', '.join(top) or 'none'}"
                 )
 
             comms_section = (
-                f"\nCOMMS SUMMARY\n"
                 f"  Total words spoken : {words}\n"
-                f"  Top locations      : {', '.join(top_locs) or 'none'}\n"
-                f"  Top actions        : {', '.join(top_actions) or 'none'}\n"
-                f"  Silence gaps (>8s) : {gaps}\n"
+                f"  Top location callouts : {', '.join(top_locs) or 'none'}\n"
+                f"  Top action callouts   : {', '.join(top_actions) or 'none'}\n"
+                f"  Communication gaps (>8s silence) : {gaps}\n"
             )
             if speaker_lines:
-                comms_section += "  Speakers:\n" + "\n".join(speaker_lines) + "\n"
+                comms_section += "  Speakers (auto-detected, not named):\n"
+                comms_section += "\n".join(speaker_lines) + "\n"
 
-        return (
-            f"You are an analyst for a Rainbow Six Siege esports team. "
-            f"Write a clear post-match debrief based on the data below.\n\n"
+        # ── Build the full prompt ─────────────────────────────────
+        prompt = f"""You are a Rainbow Six Siege post-match analyst. Your job is to write a clear, honest debrief based ONLY on the data provided below.
 
-            f"MATCH OVERVIEW\n"
-            f"  Opponent : {match.opponent_name}\n"
-            f"  Map      : {match.map}\n"
-            f"  Score    : {wins}–{losses}  "
-            f"({'WIN' if match.result == 'win' else 'LOSS' if match.result == 'loss' else 'INCOMPLETE'})\n\n"
+STRICT RULES — violating these makes the analysis worthless:
+- DO NOT invent operator names, player names, or strategies not present in the data.
+- DO NOT reference gadgets, abilities, or tactics unless they appear in the stats.
+- DO NOT say a player "used smokes" or "played Thermite" unless that operator/gadget appears in the stats table below.
+- DO NOT reference a round detail (e.g. "you could have used drones in R03") that contradicts the side shown.
+- SIEGE RULES you must respect:
+    * DEFENSE side: the team holds a site, uses reinforcements, barbed wire, gadgets. They do NOT have attack drones.
+    * ATTACK side: the team pushes the site, uses drones to gather info, breaches. They do NOT place reinforcements.
+    * Sides swap mid-match (see SIDE SWITCH marker in round table below).
+    * Maximum 5 kills possible in a single round (5v5 format).
+    * A round is won by eliminating all enemies, defusing/planting bomb, or time expiry on defense.
+- If player stats show 0 kills and 0 deaths across the board, state "manual stats were not entered for this match" and skip player-specific analysis.
+- If you are uncertain about what happened in a round, say so — do not guess.
+- Base observations only on patterns visible in multiple rounds, not single-round anomalies.
+- The opponent name is "{match.opponent_name}" — use it.
+- The map is "{match.map}".
 
-            f"TEAM STATS\n"
-            f"  Win Rate    : {metrics['win_rate']:.0%}  "
-            f"(Attack {metrics['attack_win_rate']:.0%} / "
-            f"Defense {metrics['defense_win_rate']:.0%})\n"
-            f"  Engagement  : {metrics['engagement_win_rate']:.0%} win rate in gunfights\n"
-            f"  Man Adv Conv: {metrics['man_advantage']:.0%}  "
-            f"(when up in numbers, converting to round win)\n"
-            f"  Clutch Rate : {metrics['clutch_rate']:.0%}\n\n"
+════════════════════════════════════════════════════════════════
+MATCH DATA  (this is everything the system knows — nothing more)
+════════════════════════════════════════════════════════════════
 
-            f"ROUND BY ROUND\n"
-            + "\n".join(round_lines) + "\n\n"
+MATCH: vs {match.opponent_name} on {match.map}
+RESULT: {wins}–{losses} {'WIN' if match.result == 'win' else 'LOSS' if match.result == 'loss' else '(result not set)'}
+TOTAL ROUNDS: {total}
+{no_stats_note}
+TEAM METRICS (calculated from recorded stats):
+  Overall win rate          : {metrics['win_rate']:.0%}
+  Attack rounds win rate    : {metrics['attack_win_rate']:.0%}
+  Defense rounds win rate   : {metrics['defense_win_rate']:.0%}
+  Engagement win rate       : {metrics['engagement_win_rate']:.0%}  (gunfight win%)
+  Man-advantage conversion  : {metrics['man_advantage']:.0%}  (when up in players, % converted to round win)
+  Clutch rate               : {metrics['clutch_rate']:.0%}
 
-            f"PLAYER PERFORMANCE  (sorted by TPS score, higher = better)\n"
-            + "\n".join(player_lines) + "\n"
-            + comms_section + "\n"
+ROUND BY ROUND:
+{chr(10).join(round_lines)}
 
-            f"INSTRUCTIONS\n"
-            f"Write your debrief using exactly these sections. "
-            f"Reference specific round numbers and player names. "
-            f"Be direct — no filler phrases.\n\n"
+PLAYER STATS (only players with recorded data shown):
+{chr(10).join(player_lines) if player_lines else "  No player stats recorded — manual entry incomplete."}
 
-            f"## MATCH SUMMARY\n"
-            f"Two sentences: result and overall performance.\n\n"
+  Columns: K=Kills D=Deaths A=Assists  EWR=Engagement Win Rate  Survival=rounds alive at end  TPS=composite score
 
-            f"## WHAT WORKED\n"
-            f"1. [Specific strength with evidence from the data]\n"
-            f"2. [Specific strength with evidence from the data]\n\n"
+COMMS DATA:
+{comms_section}
+════════════════════════════════════════════════════════════════
+DEBRIEF FORMAT — follow exactly, use only the data above
+════════════════════════════════════════════════════════════════
 
-            f"## WHAT NEEDS FIXING\n"
-            f"1. [Specific problem with evidence from the data]\n"
-            f"2. [Specific problem with evidence from the data]\n\n"
+## MATCH SUMMARY
+Two sentences maximum. State the scoreline, result, and one headline observation supported by a metric above. Do not reference operators or strategies not in the data.
 
-            f"## ADJUSTMENTS FOR NEXT MATCH\n"
-            f"1. [Concrete actionable change]\n"
-            f"2. [Concrete actionable change]\n"
-            f"3. [Concrete actionable change]\n\n"
+## ROUND PATTERNS
+List what the data actually shows across multiple rounds. Reference specific round numbers and sides. For each observation, cite the supporting data point (e.g. "R02, R04, R05 were all attack wins — attack win rate {metrics['attack_win_rate']:.0%}"). If a pattern is only visible in one round, say so and do not over-generalise.
 
-            f"## PLAYER SPOTLIGHT\n"
-            f"Best performer: [name and why, cite one stat]\n"
-            f"Focus player  : [name and one specific thing to work on]\n\n"
+## WHAT TO FOCUS ON NEXT
+Based only on the weaknesses visible in the numbers, list 2–3 specific, actionable adjustments. Do not invent context. If engagement win rate is low, say "improve gunfight consistency" not "use more smokes". If no stats were recorded, focus on observable round patterns only.
 
-            f"## COMMUNICATION\n"
-            f"[If comms data present: note who spoke most, "
-            f"any coordination gaps, key callout patterns. "
-            f"If no comms data, write: No comms data recorded this session.]\n"
-        )
+## COMMUNICATION
+Summarise comms data if present. If speaker names are "Speaker_1" etc., note these are auto-detected and may not match actual players. If no comms data, write: No comms data recorded.
+
+"""
+        return prompt
 
     def _build_player_prompt(
         self,
@@ -610,19 +623,35 @@ class IntelEngine:
         pdata: dict[str, Any],
         tps_score: float,
     ) -> str:
+        k  = int(pdata.get("kills", 0))
+        d  = int(pdata.get("deaths", 0))
+        a  = int(pdata.get("assists", 0))
+        rp = int(pdata.get("rounds_played", 1))
+
+        # If no meaningful stats, say so
+        if k == 0 and d == 0 and a == 0:
+            return (
+                f"No stats recorded for {stat.player.name} — "
+                "manual round entry was not completed for this match."
+            )
+
         return (
-            "[INST] You are a Rainbow Six Siege performance coach. Direct and specific.\n\n"
-            f"PLAYER: {stat.player.name} | {stat.operator.name} ({stat.operator.side})\n"
-            f"K/D/A:{pdata.get('kills',0)}/{pdata.get('deaths',0)}/{pdata.get('assists',0)} | "
-            f"KD:{float(pdata.get('kd_ratio',0)):.2f} | "
-            f"EW:{float(pdata.get('engagement_win_rate',0)):.0%} | "
-            f"SR:{float(pdata.get('survival_rate',0)):.0%} | "
-            f"UE:{float(pdata.get('utility_efficiency',0)):.0%} | "
-            f"TPS:{tps_score:.3f}\n\n"
-            "Respond in EXACTLY this format:\n"
-            "STRENGTH: [one thing done well — cite one stat]\n"
-            "WEAKNESS: [one area to improve — cite one stat]\n"
-            "DRILL: [one concrete 10-minute practice drill]\n[/INST]"
+            "You are a Rainbow Six Siege performance coach. Be direct and specific.\n"
+            "RULES: Only reference stats shown below. Do not invent operators or strategies.\n\n"
+            f"PLAYER: {stat.player.name}\n"
+            f"ROUNDS PLAYED: {rp}\n"
+            f"K/D/A: {k}/{d}/{a}  KD: {float(pdata.get('kd_ratio', 0)):.2f}\n"
+            f"Engagement Win Rate : {float(pdata.get('engagement_win_rate', 0)):.0%}  "
+            f"(gunfights won out of taken)\n"
+            f"Survival Rate       : {float(pdata.get('survival_rate', 0)):.0%}  "
+            f"(rounds survived)\n"
+            f"Utility Efficiency  : {float(pdata.get('utility_efficiency', 0)):.0%}  "
+            f"(ability + gadget usage rate)\n"
+            f"TPS Score           : {tps_score:.3f}  (composite performance)\n\n"
+            "Respond in EXACTLY this format, citing only the stats above:\n"
+            "STRENGTH: [one specific strength — cite the stat that shows it]\n"
+            "FOCUS: [one area to improve — cite the stat that shows it]\n"
+            "DRILL: [one concrete practice activity that addresses the focus area]\n"
         )
 
     def _get_transcript_summary(self, match_id: int) -> dict[str, Any]:
@@ -667,5 +696,4 @@ class IntelEngine:
             print(f"[AI] Store metric failed: {e}")
 
     def shutdown(self) -> None:
-        """Call on app exit to stop the Ollama server process."""
         self._ollama.stop_server()
