@@ -14,7 +14,9 @@ class Round:
     - Team resource state
     - Player stat objects
 
-    Enforces FOUNDATION V2.1 integrity rules.
+    raw_player_stats: populated by RecImporter with raw data from the replay.
+    Consumed by SessionManager._auto_create_matches() to build PlayerRoundStats.
+    Not persisted to the database directly — used only during the import pipeline.
     """
 
     round_id: Optional[int]
@@ -27,6 +29,10 @@ class Round:
     resources: Optional[RoundResources]
     player_stats: List[PlayerRoundStats] = field(default_factory=list)
 
+    # ── Import pipeline only — not stored in DB directly ──────
+    # Each dict has keys: username, kills, deaths, assists, operator (name string)
+    raw_player_stats: List[dict] = field(default_factory=list)
+
     # ----------------------------------
     # Validation Layer
     # ----------------------------------
@@ -38,7 +44,6 @@ class Round:
         if self.outcome not in ("win", "loss"):
             raise ValueError("Outcome must be 'win' or 'loss'.")
 
-        # ✅ SAFE GUARD
         if self.resources is None:
             raise ValueError("Round resources must be set before validation.")
 
@@ -47,7 +52,6 @@ class Round:
 
         self.resources.validate()
 
-        # Validate player stats
         if len(self.player_stats) == 0:
             raise ValueError("Round must contain player stats.")
 
@@ -61,17 +65,9 @@ class Round:
     # ----------------------------------
 
     def _validate_kill_consistency(self) -> None:
-        """
-        Optional logical sanity:
-        Total team kills should not exceed 5.
-        (Assumes standard 5v5 round format.)
-        """
-
         total_kills = sum(p.kills for p in self.player_stats)
-
         if total_kills > 5:
             raise ValueError("Total team kills cannot exceed 5 in a round.")
-
 
     # ----------------------------------
     # Derived Helpers
@@ -87,11 +83,6 @@ class Round:
         total = sum(p.engagements_taken for p in self.player_stats)
         won   = sum(p.engagements_won   for p in self.player_stats)
         return won / total if total > 0 else 0.0
-
-        if total_taken == 0:
-            return 0.0
-
-        return total_won / total_taken
 
     def plant_attempted(self) -> bool:
         return any(p.plant_attempted for p in self.player_stats)

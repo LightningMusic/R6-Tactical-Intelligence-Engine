@@ -56,6 +56,58 @@ class Repository:
                 ability_max_count=row["ability_max_count"],
             )
 
+# ── Add these two methods to the Repository class in database/repositories.py ──
+
+    def get_operator_by_name(self, name: str) -> Optional["Operator"]:
+        """Exact case-insensitive operator name lookup."""
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM operators WHERE LOWER(name) = LOWER(?)",
+                (name,)
+            ).fetchone()
+            if not row:
+                return None
+            return Operator(
+                operator_id=row["operator_id"],
+                name=row["name"],
+                side=row["side"],
+                ability_name=row["ability_name"],
+                ability_max_count=row["ability_max_count"],
+            )
+
+    def get_operator_by_name_fuzzy(self, name: str) -> Optional["Operator"]:
+        """
+        Fuzzy operator lookup for r6-dissect name variations.
+        Tries: contains match, then strips spaces/special chars.
+        """
+        search = name.lower().strip()
+        with self.db.get_connection() as conn:
+            # Try: DB name contains search term OR search contains DB name
+            rows = conn.execute("SELECT * FROM operators").fetchall()
+            for row in rows:
+                db_name = row["name"].lower()
+                # Direct substring match in either direction
+                if search in db_name or db_name in search:
+                    return Operator(
+                        operator_id=row["operator_id"],
+                        name=row["name"],
+                        side=row["side"],
+                        ability_name=row["ability_name"],
+                        ability_max_count=row["ability_max_count"],
+                    )
+            # Last resort: strip all non-alpha and compare
+            search_alpha = "".join(c for c in search if c.isalpha())
+            for row in rows:
+                db_alpha = "".join(c for c in row["name"].lower() if c.isalpha())
+                if search_alpha == db_alpha:
+                    return Operator(
+                        operator_id=row["operator_id"],
+                        name=row["name"],
+                        side=row["side"],
+                        ability_name=row["ability_name"],
+                        ability_max_count=row["ability_max_count"],
+                    )
+        return None
     # =====================================================
     # Gadgets
     # =====================================================

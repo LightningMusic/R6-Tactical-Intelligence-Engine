@@ -9,7 +9,7 @@ from models.round_resources import RoundResources
 from integration.discord_capture import DiscordCapture
 from app.config import settings
 from database.repositories import Repository
-from models.match import Match
+from models.match import Match, Round
 from datetime import datetime
 from analysis.transcript_parser import TranscriptParser
 from analysis.timeline_aligner import TimelineAligner
@@ -155,29 +155,25 @@ class SessionManager:
         log: Callable[[str], None],
     ) -> None:
         """
-        For every result that has at least one parsed round,
-        create a match record in the DB and attach the match_id
-        to the result. Works for both SUCCESS and PARTIAL_FAILURE.
+        For every result that has at least one parsed round, create a match record
+        in the DB and save all round data including player stats from the replay.
+        Works for both SUCCESS and PARTIAL_FAILURE.
         """
-
-
         repo = Repository()
 
         for result in results:
             if not result.rounds:
-                log(f"  Skipping match creation — no rounds parsed.")
+                log("  Skipping match creation — no rounds parsed.")
                 continue
             if result.match_id is not None:
                 log(f"  Match {result.match_id} already exists.")
                 continue
 
-            # Resolve map name
             map_name = result.map_name or "Unknown"
             if map_name and map_name.startswith("Map("):
-                map_name = "Unknown"   # unresolved numeric ID
+                map_name = "Unknown"
 
             try:
-                # Resolve map_id if possible
                 map_id = repo.get_map_id_by_name(map_name)
 
                 match = Match(
@@ -194,13 +190,11 @@ class SessionManager:
                 result.match_id = match_id
                 result.map_id   = map_id
 
-                # Inside _auto_create_matches, replace the resources block:
+                total_stats_saved = 0
+
                 for round_obj in result.rounds:
                     round_obj.match_id = match_id
 
-                    # Both start values must always be 10 — schema CHECK constraint
-                    # The "used/lost" values are 0 since we don't have that data from
-                    # the replay importer (only manual entry has those)
                     resources = RoundResources(
                         resource_id=None,
                         round_id=0,
@@ -213,13 +207,144 @@ class SessionManager:
                     round_id = repo.insert_round(round_obj, match_id)
                     repo.insert_round_resources(resources, round_id)
 
+                    # ── Save player stats from replay data ────────────
+                    stats_saved = self._save_raw_player_stats(
+                        repo, round_id, round_obj, log
+                    )
+                    total_stats_saved += stats_saved
+
                 log(
                     f"  ✓ Created match {match_id}: {map_name} "
-                    f"({len(result.rounds)} rounds)"
+                    f"({len(result.rounds)} rounds, {total_stats_saved} player stat rows)"
                 )
 
             except Exception as e:
                 log(f"  ✗ Failed to create match record: {e}")
+
+    def _save_raw_player_stats(
+        self,
+        repo: "Repository",
+        round_id: int,
+        round_obj: "Round",
+        log: Callable[[str], None],
+    ) -> int:
+        """
+        Converts raw_player_stats dicts from the replay into PlayerRoundStats
+        records in the database. Returns the number of rows saved.
+
+        For players on our team: match against team_players by Ubisoft username
+        (case-insensitive). If no match found, still save using username as name.
+        For opponent players: always saved as non-team-member guests.
+        Stats available from replay: kills, deaths, assists, operator name.
+        Everything else (engagements, gadget, ability) defaults to 0/None.
+        """
+        if not round_obj.raw_player_stats:
+            return 0
+
+        saved = 0
+
+        # Pre-load team players for name matching
+        team_players = repo.get_team_players()
+        team_name_map = {p.name.lower(): p for p in team_players}
+
+        for raw in round_obj.raw_player_stats:
+            username   = raw.get("username", "")
+            op_name    = raw.get("operator", "")
+            kills      = int(raw.get("kills",   0))
+            deaths     = int(raw.get("deaths",  0))
+            assists    = int(raw.get("assists", 0))
+            is_our_team = bool(raw.get("is_our_team", False))
+
+            # ── Resolve player ────────────────────────────────────
+            player = None
+
+            if is_our_team and username:
+                # Try exact match first, then case-insensitive
+                player = team_name_map.get(username.lower())
+
+            if player is None:
+                # Look up by username in players table (may already exist from prior imports)
+                with repo.db.get_connection() as conn:
+                    row = conn.execute(
+                        "SELECT * FROM players WHERE LOWER(name) = LOWER(?)",
+                        (username,)
+                    ).fetchone()
+                if row:
+                    from models.player import Player
+                    player = Player(
+                        player_id=row["player_id"],
+                        name=row["name"],
+                        is_team_member=bool(row["is_team_member"]),
+                    )
+
+            if player is None and username:
+                # Create as a new non-team player
+                from models.player import Player
+                new_player = Player(
+                    player_id=None,
+                    name=username,
+                    is_team_member=False,
+                )
+                try:
+                    player_id = repo.insert_player(new_player)
+                    new_player = Player(
+                        player_id=player_id,
+                        name=username,
+                        is_team_member=False,
+                    )
+                    player = new_player
+                except Exception as e:
+                    log(f"    Could not create player '{username}': {e}")
+                    continue
+
+            if player is None or player.player_id is None:
+                log(f"    Skipping stat row — no username in replay data")
+                continue
+
+            # ── Resolve operator ──────────────────────────────────
+            operator = None
+            if op_name:
+                operator = repo.get_operator_by_name(op_name)
+                if operator is None:
+                    # Try case-insensitive partial match (r6-dissect may use different casing)
+                    operator = repo.get_operator_by_name_fuzzy(op_name)
+
+            if operator is None:
+                # Use a fallback operator_id=0 placeholder if operator not found
+                # This avoids FK violations while still saving K/D/A
+                # The user can correct it via Manual Entry
+                log(f"    Operator '{op_name}' not found in DB — skipping player '{username}'")
+                continue
+
+            # ── Build and insert PlayerRoundStats ─────────────────
+            from models.player_round_stats import PlayerRoundStats
+            stat = PlayerRoundStats(
+                stat_id=None,
+                round_id=round_id,
+                player_id=player.player_id,
+                player=player,
+                operator=operator,
+                kills=kills,
+                deaths=deaths,
+                assists=assists,
+                engagements_taken=0,   # not available from replay
+                engagements_won=0,     # not available from replay
+                ability_start=operator.ability_max_count,
+                ability_used=0,        # not available from replay
+                secondary_gadget=None,
+                secondary_start=0,
+                secondary_used=0,
+                plant_attempted=False,
+                plant_successful=False,
+            )
+
+            try:
+                repo.insert_player_round_stats(stat, round_id, player.player_id)
+                saved += 1
+            except Exception as e:
+                log(f"    Could not save stats for '{username}': {e}")
+
+        return saved
 
     # =====================================================
     # TRANSCRIPTION
