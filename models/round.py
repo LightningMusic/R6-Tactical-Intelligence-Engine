@@ -1,22 +1,21 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 from models.round_resources import RoundResources
 from models.player_round_stats import PlayerRoundStats
+
+if TYPE_CHECKING:
+    from models.round_events import RoundEvents
+
 
 @dataclass
 class Round:
     """
     Represents a single round within a match.
 
-    Aggregates:
-    - Round metadata
-    - Team resource state
-    - Player stat objects
-
-    raw_player_stats: populated by RecImporter with raw data from the replay.
-    Consumed by SessionManager._auto_create_matches() to build PlayerRoundStats.
-    Not persisted to the database directly — used only during the import pipeline.
+    raw_player_stats: populated by RecImporter from replay player data.
+    round_events: populated by RecImporter from matchFeedback kill feed.
+    Both are import-pipeline only — not stored in DB directly.
     """
 
     round_id: Optional[int]
@@ -29,9 +28,12 @@ class Round:
     resources: Optional[RoundResources]
     player_stats: List[PlayerRoundStats] = field(default_factory=list)
 
-    # ── Import pipeline only — not stored in DB directly ──────
-    # Each dict has keys: username, kills, deaths, assists, operator (name string)
+    # ── Import pipeline only ──────────────────────────────────────────────
+    # Raw dicts: {username, kills, deaths, assists, operator, is_our_team}
     raw_player_stats: List[dict] = field(default_factory=list)
+
+    # Structured kill feed events parsed from matchFeedback
+    round_events: Optional["RoundEvents"] = field(default=None)
 
     # ----------------------------------
     # Validation Layer
@@ -40,29 +42,18 @@ class Round:
     def validate(self) -> None:
         if self.side not in ("attack", "defense"):
             raise ValueError("Round side must be 'attack' or 'defense'.")
-
         if self.outcome not in ("win", "loss"):
             raise ValueError("Outcome must be 'win' or 'loss'.")
-
         if self.resources is None:
             raise ValueError("Round resources must be set before validation.")
-
         if self.resources.side != self.side:
             raise ValueError("Resource side must match round side.")
-
         self.resources.validate()
-
         if len(self.player_stats) == 0:
             raise ValueError("Round must contain player stats.")
-
         for stats in self.player_stats:
             stats.validate()
-
         self._validate_kill_consistency()
-
-    # ----------------------------------
-    # Internal Consistency Rules
-    # ----------------------------------
 
     def _validate_kill_consistency(self) -> None:
         total_kills = sum(p.kills for p in self.player_stats)

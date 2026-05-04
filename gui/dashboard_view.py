@@ -257,6 +257,8 @@ class DashboardView(QWidget):
             # Load full match objects (with rounds + player stats)
             full_matches = []
             for m in matches:
+                if m.match_id is None:
+                    continue
                 try:
                     fm = repo.get_match_full(m.match_id)
                     if fm is not None:
@@ -345,24 +347,32 @@ class DashboardView(QWidget):
         self._card_ewr.set_value(f"{ewr:.0%}")
         self._card_streak.set_value(streak_text, streak_color)
 
+
     def _populate_recent_matches(self, matches: list) -> None:
         t = self._matches_table
         t.setRowCount(0)
 
         for m in matches:
+            if m.match_id is None:          # ← FIX: guard against None
+                continue
+
             rounds = m.rounds
             atk_rounds = [r for r in rounds if r.side == "attack"]
             def_rounds = [r for r in rounds if r.side == "defense"]
             atk_wins = sum(1 for r in atk_rounds if r.outcome == "win")
             def_wins = sum(1 for r in def_rounds if r.outcome == "win")
-            total_wins  = sum(1 for r in rounds if r.outcome == "win")
+            total_wins   = sum(1 for r in rounds if r.outcome == "win")
             total_losses = sum(1 for r in rounds if r.outcome == "loss")
 
             atk_pct = f"{atk_wins}/{len(atk_rounds)}" if atk_rounds else "—"
             def_pct = f"{def_wins}/{len(def_rounds)}" if def_rounds else "—"
 
-            result_text = (m.result or "—").upper()
-            result_color = "#55e07a" if m.result == "win" else "#e05555" if m.result == "loss" else "#888"
+            result_text  = (m.result or "—").upper()
+            result_color = (
+                "#55e07a" if m.result == "win"
+                else "#e05555" if m.result == "loss"
+                else "#888"
+            )
 
             row = t.rowCount()
             t.insertRow(row)

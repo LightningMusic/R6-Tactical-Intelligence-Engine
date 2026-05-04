@@ -155,9 +155,7 @@ class SessionManager:
         log: Callable[[str], None],
     ) -> None:
         """
-        For every result that has at least one parsed round, create a match record
-        in the DB and save all round data including player stats from the replay.
-        Works for both SUCCESS and PARTIAL_FAILURE.
+        Creates match records, saves rounds, player stats, and round events.
         """
         repo = Repository()
 
@@ -190,7 +188,8 @@ class SessionManager:
                 result.match_id = match_id
                 result.map_id   = map_id
 
-                total_stats_saved = 0
+                total_stats_saved  = 0
+                total_events_saved = 0
 
                 for round_obj in result.rounds:
                     round_obj.match_id = match_id
@@ -207,15 +206,41 @@ class SessionManager:
                     round_id = repo.insert_round(round_obj, match_id)
                     repo.insert_round_resources(resources, round_id)
 
-                    # ── Save player stats from replay data ────────────
+                    # ── Save player stats ─────────────────────────────────
                     stats_saved = self._save_raw_player_stats(
                         repo, round_id, round_obj, log
                     )
                     total_stats_saved += stats_saved
 
+                    # ── Save round kill feed events as derived_metric ─────
+                    if round_obj.round_events is not None:
+                        try:
+                            events_json = json.dumps(round_obj.round_events.to_dict())
+                            metric_name = f"round_{round_obj.round_number}_events"
+                            with repo.db.get_connection() as conn:
+                                conn.execute(
+                                    """INSERT OR REPLACE INTO derived_metrics
+                                       (match_id, metric_name, metric_value, is_ai_generated)
+                                       VALUES (?, ?, 0, 0)""",
+                                    (match_id, metric_name),
+                                )
+                                # Store the JSON text in metric_text column
+                                conn.execute(
+                                    """UPDATE derived_metrics
+                                       SET metric_text = ?
+                                       WHERE match_id = ? AND metric_name = ?""",
+                                    (events_json, match_id, metric_name),
+                                )
+                                conn.commit()
+                            total_events_saved += 1
+                        except Exception as ev_err:
+                            log(f"    Could not save events for R{round_obj.round_number}: {ev_err}")
+
                 log(
                     f"  ✓ Created match {match_id}: {map_name} "
-                    f"({len(result.rounds)} rounds, {total_stats_saved} player stat rows)"
+                    f"({len(result.rounds)} rounds, "
+                    f"{total_stats_saved} player stat rows, "
+                    f"{total_events_saved} kill feed sets)"
                 )
 
             except Exception as e:

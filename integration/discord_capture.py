@@ -216,13 +216,11 @@ class DiscordCapture:
                                             log_callback(
                                                 f"[Discord] Could not save {display}: {save_err}"
                                             )
-
-                        vc.start_recording(sink, _after_recording, channel)
-
+                        from typing import Any as _Any
+                        vc_any: _Any = vc
+                        vc_any.start_recording(sink, _after_recording, channel)
                         if log_callback:
-                            log_callback(
-                                f"[Discord] Recording started in '{channel.name}'."
-                            )
+                            log_callback(f"[Discord] Recording started in '{channel.name}'.")
 
                     except Exception as conn_err:
                         if log_callback:
@@ -270,8 +268,10 @@ class DiscordCapture:
 
                 # stop_recording triggers the _after_recording callback
                 async def _stop() -> None:
-                    vc.stop_recording()
-                    await asyncio.sleep(1.5)   # let after-callback write files
+                    from typing import Any as _Any
+                    vc_any: _Any = vc
+                    vc_any.stop_recording()
+                    await asyncio.sleep(1.5)
                     await vc.disconnect()
 
                 if self._loop and self._loop.is_running():

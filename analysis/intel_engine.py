@@ -448,6 +448,123 @@ class IntelEngine:
             results[name] = self.generate(prompt, max_tokens=400)
         return results
 
+    def _get_round_events(self, match_id: int) -> dict[int, dict]:
+        """
+        Loads stored round kill feed events from derived_metrics.
+        Returns {round_number: events_dict}.
+        """
+        result: dict[int, dict] = {}
+        try:
+            from database.repositories import Repository
+            import json
+            repo = Repository()
+            with repo.db.get_connection() as conn:
+                rows = conn.execute(
+                    """SELECT metric_name, metric_text
+                       FROM derived_metrics
+                       WHERE match_id = ? AND metric_name LIKE 'round_%_events'
+                         AND metric_text IS NOT NULL""",
+                    (match_id,)
+                ).fetchall()
+            for row in rows:
+                # metric_name is "round_N_events"
+                parts = row["metric_name"].split("_")
+                if len(parts) >= 3:
+                    try:
+                        rnum = int(parts[1])
+                        result[rnum] = json.loads(row["metric_text"])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return result
+
+    def _format_kill_feed_for_prompt(
+        self,
+        events_by_round: dict[int, dict],
+        our_player_names: set[str],
+    ) -> str:
+        """
+        Formats stored kill feed dicts into a concise text block.
+        Only includes info we can verify — no invention.
+        Only highlights OUR team's players by name; opponents shown as 'Enemy'.
+        """
+        if not events_by_round:
+            return "  No kill feed data available from replay.\n"
+
+        def label(username: str) -> str:
+            return username if username in our_player_names else "Enemy"
+
+        lines: list[str] = []
+
+        for rnum in sorted(events_by_round.keys()):
+            ev = events_by_round[rnum]
+            lines.append(f"  R{rnum:02d}:")
+
+            # First blood
+            fb_killer = ev.get("first_blood_killer", "")
+            fb_victim = ev.get("first_blood_victim", "")
+            fb_time   = ev.get("first_blood_time")
+            fb_won    = ev.get("opening_duel_won")
+            if fb_killer:
+                won_str = " (our advantage)" if fb_won else " (their advantage)"
+                lines.append(
+                    f"    Opening kill: {label(fb_killer)} → {label(fb_victim)}"
+                    + (f" @ {fb_time:.0f}s" if fb_time is not None else "")
+                    + won_str
+                )
+
+            # Kill sequence
+            kills = ev.get("kills", [])
+            if kills:
+                kf_parts = []
+                for k in kills:
+                    kl = label(k.get("killer", ""))
+                    vi = label(k.get("victim", ""))
+                    tags = []
+                    if k.get("headshot"):
+                        tags.append("HS")
+                    if k.get("trade"):
+                        tags.append("trade")
+                    tag_str = f"[{','.join(tags)}]" if tags else ""
+                    t = k.get("time", "")
+                    kf_parts.append(f"{kl}→{vi}@{t}{tag_str}")
+                lines.append(f"    Kills: {', '.join(kf_parts)}")
+
+            # Plant/defuse
+            if ev.get("plant_completed"):
+                who = ev.get("planter") or ""
+                lines.append(f"    Bomb planted" + (f" by {label(who)}" if who else ""))
+            elif ev.get("plant_attempted"):
+                lines.append(f"    Plant started but not completed")
+            if ev.get("defuse_completed"):
+                who = ev.get("defuser") or ""
+                lines.append(f"    Bomb defused" + (f" by {label(who)}" if who else ""))
+
+            # Clutch
+            clutch_player = ev.get("clutch_player", "")
+            clutch_kills  = ev.get("clutch_kills", 0)
+            if clutch_player:
+                lines.append(
+                    f"    Clutch: {label(clutch_player)} secured {clutch_kills} kill(s) to win"
+                )
+
+            # Per-player notable stats (headshot rate, trades) — only our players
+            pd = ev.get("player_derived", {})
+            for username, data in sorted(pd.items()):
+                if username not in our_player_names:
+                    continue
+                notes = []
+                hs_rate = data.get("headshot_rate", 0)
+                kills_n = data.get("kills", 0)
+                if kills_n >= 2 and hs_rate >= 0.5:
+                    notes.append(f"{hs_rate:.0%} HS rate")
+                if data.get("trades", 0) >= 1:
+                    notes.append(f"{data['trades']} trade(s)")
+                if notes:
+                    lines.append(f"    {username}: {', '.join(notes)}")
+
+        return "\n".join(lines)
     # ── Prompt builders ───────────────────────────────────────
 
     def _build_match_prompt(self, match, metrics, summary, tps, transcript) -> str:

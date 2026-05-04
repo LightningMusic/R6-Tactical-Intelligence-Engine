@@ -66,9 +66,14 @@ DISSECT_TIMEOUT = 90
 class RecImporter:
     """
     Parses match replay folders using r6-dissect.
-    Player stats from the replay are stored on Round.raw_player_stats
-    and consumed by SessionManager._auto_create_matches() to write
-    PlayerRoundStats to the database.
+
+    For each round, extracts:
+    - Round metadata (side, site, outcome, map)
+    - Per-player stats (kills, deaths, assists, headshots from stats field)
+    - Kill feed events from matchFeedback (KillEvent, PlantEvent)
+      → stored as RoundEvents on round_obj.round_events
+
+    All player data is stored on Round for consumption by SessionManager.
     """
 
     def __init__(
@@ -123,16 +128,28 @@ class RecImporter:
                 if score_them is None and meta.get("score_them") is not None:
                     score_them = meta["score_them"]
 
-                our_stats  = [p for p in round_obj.raw_player_stats if p.get("is_our_team")]
+                our_stats   = [p for p in round_obj.raw_player_stats if p.get("is_our_team")]
                 their_stats = [p for p in round_obj.raw_player_stats if not p.get("is_our_team")]
                 our_k = sum(p["kills"]  for p in our_stats)
                 our_d = sum(p["deaths"] for p in our_stats)
+
+                # Log kill feed summary
+                ev = round_obj.round_events
+                fb_note = ""
+                if ev:
+                    fb_note = f" | feed: {len(ev.kills)}K"
+                    if ev.first_blood_killer:
+                        fb_note += f" | FB:{ev.first_blood_killer}"
+                    if ev.clutch_player:
+                        fb_note += f" | clutch:{ev.clutch_player}"
+
                 self._log(
                     f"  ✓ R{round_obj.round_number} "
                     f"| {round_obj.side} | {round_obj.outcome}"
                     f" | site: {round_obj.site or '?'}"
                     f" | K/D: {our_k}/{our_d}"
-                    f" | {len(our_stats)} our players, {len(their_stats)} theirs"
+                    f" | {len(our_stats)} ours, {len(their_stats)} theirs"
+                    f"{fb_note}"
                 )
 
             except Exception as parse_err:
@@ -196,6 +213,10 @@ class RecImporter:
                 log_callback(summary)
 
         return results
+
+    # =====================================================
+    # INTERNAL: Run r6-dissect
+    # =====================================================
 
     def _run_dissect_with_retry(
         self, rec_file: Path
@@ -268,7 +289,6 @@ class RecImporter:
                     tmp_path.unlink()
                 except Exception:
                     pass
-
             except Exception as e:
                 last_error = str(e)
                 self._log(f"    Attempt {attempt}: {last_error}")
@@ -308,6 +328,10 @@ class RecImporter:
             self._log(f"    JSON decode error for {filename}: {e}")
             return None
 
+    # =====================================================
+    # STATIC HELPERS
+    # =====================================================
+
     @staticmethod
     def _safe_int(value: object) -> Optional[int]:
         try:
@@ -319,7 +343,7 @@ class RecImporter:
     def _determine_win_type(our_team: dict, their_team: dict) -> str:
         def norm(x: object) -> str:
             return str(x or "").strip()
-        our_wc  = norm(our_team.get("winCondition"))
+        our_wc   = norm(our_team.get("winCondition"))
         their_wc = norm(their_team.get("winCondition"))
         wc = our_wc or their_wc
         if not wc:
@@ -395,6 +419,10 @@ class RecImporter:
         )
         return "loss"
 
+    # =====================================================
+    # INTERNAL: Parse one round
+    # =====================================================
+
     def _parse_round(self, data: dict) -> tuple[Round, dict]:
         recording_player_id           = data.get("recordingPlayerID")
         our_team_index: Optional[int] = None
@@ -434,21 +462,35 @@ class RecImporter:
                     f"in round {data.get('roundNumber','?')} — guessing from team 0"
                 )
 
-        # ── Build raw player stats list ───────────────────────────
+        # ── Build raw player stats from player.stats ──────────────
         raw_player_stats: list[dict] = []
         for player in data.get("players", []):
-            team_idx = player.get("teamIndex", -1)
-            stats    = player.get("stats", {}) or {}
-            op_data  = player.get("operator") or {}
+            team_idx  = player.get("teamIndex", -1)
+            stats_raw = player.get("stats", {}) or {}
+            op_data   = player.get("operator") or {}
             raw_player_stats.append({
                 "username":    str(player.get("username") or "").strip(),
                 "operator":    str(op_data.get("name") or "").strip(),
-                "kills":       int(stats.get("kills",   0) or 0),
-                "deaths":      int(stats.get("deaths",  0) or 0),
-                "assists":     int(stats.get("assists", 0) or 0),
+                "kills":       int(stats_raw.get("kills",      0) or 0),
+                "deaths":      int(stats_raw.get("deaths",     0) or 0),
+                "assists":     int(stats_raw.get("assists",    0) or 0),
+                "headshots":   int(stats_raw.get("headshots",  0) or 0),
                 "teamIndex":   team_idx,
                 "is_our_team": (team_idx == our_team_index),
             })
+
+        # ── Parse kill feed from matchFeedback ────────────────────
+        round_events = None
+        try:
+            from analysis.event_parser import parse_round_events
+            if our_team_index is not None:
+                round_events = parse_round_events(
+                    data,
+                    our_team_index=our_team_index,
+                    round_outcome=outcome,
+                )
+        except Exception as ev_err:
+            print(f"[RecImporter] Event parse warning: {ev_err}")
 
         map_data   = data.get("map", {})
         map_id_raw = map_data.get("id")
@@ -468,6 +510,7 @@ class RecImporter:
             resources=None,
             player_stats=[],
             raw_player_stats=raw_player_stats,
+            round_events=round_events,
         )
 
         return round_obj, {
