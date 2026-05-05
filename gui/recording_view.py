@@ -575,6 +575,7 @@ class RecordingView(QWidget):
                 f"Missing data shown in Manual Entry."
             )
             self.navigate_to_match_input_partial.emit(partial)
+            self._refresh_storage_display()
 
     def _prompt_opponent_names(self, results: list) -> None:
         """Ask the user to name each imported match before routing."""

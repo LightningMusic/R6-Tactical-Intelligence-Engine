@@ -13,6 +13,8 @@ transcribed individually by WhisperTranscriber for named speaker attribution.
 from __future__ import annotations
 
 import asyncio
+import importlib
+import importlib
 import threading
 import time
 from pathlib import Path
@@ -78,16 +80,20 @@ class DiscordCapture:
 
     @staticmethod
     def is_available() -> bool:
-        ok, _ = _check_deps()
-        return ok
+        import importlib
+        for pkg in ("discord", "discord.sinks", "nacl"):
+            try:
+                importlib.import_module(pkg)
+            except ImportError:
+                return False
+        return True
 
     @staticmethod
     def install_instructions() -> str:
-        _, reason = _check_deps()
         return (
-            f"Discord capture unavailable: {reason}\n\n"
-            "To enable per-user voice capture, run:\n"
-            "  pip install \"discord.py[voice]\" discord-ext-sinks PyNaCl\n\n"
+            "Missing dependencies for per-user voice capture.\n\n"
+            "Run in your venv:\n"
+            '  pip install "discord.py[voice]" discord-ext-sinks PyNaCl\n\n'
             "Without this, speaker detection uses heuristic silence-gap analysis."
         )
 

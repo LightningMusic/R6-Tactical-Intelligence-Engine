@@ -79,35 +79,6 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
-    def _build_obs_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setSpacing(16)
-
-        obs_group = QGroupBox("OBS WebSocket Connection")
-        form = QFormLayout(obs_group)
-        self._obs_host_edit = QLineEdit()
-        self._obs_port_spin = QSpinBox()
-        self._obs_port_spin.setRange(1, 65535)
-        self._obs_password_edit = QLineEdit()
-        self._obs_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._obs_scene_edit = QLineEdit()
-        form.addRow("Host:",     self._obs_host_edit)
-        form.addRow("Port:",     self._obs_port_spin)
-        form.addRow("Password:", self._obs_password_edit)
-        form.addRow("Scene:",    self._obs_scene_edit)
-        layout.addWidget(obs_group)
-
-        test_btn = QPushButton("Test Connection")
-        test_btn.clicked.connect(self._test_obs)
-        layout.addWidget(test_btn)
-
-        save_btn = QPushButton("Save OBS Settings")
-        save_btn.clicked.connect(self._save_obs)
-        layout.addWidget(save_btn)
-        layout.addStretch()
-        return w
-
     def _build_players_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -233,70 +204,165 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
-    def _build_discord_tab(self) -> QWidget:
-        from PySide6.QtWidgets import QWidget, QVBoxLayout, QGroupBox, QFormLayout
-        from PySide6.QtWidgets import QLineEdit, QPushButton, QLabel, QMessageBox
-
+    def _build_obs_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setSpacing(16)
+        layout.setSpacing(12)
 
-        info = QLabel(
-            "Discord per-user voice capture gives accurate speaker identification.\n"
-            "Each player's mic becomes a separate audio track, then Whisper\n"
-            "transcribes each individually — no guessing who said what.\n\n"
-            "Requirements: pip install discord.py[voice] PyNaCl"
+        # ── Profile selector ──────────────────────────────────────
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(QLabel("Profile:"))
+        self._obs_profile_combo = QComboBox()
+        self._obs_profile_combo.setMinimumWidth(160)
+        self._obs_profile_combo.currentIndexChanged.connect(self._on_obs_profile_selected)
+        profile_row.addWidget(self._obs_profile_combo, stretch=1)
+
+        add_profile_btn = QPushButton("➕ Add")
+        add_profile_btn.setFixedWidth(60)
+        add_profile_btn.clicked.connect(self._add_obs_profile)
+        profile_row.addWidget(add_profile_btn)
+
+        del_profile_btn = QPushButton("🗑")
+        del_profile_btn.setFixedWidth(40)
+        del_profile_btn.clicked.connect(self._delete_obs_profile)
+        profile_row.addWidget(del_profile_btn)
+        layout.addLayout(profile_row)
+
+        # ── Profile fields ────────────────────────────────────────
+        obs_group = QGroupBox("Connection Settings")
+        form = QFormLayout(obs_group)
+
+        self._obs_profile_name_edit = QLineEdit()
+        self._obs_profile_name_edit.setPlaceholderText("e.g. Lab PC, Home PC")
+        form.addRow("Profile Name:", self._obs_profile_name_edit)
+
+        self._obs_host_edit = QLineEdit()
+        form.addRow("Host:", self._obs_host_edit)
+
+        self._obs_port_spin = QSpinBox()
+        self._obs_port_spin.setRange(1, 65535)
+        form.addRow("Port:", self._obs_port_spin)
+
+        self._obs_password_edit = QLineEdit()
+        self._obs_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._obs_show_pw_cb = QCheckBox("Show")
+        self._obs_show_pw_cb.toggled.connect(
+            lambda checked: self._obs_password_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked
+                else QLineEdit.EchoMode.Password
+            )
         )
-        info.setWordWrap(True)
-        info.setStyleSheet("color: #aaa; font-size: 11px;")
-        layout.addWidget(info)
+        pw_row = QHBoxLayout()
+        pw_row.addWidget(self._obs_password_edit)
+        pw_row.addWidget(self._obs_show_pw_cb)
+        form.addRow("Password:", pw_row)
 
-        bot_group = QGroupBox("Discord Bot Settings")
-        form = QFormLayout(bot_group)
+        self._obs_scene_edit = QLineEdit()
+        form.addRow("Scene Name:", self._obs_scene_edit)
 
+        layout.addWidget(obs_group)
+
+        # ── Buttons ───────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        test_btn = QPushButton("🔌 Test Connection")
+        test_btn.clicked.connect(self._test_obs)
+        btn_row.addWidget(test_btn)
+
+        activate_btn = QPushButton("✅ Use This Profile")
+        activate_btn.clicked.connect(self._activate_obs_profile)
+        btn_row.addWidget(activate_btn)
+
+        save_btn = QPushButton("💾 Save All Profiles")
+        save_btn.clicked.connect(self._save_obs)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+        active_label = QLabel("")
+        active_label.setStyleSheet("color: #55e07a; font-size: 11px;")
+        active_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._obs_active_label = active_label
+        layout.addWidget(active_label)
+
+        layout.addStretch()
+        return w
+
+
+    def _build_discord_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(12)
+
+        dep_label = QLabel(
+            "Required: pip install \"discord.py[voice]\" discord-ext-sinks PyNaCl"
+        )
+        dep_label.setStyleSheet("color: #e0a830; font-size: 10px;")
+        layout.addWidget(dep_label)
+
+        token_group = QGroupBox("Bot Token")
+        token_form  = QFormLayout(token_group)
         self._discord_token_edit = QLineEdit()
         self._discord_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._discord_token_edit.setPlaceholderText("Bot token from discord.com/developers")
-        form.addRow("Bot Token:", self._discord_token_edit)
-
-        self._discord_channel_edit = QLineEdit()
-        self._discord_channel_edit.setPlaceholderText("Voice channel ID (right-click channel → Copy ID)")
-        form.addRow("Channel ID:", self._discord_channel_edit)
-
-        layout.addWidget(bot_group)
-
-        status_group = QGroupBox("Setup Guide")
-        status_layout = QVBoxLayout(status_group)
-        guide = QLabel(
-            "1. Go to discord.com/developers/applications\n"
-            "2. New Application → Bot → Reset Token → copy it\n"
-            "3. Enable: Server Members Intent + Voice States Intent\n"
-            "4. OAuth2 → URL Generator → scopes: bot → permissions:\n"
-            "   Connect, Speak, Use Voice Activity\n"
-            "5. Copy the generated URL, open it, add bot to your server\n"
-            "6. Enable Developer Mode in Discord (Settings → Advanced)\n"
-            "7. Right-click your voice channel → Copy Channel ID\n"
-            "8. Paste token and channel ID above and save."
+        show_token_cb = QCheckBox("Show")
+        show_token_cb.toggled.connect(
+            lambda checked: self._discord_token_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked
+                else QLineEdit.EchoMode.Password
+            )
         )
-        guide.setStyleSheet("font-size: 10px; color: #888;")
-        status_layout.addWidget(guide)
-        layout.addWidget(status_group)
+        token_row = QHBoxLayout()
+        token_row.addWidget(self._discord_token_edit)
+        token_row.addWidget(show_token_cb)
+        token_form.addRow("Token:", token_row)
+        layout.addWidget(token_group)
 
-        test_btn = QPushButton("Test Discord Bot Connection")
+        # ── Channel list ──────────────────────────────────────────
+        ch_group = QGroupBox("Voice Channels  (add one per server/room you use)")
+        ch_layout = QVBoxLayout(ch_group)
+
+        self._discord_channels_table = QTableWidget(0, 2)
+        self._discord_channels_table.setHorizontalHeaderLabels(["Label", "Channel ID"])
+        self._discord_channels_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self._discord_channels_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._discord_channels_table.verticalHeader().setVisible(False)
+        self._discord_channels_table.setMaximumHeight(160)
+        ch_layout.addWidget(self._discord_channels_table)
+
+        ch_btn_row = QHBoxLayout()
+        add_ch_btn = QPushButton("➕ Add Channel")
+        add_ch_btn.clicked.connect(self._add_discord_channel)
+        ch_btn_row.addWidget(add_ch_btn)
+
+        del_ch_btn = QPushButton("🗑 Remove Selected")
+        del_ch_btn.clicked.connect(self._remove_discord_channel)
+        ch_btn_row.addWidget(del_ch_btn)
+        ch_layout.addLayout(ch_btn_row)
+
+        layout.addWidget(ch_group)
+
+        # ── Active channel selector ───────────────────────────────
+        active_row = QHBoxLayout()
+        active_row.addWidget(QLabel("Active channel for sessions:"))
+        self._discord_active_combo = QComboBox()
+        self._discord_active_combo.setMinimumWidth(200)
+        active_row.addWidget(self._discord_active_combo, stretch=1)
+        layout.addLayout(active_row)
+
+        btn_row = QHBoxLayout()
+        test_btn = QPushButton("🔌 Test Bot Connection")
         test_btn.clicked.connect(self._test_discord)
-        layout.addWidget(test_btn)
+        btn_row.addWidget(test_btn)
 
-        save_btn = QPushButton("Save Discord Settings")
+        save_btn = QPushButton("💾 Save Discord Settings")
         save_btn.clicked.connect(self._save_discord)
-        layout.addWidget(save_btn)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
 
         layout.addStretch()
-
-        # Load existing values
-        from app.config import settings
-        self._discord_token_edit.setText(str(settings.get("discord_bot_token") or ""))
-        self._discord_channel_edit.setText(str(settings.get("discord_channel_id") or ""))
-
         return w
 
 
@@ -456,12 +522,215 @@ class SettingsView(QWidget):
         self._stability_checks_spin.setValue(settings.STABILITY_CHECKS)
         self._transcribe_checkbox.setChecked(settings.TRANSCRIBE_AUTO)
 
-    def _load_obs_settings(self) -> None:
+# ── OBS profile handlers ──────────────────────────────────────
+
+def _load_obs_settings(self) -> None:
+    from app.config import settings
+    self._obs_profiles: list[dict] = list(settings.get_obs_profiles())
+    self._obs_active_idx: int      = int(settings.get("obs_active_profile") or 0)
+
+    if not self._obs_profiles:
+        # Migrate legacy settings to a profile
+        self._obs_profiles = [{
+            "name":       "Default",
+            "host":       settings.OBS_HOST,
+            "port":       settings.OBS_PORT,
+            "password":   settings.OBS_PASSWORD,
+            "scene_name": settings.OBS_SCENE_NAME,
+        }]
+        self._obs_active_idx = 0
+
+    self._obs_profile_combo.blockSignals(True)
+    self._obs_profile_combo.clear()
+    for p in self._obs_profiles:
+        self._obs_profile_combo.addItem(p.get("name", "Unnamed"))
+    self._obs_profile_combo.blockSignals(False)
+    self._obs_profile_combo.setCurrentIndex(
+        min(self._obs_active_idx, len(self._obs_profiles) - 1)
+    )
+    self._on_obs_profile_selected(self._obs_profile_combo.currentIndex())
+    self._update_obs_active_label()
+
+def _on_obs_profile_selected(self, idx: int) -> None:
+    if idx < 0 or idx >= len(self._obs_profiles):
+        return
+    p = self._obs_profiles[idx]
+    self._obs_profile_name_edit.setText(p.get("name", ""))
+    self._obs_host_edit.setText(p.get("host", "localhost"))
+    self._obs_port_spin.setValue(int(p.get("port", 4455)))
+    self._obs_password_edit.setText(p.get("password", ""))
+    self._obs_scene_edit.setText(p.get("scene_name", "R6_Comms"))
+
+def _save_current_profile_fields(self) -> None:
+    idx = self._obs_profile_combo.currentIndex()
+    if 0 <= idx < len(self._obs_profiles):
+        self._obs_profiles[idx] = {
+            "name":       self._obs_profile_name_edit.text().strip() or "Unnamed",
+            "host":       self._obs_host_edit.text().strip() or "localhost",
+            "port":       self._obs_port_spin.value(),
+            "password":   self._obs_password_edit.text(),
+            "scene_name": self._obs_scene_edit.text().strip() or "R6_Comms",
+        }
+        # Refresh combo label
+        self._obs_profile_combo.blockSignals(True)
+        self._obs_profile_combo.setItemText(
+            idx, self._obs_profiles[idx]["name"]
+        )
+        self._obs_profile_combo.blockSignals(False)
+
+def _add_obs_profile(self) -> None:
+    self._save_current_profile_fields()
+    new_profile = {
+        "name":       f"PC {len(self._obs_profiles) + 1}",
+        "host":       "localhost",
+        "port":       4455,
+        "password":   "",
+        "scene_name": "R6_Comms",
+    }
+    self._obs_profiles.append(new_profile)
+    self._obs_profile_combo.addItem(new_profile["name"])
+    self._obs_profile_combo.setCurrentIndex(len(self._obs_profiles) - 1)
+
+def _delete_obs_profile(self) -> None:
+    if len(self._obs_profiles) <= 1:
+        QMessageBox.warning(self, "Cannot Delete", "You need at least one profile.")
+        return
+    idx = self._obs_profile_combo.currentIndex()
+    self._obs_profiles.pop(idx)
+    self._obs_profile_combo.removeItem(idx)
+    if self._obs_active_idx >= len(self._obs_profiles):
+        self._obs_active_idx = len(self._obs_profiles) - 1
+    self._update_obs_active_label()
+
+def _activate_obs_profile(self) -> None:
+    self._save_current_profile_fields()
+    self._obs_active_idx = self._obs_profile_combo.currentIndex()
+    self._save_obs()
+    self._update_obs_active_label()
+    QMessageBox.information(
+        self, "Profile Activated",
+        f"Now using: {self._obs_profiles[self._obs_active_idx]['name']}"
+    )
+
+def _update_obs_active_label(self) -> None:
+    if 0 <= self._obs_active_idx < len(self._obs_profiles):
+        name = self._obs_profiles[self._obs_active_idx].get("name", "?")
+        self._obs_active_label.setText(f"Active profile: {name}")
+
+def _save_obs(self) -> None:
+    from app.config import settings
+    self._save_current_profile_fields()
+    settings.set_obs_profiles(self._obs_profiles, self._obs_active_idx)
+    settings.save()
+    QMessageBox.information(self, "Saved", "OBS profiles saved.")
+
+def _test_obs(self) -> None:
+    self._save_current_profile_fields()
+    idx = self._obs_profile_combo.currentIndex()
+    if idx < 0:
+        return
+    p = self._obs_profiles[idx]
+    try:
+        import obswebsocket
+        client = obswebsocket.obsws(p["host"], int(p["port"]), p["password"])
+        client.connect()
+        client.disconnect()
+        QMessageBox.information(
+            self, "OBS",
+            f"✅ Connected to {p['name']} ({p['host']}:{p['port']})"
+        )
+    except Exception as e:
+        QMessageBox.warning(self, "OBS", f"❌ Failed: {e}")
+
+
+    # ── Discord channel handlers ──────────────────────────────────
+
+    def _load_discord_settings(self) -> None:
         from app.config import settings
-        self._obs_host_edit.setText(settings.OBS_HOST)
-        self._obs_port_spin.setValue(settings.OBS_PORT)
-        self._obs_password_edit.setText(settings.OBS_PASSWORD)
-        self._obs_scene_edit.setText(settings.OBS_SCENE_NAME)
+        self._discord_token_edit.setText(str(settings.get("discord_bot_token") or ""))
+        self._refresh_discord_channel_table()
+
+    def _refresh_discord_channel_table(self) -> None:
+        from app.config import settings
+        channels = settings.get_discord_channels()
+        self._discord_channels_table.setRowCount(0)
+        self._discord_active_combo.clear()
+        for ch in channels:
+            r = self._discord_channels_table.rowCount()
+            self._discord_channels_table.insertRow(r)
+            self._discord_channels_table.setItem(r, 0, QTableWidgetItem(ch.get("name", "")))
+            self._discord_channels_table.setItem(r, 1, QTableWidgetItem(str(ch.get("id", ""))))
+            self._discord_active_combo.addItem(ch.get("name", ""), ch.get("id", ""))
+
+        # Restore active selection
+        active_id = str(settings.get("discord_channel_id") or "")
+        for i in range(self._discord_active_combo.count()):
+            if str(self._discord_active_combo.itemData(i)) == active_id:
+                self._discord_active_combo.setCurrentIndex(i)
+                break
+
+    def _add_discord_channel(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok1 = QInputDialog.getText(
+            self, "Add Channel", "Label (e.g. 'Main Server Comms'):"
+        )
+        if not ok1 or not name.strip():
+            return
+        ch_id, ok2 = QInputDialog.getText(
+            self, "Add Channel", "Channel ID (right-click channel → Copy ID):"
+        )
+        if not ok2 or not ch_id.strip():
+            return
+        r = self._discord_channels_table.rowCount()
+        self._discord_channels_table.insertRow(r)
+        self._discord_channels_table.setItem(r, 0, QTableWidgetItem(name.strip()))
+        self._discord_channels_table.setItem(r, 1, QTableWidgetItem(ch_id.strip()))
+        self._discord_active_combo.addItem(name.strip(), ch_id.strip())
+
+    def _remove_discord_channel(self) -> None:
+        row = self._discord_channels_table.currentRow()
+        if row < 0:
+            return
+        self._discord_channels_table.removeRow(row)
+        self._discord_active_combo.removeItem(row)
+
+    def _save_discord(self) -> None:
+        from app.config import settings
+        token = self._discord_token_edit.text().strip()
+
+        channels: list[dict] = []
+        for r in range(self._discord_channels_table.rowCount()):
+            name_item = self._discord_channels_table.item(r, 0)
+            id_item   = self._discord_channels_table.item(r, 1)
+            if name_item and id_item:
+                channels.append({
+                    "name": name_item.text().strip(),
+                    "id":   id_item.text().strip(),
+                })
+
+        active_id = self._discord_active_combo.currentData() or ""
+
+        settings.set_many({
+            "discord_bot_token":   token,
+            "discord_channel_ids": channels,
+            "discord_channel_id":  active_id,   # active channel used by session
+        })
+        settings.save()
+        QMessageBox.information(self, "Saved", "Discord settings saved.")
+
+    def _test_discord(self) -> None:
+        from integration.discord_capture import DiscordCapture
+        if not DiscordCapture.is_available():
+            QMessageBox.warning(
+                self, "Missing Dependencies",
+                DiscordCapture.install_instructions()
+            )
+            return
+        QMessageBox.information(
+            self, "Discord",
+            "Dependencies found ✅\n"
+            "Bot will connect to the active channel when you start a session."
+        )
 
     def _load_players(self) -> None:
         try:
@@ -520,11 +789,6 @@ class SettingsView(QWidget):
                 )
         except Exception as e:
             print(f"[Settings] Failed to load matches: {e}")
-
-    def _load_discord_settings(self) -> None:
-        from app.config import settings
-        self._discord_token_edit.setText(str(settings.get("discord_bot_token") or ""))
-        self._discord_channel_edit.setText(str(settings.get("discord_channel_id") or ""))
 
     def _load_ai_settings(self) -> None:
         from app.config import settings

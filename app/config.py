@@ -57,10 +57,21 @@ class _Settings:
     """
 
     DEFAULTS: dict = {
+        "obs_profiles": [
+            {
+                "name": "Default",
+                "host": "localhost",
+                "port": 4455,
+                "password": "",
+                "scene_name": "R6_Comms",
+            }
+        ],
+        "obs_active_profile": 0,
+        # Legacy single-value keys kept for migration
         "obs_host":           "localhost",
         "obs_port":           4455,
         "obs_password":       "",
-        "obs_scene_name":     "R6_Intelligence",
+        "obs_scene_name":     "R6_Comms",
         "whisper_model_size": "base",
         "llm_model_filename": "model.gguf",
         "llm_gpu_layers":     0,
@@ -70,13 +81,52 @@ class _Settings:
         "stability_checks":   4,
         "transcribe_auto":    True,
         "r6_replay_folder":   None,
-        "twitch_channel":    "",
-        "twitch_title":      "",
-        "twitch_auto_start": False,
-        "twitch_auto_stop":  False,
-        "discord_bot_token": "",
-        "discord_channel_id": "",
+        "twitch_channel":     "",
+        "twitch_title":       "",
+        "twitch_auto_start":  False,
+        "twitch_auto_stop":   False,
+        "discord_bot_token":  "",
+        "discord_channel_ids": [],   # list of {name, id} dicts
+        "discord_channel_id": "",    # legacy single value
+        "ollama_model":       "llama3.2:3b",
     }
+
+    # ── Active OBS profile helpers ────────────────────────────
+
+
+
+    def _active_obs_profile(self) -> dict:
+        profiles = self._data.get("obs_profiles") or []
+        idx = int(self._data.get("obs_active_profile", 0))
+        if profiles and 0 <= idx < len(profiles):
+            return profiles[idx]
+        # Fall back to legacy flat keys
+        return {
+            "host":       self._data.get("obs_host", "localhost"),
+            "port":       self._data.get("obs_port", 4455),
+            "password":   self._data.get("obs_password", ""),
+            "scene_name": self._data.get("obs_scene_name", "R6_Comms"),
+        }
+
+    def get_obs_profiles(self) -> list[dict]:
+        return list(self._data.get("obs_profiles") or [])
+
+    def set_obs_profiles(self, profiles: list[dict], active_idx: int = 0) -> None:
+        self._data["obs_profiles"]       = profiles
+        self._data["obs_active_profile"] = active_idx
+
+    def get_discord_channels(self) -> list[dict]:
+        """Returns list of {name, id} dicts."""
+        channels = self._data.get("discord_channel_ids") or []
+        if not channels:
+            # Migrate legacy single channel
+            legacy = self._data.get("discord_channel_id", "")
+            if legacy:
+                channels = [{"name": "Main", "id": str(legacy)}]
+        return channels
+
+    def set_discord_channels(self, channels: list[dict]) -> None:
+        self._data["discord_channel_ids"] = channels
 
     def __init__(self) -> None:
         self._data: dict = dict(self.DEFAULTS)
