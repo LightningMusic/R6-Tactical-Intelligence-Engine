@@ -565,6 +565,53 @@ class IntelEngine:
                     lines.append(f"    {username}: {', '.join(notes)}")
 
         return "\n".join(lines)
+    def _build_comms_section(self, transcript: dict) -> str:
+        if not transcript or int(transcript.get("word_count", 0)) == 0:
+            return "  No comms data recorded this session.\n"
+    
+        top_locs    = list(transcript.get("top_locations", {}).keys())[:5]
+        top_actions = list(transcript.get("top_actions",   {}).keys())[:5]
+        gaps        = int(transcript.get("coord_gaps", 0))
+        words       = int(transcript.get("word_count", 0))
+        speakers    = dict(transcript.get("speakers", {}))
+        fight_silence_count = int(transcript.get("fight_silence_count", 0))
+        worst_silences      = list(transcript.get("worst_fight_silences", []))
+    
+        speaker_lines = []
+        for spk, sd in list(speakers.items())[:5]:
+            wc  = int(sd.get("word_count", 0))
+            top = list(sd.get("top_words", []))[:3]
+            speaker_lines.append(
+                f"    {spk}: {wc} words — "
+                f"top words: {', '.join(top) or 'none'}"
+            )
+    
+        section = (
+            f"  Total words spoken : {words}\n"
+            f"  Top location callouts : {', '.join(top_locs) or 'none'}\n"
+            f"  Top action callouts   : {', '.join(top_actions) or 'none'}\n"
+            f"  Communication gaps (>8s silence) : {gaps}\n"
+        )
+    
+        if speaker_lines:
+            section += "  Speakers (auto-detected, not named):\n"
+            section += "\n".join(speaker_lines) + "\n"
+    
+        if fight_silence_count > 0:
+            section += (
+                f"\n  ⚠ FIGHT INTEL GAPS: {fight_silence_count} instance(s) where "
+                f"engagement language was detected but no callout followed for ≥15s.\n"
+                f"  This suggests players were in fights without communicating.\n"
+            )
+            for i, fs in enumerate(worst_silences[:3], 1):
+                section += (
+                    f"  Gap {i}: {fs.get('gap_sec', 0):.0f}s silence "
+                    f"at {fs.get('start_sec', 0):.0f}s into session\n"
+                    f"    Before: \"{fs.get('prior_callout', '')[:60]}\"\n"
+                    f"    After:  \"{fs.get('next_callout', '')[:60]}\"\n"
+                )
+    
+        return section
     # ── Prompt builders ───────────────────────────────────────
 
     def _build_match_prompt(self, match, metrics, summary, tps, transcript) -> str:
@@ -771,7 +818,8 @@ Summarise comms data if present. If speaker names are "Speaker_1" etc., note the
             "DRILL: [one concrete practice activity that addresses the focus area]\n"
         )
 
-    def _get_transcript_summary(self, match_id: int) -> dict[str, Any]:
+    def _get_transcript_summary(self, match_id: int) -> dict:
+        import json
         try:
             from database.repositories import Repository
             repo = Repository()
@@ -782,32 +830,43 @@ Summarise comms data if present. If speaker names are "Speaker_1" etc., note the
                 ).fetchone()
             if not row or not row["processed_segments_json"]:
                 return {}
-            data: dict[str, Any] = json.loads(row["processed_segments_json"])
+            data = json.loads(row["processed_segments_json"])
             return {
-                "top_locations": data.get("location_freq") or {},
-                "top_actions":   data.get("action_freq")   or {},
-                "coord_gaps":    len(data.get("coordination_gaps") or []),
-                "word_count":    int(data.get("word_count") or 0),
-                "speakers":      data.get("speakers") or {},
+                "top_locations":        data.get("location_freq") or {},
+                "top_actions":          data.get("action_freq")   or {},
+                "coord_gaps":           len(data.get("coordination_gaps") or []),
+                "word_count":           int(data.get("word_count") or 0),
+                "speakers":             data.get("speakers") or {},
+                "fight_silence_count":  int(data.get("fight_silence_count") or 0),
+                "worst_fight_silences": data.get("fight_silences") or [],
             }
         except Exception:
             return {}
 
-    def _store_metric(
-        self,
-        repo: Any,
-        match_id: int,
-        name: str,
-        value: str,
-    ) -> None:
+    def _store_metric(self, repo, match_id: int, name: str, value: str) -> None:
+        """Store AI-generated text metric. metric_value = char count, metric_text = full text."""
         try:
             with repo.db.get_connection() as conn:
-                conn.execute(
-                    """INSERT INTO derived_metrics
-                       (match_id, metric_name, metric_value, is_ai_generated)
-                       VALUES (?, ?, ?, 1) ON CONFLICT DO NOTHING""",
-                    (match_id, name, float(len(value))),
-                )
+                # Try INSERT with metric_text; fall back gracefully if column missing
+                try:
+                    conn.execute(
+                        """INSERT INTO derived_metrics
+                        (match_id, metric_name, metric_value, metric_text, is_ai_generated)
+                        VALUES (?, ?, ?, ?, 1)
+                        ON CONFLICT(match_id, metric_name) DO UPDATE SET
+                            metric_value = excluded.metric_value,
+                            metric_text  = excluded.metric_text""",
+                        (match_id, name, float(len(value)), value),
+                    )
+                except Exception:
+                    # metric_text column may not exist on old DBs — use float-only fallback
+                    conn.execute(
+                        """INSERT INTO derived_metrics
+                        (match_id, metric_name, metric_value, is_ai_generated)
+                        VALUES (?, ?, ?, 1)
+                        ON CONFLICT DO NOTHING""",
+                        (match_id, name, float(len(value))),
+                    )
                 conn.commit()
         except Exception as e:
             print(f"[AI] Store metric failed: {e}")

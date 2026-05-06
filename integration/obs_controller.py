@@ -41,6 +41,13 @@ class OBSController:
         self._client: Optional[obswebsocket.obsws] = None
         self._launched_by_us  = False
 
+
+    def _require_client(self) -> obswebsocket.obsws:
+        if not self._connected or self._client is None:
+            raise RuntimeError("OBS client is not connected.")
+        return self._client
+
+
     # =====================================================
     # LAUNCH
     # =====================================================
@@ -139,80 +146,141 @@ class OBSController:
 
     def setup_scenes(self) -> bool:
         """
-        Creates/verifies both OBS scenes.
-        Call once after connecting to OBS.
-        
+        Creates/verifies both OBS scenes and their sources.
+        Safe to call multiple times — checks existence before creating.
+
         R6_Comms scene:
         - Application Audio Capture → Discord
         - Used during sessions for comms recording
-        
-        R6_Game scene:  
+
+        R6_Game scene:
         - Game Capture → Rainbow Six Siege
-        - Optional Audio Capture → Desktop (for personal recordings/streaming)
-        - Used for personal video recording or Twitch streaming
+        - Desktop Audio output capture
+        - Used for personal video recording or streaming
         """
+        client = self._client
+        if client is None:
+            return False
         if not self._connected or self._client is None:
             print("[OBS] Not connected — cannot set up scenes.")
             return False
 
         try:
-            # ── Get existing scenes ───────────────────────────────
+            # ── Get existing scenes ───────────────────────────────────
             scene_list = self._client.call(obs_requests.GetSceneList())
-            existing   = {
+            existing_scenes = {
                 s.get("sceneName", "")
                 for s in (scene_list.getScenes() or [])
             }
 
-            # ── Create Comms scene if missing ─────────────────────
-            if SCENE_COMMS not in existing:
+            # ── Helper: get existing input names in a scene ───────────
+            def get_scene_items(scene_name: str) -> set:
+                try:
+                    items_resp = client.call(
+                        obs_requests.GetSceneItemList(sceneName=scene_name)
+                    )
+                    return {
+                        item.get("sourceName", "")
+                        for item in (items_resp.getSceneItems() or [])
+                    }
+                except Exception:
+                    return set()
+                
+
+            # ── Create R6_Comms scene ─────────────────────────────────
+            if SCENE_COMMS not in existing_scenes:
                 self._client.call(
                     obs_requests.CreateScene(sceneName=SCENE_COMMS)
                 )
                 print(f"[OBS] Created scene: {SCENE_COMMS}")
-                # Add Application Audio Capture source for Discord
-                self._client.call(obs_requests.CreateInput(
-                    sceneName=SCENE_COMMS,
-                    inputName="Discord_Audio",
-                    inputKind="wasapi_process_output_capture",
-                    inputSettings={
-                        "window": "Discord.exe",
-                        "use_device_timing": True,
-                    },
-                    sceneItemEnabled=True,
-                ))
-                print(f"[OBS] Added Discord audio source to {SCENE_COMMS}")
             else:
                 print(f"[OBS] Scene exists: {SCENE_COMMS}")
 
-            # ── Create Game scene if missing ──────────────────────
-            if SCENE_GAME not in existing:
+            # Add Discord audio source if not already present
+            comms_items = get_scene_items(SCENE_COMMS)
+            if "Discord_Audio" not in comms_items:
+                try:
+                    self._client.call(obs_requests.CreateInput(
+                        sceneName=SCENE_COMMS,
+                        inputName="Discord_Audio",
+                        inputKind="wasapi_process_output_capture",
+                        inputSettings={
+                            "window": "Discord.exe",
+                            "use_device_timing": True,
+                        },
+                        sceneItemEnabled=True,
+                    ))
+                    print(f"[OBS] Added Discord_Audio source to {SCENE_COMMS}")
+                except Exception as e:
+                    print(f"[OBS] Could not add Discord_Audio (may already exist globally): {e}")
+                    # Try adding existing input to scene instead
+                    try:
+                        self._client.call(obs_requests.CreateSceneItem(
+                            sceneName=SCENE_COMMS,
+                            sourceName="Discord_Audio",
+                            sceneItemEnabled=True,
+                        ))
+                        print(f"[OBS] Added existing Discord_Audio to {SCENE_COMMS}")
+                    except Exception:
+                        pass
+            else:
+                print(f"[OBS] Discord_Audio already in {SCENE_COMMS}")
+
+            # ── Create R6_Game scene ──────────────────────────────────
+            if SCENE_GAME not in existing_scenes:
                 self._client.call(
                     obs_requests.CreateScene(sceneName=SCENE_GAME)
                 )
                 print(f"[OBS] Created scene: {SCENE_GAME}")
-                # Add Game Capture source for R6
-                self._client.call(obs_requests.CreateInput(
-                    sceneName=SCENE_GAME,
-                    inputName="R6_Game_Capture",
-                    inputKind="game_capture",
-                    inputSettings={
-                        "capture_mode": "window",
-                        "window":       "Rainbow Six Siege [RainbowSix.exe]",
-                        "allow_transparency": False,
-                    },
-                    sceneItemEnabled=True,
-                ))
-                # Add Desktop Audio for personal recordings
-                self._client.call(obs_requests.CreateInput(
-                    sceneName=SCENE_GAME,
-                    inputName="Desktop_Audio",
-                    inputKind="wasapi_output_capture",
-                    inputSettings={},
-                    sceneItemEnabled=True,
-                ))
-                print(f"[OBS] Added game capture and audio to {SCENE_GAME}")
             else:
                 print(f"[OBS] Scene exists: {SCENE_GAME}")
+
+            game_items = get_scene_items(SCENE_GAME)
+
+            # Add Game Capture source
+            if "R6_Game_Capture" not in game_items:
+                try:
+                    self._client.call(obs_requests.CreateInput(
+                        sceneName=SCENE_GAME,
+                        inputName="R6_Game_Capture",
+                        inputKind="game_capture",
+                        inputSettings={
+                            "capture_mode": "window",
+                            "window":       "Rainbow Six Siege [RainbowSix.exe]",
+                            "allow_transparency": False,
+                        },
+                        sceneItemEnabled=True,
+                    ))
+                    print(f"[OBS] Added R6_Game_Capture source to {SCENE_GAME}")
+                except Exception as e:
+                    print(f"[OBS] Could not add R6_Game_Capture: {e}")
+            else:
+                print(f"[OBS] R6_Game_Capture already in {SCENE_GAME}")
+
+            # Add Desktop Audio source
+            if "Desktop_Audio" not in game_items:
+                try:
+                    self._client.call(obs_requests.CreateInput(
+                        sceneName=SCENE_GAME,
+                        inputName="Desktop_Audio",
+                        inputKind="wasapi_output_capture",
+                        inputSettings={},
+                        sceneItemEnabled=True,
+                    ))
+                    print(f"[OBS] Added Desktop_Audio source to {SCENE_GAME}")
+                except Exception as e:
+                    print(f"[OBS] Could not add Desktop_Audio (may exist globally): {e}")
+                    try:
+                        self._client.call(obs_requests.CreateSceneItem(
+                            sceneName=SCENE_GAME,
+                            sourceName="Desktop_Audio",
+                            sceneItemEnabled=True,
+                        ))
+                        print(f"[OBS] Added existing Desktop_Audio to {SCENE_GAME}")
+                    except Exception:
+                        pass
+            else:
+                print(f"[OBS] Desktop_Audio already in {SCENE_GAME}")
 
             return True
 
@@ -221,6 +289,7 @@ class OBSController:
             print("[OBS] Create scenes manually in OBS if auto-setup fails.")
             return False
 
+    
 
     def start_comms_recording(self) -> bool:
         """Switch to comms scene and start recording."""

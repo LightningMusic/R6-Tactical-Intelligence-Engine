@@ -3,6 +3,7 @@ import json
 import time
 import tempfile
 import os
+import sys
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -10,6 +11,9 @@ from app.config import R6_DISSECT_PATH
 from models.import_result import ImportResult, ImportStatus
 from models.round import Round
 
+
+# Suppress CMD windows on Windows
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 MAP_ID_LOOKUP: dict[int, str] = {
     417890697769: "Clubhouse",
@@ -69,11 +73,8 @@ class RecImporter:
 
     For each round, extracts:
     - Round metadata (side, site, outcome, map)
-    - Per-player stats (kills, deaths, assists, headshots from stats field)
-    - Kill feed events from matchFeedback (KillEvent, PlantEvent)
-      → stored as RoundEvents on round_obj.round_events
-
-    All player data is stored on Round for consumption by SessionManager.
+    - Per-player stats (kills, deaths, assists from stats field)
+    - Kill feed events from matchFeedback
     """
 
     def __init__(
@@ -154,6 +155,8 @@ class RecImporter:
 
             except Exception as parse_err:
                 self._log(f"  ✗ {rec_file.name} — parse error: {parse_err}")
+                import traceback
+                self._log(f"    {traceback.format_exc()}")
                 failed_files.append(rec_file.name)
 
         if not parsed_rounds:
@@ -215,7 +218,7 @@ class RecImporter:
         return results
 
     # =====================================================
-    # INTERNAL: Run r6-dissect
+    # INTERNAL: Run r6-dissect (no CMD window)
     # =====================================================
 
     def _run_dissect_with_retry(
@@ -237,6 +240,7 @@ class RecImporter:
                     capture_output=True, text=True,
                     timeout=DISSECT_TIMEOUT,
                     cwd=str(self.dissect_path.parent),
+                    creationflags=_CREATE_NO_WINDOW,  # ← no CMD window
                 )
 
                 stderr = proc.stderr.strip() if proc.stderr else ""
@@ -423,6 +427,77 @@ class RecImporter:
     # INTERNAL: Parse one round
     # =====================================================
 
+    @staticmethod
+    def _extract_player_stats(player: dict) -> dict:
+        """
+        r6-dissect can store stats under multiple key paths.
+        Try all known variants and return the best dict found.
+        """
+        # Primary: player.stats
+        stats = player.get("stats")
+        if isinstance(stats, dict) and stats:
+            return stats
+
+        # Some versions use player.roundStats or player.playerStats
+        for key in ("roundStats", "playerStats", "stat"):
+            alt = player.get(key)
+            if isinstance(alt, dict) and alt:
+                return alt
+
+        # Fallback: check if kills/deaths are top-level on the player dict
+        if "kills" in player or "deaths" in player:
+            return {
+                "kills":     player.get("kills", 0),
+                "deaths":    player.get("deaths", 0),
+                "assists":   player.get("assists", 0),
+                "headshots": player.get("headshots", 0),
+            }
+
+        return {}
+
+    @staticmethod
+    def _extract_operator_name(player: dict) -> str:
+        """
+        r6-dissect stores operator info under multiple paths.
+        Try all known variants.
+        """
+        # Primary: player.operator.name
+        op_data = player.get("operator")
+        if isinstance(op_data, dict):
+            name = op_data.get("name") or op_data.get("operatorName") or ""
+            if name:
+                return str(name).strip()
+
+        # Some versions use player.operatorName directly
+        for key in ("operatorName", "operator_name", "operatorname"):
+            val = player.get(key)
+            if val:
+                return str(val).strip()
+
+        return ""
+
+    @staticmethod
+    def _extract_match_feedback(data: dict) -> list:
+        """
+        r6-dissect can store matchFeedback at the top level or
+        nested inside rounds[0] or similar. Find it.
+        """
+        # Top-level (most common)
+        fb = data.get("matchFeedback")
+        if isinstance(fb, list) and fb:
+            return fb
+
+        # Sometimes nested under "rounds" array
+        rounds_data = data.get("rounds")
+        if isinstance(rounds_data, list):
+            for r in rounds_data:
+                if isinstance(r, dict):
+                    fb2 = r.get("matchFeedback")
+                    if isinstance(fb2, list) and fb2:
+                        return fb2
+
+        return []
+
     def _parse_round(self, data: dict) -> tuple[Round, dict]:
         recording_player_id           = data.get("recordingPlayerID")
         our_team_index: Optional[int] = None
@@ -462,30 +537,40 @@ class RecImporter:
                     f"in round {data.get('roundNumber','?')} — guessing from team 0"
                 )
 
-        # ── Build raw player stats from player.stats ──────────────
+        # ── Build raw player stats — try multiple field paths ──────
         raw_player_stats: list[dict] = []
         for player in data.get("players", []):
-            team_idx  = player.get("teamIndex", -1)
-            stats_raw = player.get("stats", {}) or {}
-            op_data   = player.get("operator") or {}
+            team_idx   = player.get("teamIndex", -1)
+            stats_raw  = self._extract_player_stats(player)
+            op_name    = self._extract_operator_name(player)
+
+            kills    = int(stats_raw.get("kills",     0) or 0)
+            deaths   = int(stats_raw.get("deaths",    0) or 0)
+            assists  = int(stats_raw.get("assists",   0) or 0)
+            headshots = int(stats_raw.get("headshots", 0) or 0)
+
             raw_player_stats.append({
                 "username":    str(player.get("username") or "").strip(),
-                "operator":    str(op_data.get("name") or "").strip(),
-                "kills":       int(stats_raw.get("kills",      0) or 0),
-                "deaths":      int(stats_raw.get("deaths",     0) or 0),
-                "assists":     int(stats_raw.get("assists",    0) or 0),
-                "headshots":   int(stats_raw.get("headshots",  0) or 0),
+                "operator":    op_name,
+                "kills":       kills,
+                "deaths":      deaths,
+                "assists":     assists,
+                "headshots":   headshots,
                 "teamIndex":   team_idx,
                 "is_our_team": (team_idx == our_team_index),
             })
 
-        # ── Parse kill feed from matchFeedback ────────────────────
+        # ── Parse kill feed — try multiple locations in JSON ───────
         round_events = None
         try:
             from analysis.event_parser import parse_round_events
             if our_team_index is not None:
+                # Inject extracted feedback into a copy of data for the parser
+                data_with_fb = dict(data)
+                fb = self._extract_match_feedback(data)
+                data_with_fb["matchFeedback"] = fb
                 round_events = parse_round_events(
-                    data,
+                    data_with_fb,
                     our_team_index=our_team_index,
                     round_outcome=outcome,
                 )

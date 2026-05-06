@@ -6,8 +6,6 @@ from typing import Optional
 # =====================================================
 # R6 CALLOUT VOCABULARY
 # =====================================================
-# These are common callouts used in R6 comms.
-# Organized by category for pattern matching.
 
 LOCATION_CALLOUTS: set[str] = {
     # Generic positions
@@ -19,6 +17,10 @@ LOCATION_CALLOUTS: set[str] = {
     "north", "south", "east", "west",
     "left", "right", "above", "below",
     "outside", "inside", "upstairs", "downstairs",
+    # Tactical positions
+    "flank", "rotate", "plant", "bomb", "defuser",
+    "breach", "roam", "anchor", "peek", "angle", "corner",
+    "site", "spawn", "obj", "objective",
 }
 
 ACTION_CALLOUTS: set[str] = {
@@ -32,16 +34,22 @@ ACTION_CALLOUTS: set[str] = {
     # Utility
     "drone", "gadget", "ability", "grenade", "smoke",
     "flash", "breach", "nitro", "claymore", "barbed",
+    # Engagement callouts
+    "contact", "engaged", "shooting", "traded", "clutch",
+    "repositioning", "falling",
+}
+
+# Words that strongly indicate an active fight/engagement
+ENGAGEMENT_WORDS: set[str] = {
+    "down", "dead", "contact", "engaged", "shooting", "traded",
+    "clutch", "kill", "died", "shot", "push", "pushing",
+    "last", "one left", "two left", "three left",
 }
 
 CALLOUT_PATTERNS: list[str] = [
-    # "X on/at/in/from Y"
     r"\b(\w+)\s+(?:on|at|in|from)\s+(\w+)\b",
-    # "X is Y" (enemy is pushing)
     r"\b(\w+)\s+is\s+(\w+ing)\b",
-    # "watch X" / "cover X"
     r"\b(?:watch|cover|check|clear)\s+(\w+)\b",
-    # Numbers like "2 on site" / "1 left"
     r"\b(\d+)\s+(?:on\s+site|remaining|left|alive|down)\b",
 ]
 
@@ -52,11 +60,21 @@ CALLOUT_PATTERNS: list[str] = [
 
 @dataclass
 class Callout:
-    timestamp: float          # seconds from session start
-    raw_text:  str            # original whisper text
-    category:  str            # "location" | "action" | "count" | "unknown"
+    timestamp: float
+    raw_text:  str
+    category:  str
     keywords:  list[str] = field(default_factory=list)
-    confidence: float = 1.0   # 0.0–1.0
+    confidence: float = 1.0
+
+
+@dataclass
+class FightSilence:
+    """Represents a detected window where a fight occurred with no intel given."""
+    start_sec:     float
+    end_sec:       float
+    gap_sec:       float
+    prior_callout: str
+    next_callout:  str
 
 
 @dataclass
@@ -68,6 +86,7 @@ class ParsedTranscript:
     action_freq:      dict[str, int]      = field(default_factory=dict)
     coordination_gaps: list[float]        = field(default_factory=list)
     silence_periods:  list[tuple[float, float]] = field(default_factory=list)
+    fight_silences:   list[FightSilence]  = field(default_factory=list)
     word_count:       int = 0
     duration_sec:     float = 0.0
 
@@ -81,11 +100,12 @@ class TranscriptParser:
     Parses Whisper transcript output into structured tactical data.
 
     Input:  Whisper result dict with 'text' and 'segments' keys.
-    Output: ParsedTranscript with callouts, frequencies, and gaps.
+    Output: ParsedTranscript with callouts, frequencies, gaps,
+            and fight_silences (prolonged fights without intel).
     """
 
-    # Minimum gap in seconds to count as a "coordination gap"
     SILENCE_THRESHOLD_SEC: float = 8.0
+    FIGHT_SILENCE_MIN_SEC: float = 15.0   # gap between engagement callouts = no intel
 
     def __init__(self) -> None:
         self._compiled_patterns = [
@@ -101,10 +121,6 @@ class TranscriptParser:
         whisper_result: dict,
         match_id: Optional[int] = None,
     ) -> ParsedTranscript:
-        """
-        Main entry point. Accepts a Whisper result dict.
-        Returns a fully populated ParsedTranscript.
-        """
         raw_text = whisper_result.get("text", "").strip()
         segments: list[dict] = whisper_result.get("segments", [])
 
@@ -120,17 +136,14 @@ class TranscriptParser:
             if callout:
                 result.callouts.append(callout)
 
-        result.location_freq = self._build_frequency(
-            result.callouts, "location"
-        )
-        result.action_freq = self._build_frequency(
-            result.callouts, "action"
-        )
+        result.location_freq = self._build_frequency(result.callouts, "location")
+        result.action_freq   = self._build_frequency(result.callouts, "action")
         result.silence_periods = self._detect_silence(segments)
         result.coordination_gaps = [
             start for start, end in result.silence_periods
             if (end - start) >= self.SILENCE_THRESHOLD_SEC
         ]
+        result.fight_silences = self._detect_fight_silences(segments)
 
         return result
 
@@ -139,15 +152,58 @@ class TranscriptParser:
         segments: list[dict],
         match_id: Optional[int] = None,
     ) -> ParsedTranscript:
-        """
-        Convenience method when you already have the segments list
-        (e.g. after clip_to_match in WhisperTranscriber).
-        """
         full_text = " ".join(s.get("text", "").strip() for s in segments)
         return self.parse(
             {"text": full_text, "segments": segments},
             match_id=match_id,
         )
+
+    # =====================================================
+    # FIGHT SILENCE DETECTION
+    # =====================================================
+
+    def _has_engagement_content(self, text: str) -> bool:
+        """Returns True if text contains words indicating an active fight."""
+        lower = text.lower()
+        return any(w in lower for w in ENGAGEMENT_WORDS)
+
+    def _detect_fight_silences(self, segments: list[dict]) -> list[FightSilence]:
+        """
+        Finds gaps ≥ FIGHT_SILENCE_MIN_SEC between engagement-related callouts.
+
+        These represent moments where someone was likely in a fight but said
+        nothing — no intel to the team. The longer the gap, the worse the
+        communication breakdown.
+        """
+        # Collect segments containing engagement language
+        fight_segs = [
+            s for s in segments
+            if isinstance(s, dict) and self._has_engagement_content(
+                str(s.get("text", ""))
+            )
+        ]
+
+        silences: list[FightSilence] = []
+
+        for i in range(1, len(fight_segs)):
+            prev = fight_segs[i - 1]
+            curr = fight_segs[i]
+            prev_end   = float(prev.get("end",   0.0))
+            curr_start = float(curr.get("start", 0.0))
+            gap = curr_start - prev_end
+
+            if gap >= self.FIGHT_SILENCE_MIN_SEC:
+                silences.append(FightSilence(
+                    start_sec=round(prev_end, 1),
+                    end_sec=round(curr_start, 1),
+                    gap_sec=round(gap, 1),
+                    prior_callout=str(prev.get("text", "")).strip()[:100],
+                    next_callout=str(curr.get("text", "")).strip()[:100],
+                ))
+
+        # Sort by longest gap first
+        silences.sort(key=lambda s: s.gap_sec, reverse=True)
+        return silences
 
     # =====================================================
     # SEGMENT PARSING
@@ -164,11 +220,9 @@ class TranscriptParser:
         keywords: list[str] = []
         category = "unknown"
 
-        # Check against vocabulary sets
         loc_hits    = [w for w in words if w in LOCATION_CALLOUTS]
         action_hits = [w for w in words if w in ACTION_CALLOUTS]
 
-        # Check count patterns ("2 on site", "1 left")
         count_hits = re.findall(
             r"\b(\d+)\s+(?:on\s+site|remaining|left|alive|down)\b",
             text, re.IGNORECASE
@@ -184,7 +238,6 @@ class TranscriptParser:
             keywords += [f"count:{n}" for n in count_hits]
             category  = "count" if category == "unknown" else category
 
-        # Pattern matching for compound callouts
         for pattern in self._compiled_patterns:
             for match in pattern.finditer(text):
                 for group in match.groups():
@@ -192,7 +245,7 @@ class TranscriptParser:
                         keywords.append(group.lower())
 
         if not keywords and category == "unknown":
-            return None   # Skip segments with no tactical content
+            return None
 
         return Callout(
             timestamp=start_sec,
@@ -229,21 +282,13 @@ class TranscriptParser:
         self,
         segments: list[dict],
     ) -> list[tuple[float, float]]:
-        """
-        Returns (start, end) pairs of silence periods between segments.
-        Whisper only produces segments where speech was detected, so
-        gaps between segment end/start timestamps = silence.
-        """
         gaps: list[tuple[float, float]] = []
-
         for i in range(1, len(segments)):
             prev_end   = segments[i - 1].get("end",   0.0)
             curr_start = segments[i].get("start", 0.0)
             gap        = curr_start - prev_end
-
-            if gap >= 2.0:   # ignore sub-2s gaps (breathing, pauses)
+            if gap >= 2.0:
                 gaps.append((prev_end, curr_start))
-
         return gaps
 
     # =====================================================
@@ -251,10 +296,6 @@ class TranscriptParser:
     # =====================================================
 
     def _score_confidence(self, keywords: list[str]) -> float:
-        """
-        Simple heuristic — more recognized keywords = higher confidence.
-        Max out at 1.0 with 3+ known keywords.
-        """
         known = sum(
             1 for k in keywords
             if k in LOCATION_CALLOUTS or k in ACTION_CALLOUTS
@@ -269,6 +310,7 @@ class TranscriptParser:
         """
         Produces a flat summary dict suitable for the IntelEngine prompt
         and for storage in derived_metrics.
+        Includes fight_silence data for intel gap detection.
         """
         top_locations = list(parsed.location_freq.keys())[:5]
         top_actions   = list(parsed.action_freq.keys())[:5]
@@ -279,15 +321,29 @@ class TranscriptParser:
             if gap_count > 0 else 0.0
         )
 
+        # Fight silence summary
+        fight_silence_count = len(parsed.fight_silences)
+        worst_silences = [
+            {
+                "gap_sec":       fs.gap_sec,
+                "start_sec":     fs.start_sec,
+                "prior_callout": fs.prior_callout,
+                "next_callout":  fs.next_callout,
+            }
+            for fs in parsed.fight_silences[:3]  # top 3 worst
+        ]
+
         return {
-            "word_count":        parsed.word_count,
-            "duration_sec":      round(parsed.duration_sec, 1),
-            "callout_count":     len(parsed.callouts),
-            "top_locations":     top_locations,
-            "top_actions":       top_actions,
-            "coordination_gaps": gap_count,
-            "avg_gap_sec":       round(avg_gap, 1),
-            "silence_periods":   len(parsed.silence_periods),
+            "word_count":             parsed.word_count,
+            "duration_sec":           round(parsed.duration_sec, 1),
+            "callout_count":          len(parsed.callouts),
+            "top_locations":          top_locations,
+            "top_actions":            top_actions,
+            "coordination_gaps":      gap_count,
+            "avg_gap_sec":            round(avg_gap, 1),
+            "silence_periods":        len(parsed.silence_periods),
+            "fight_silence_count":    fight_silence_count,
+            "worst_fight_silences":   worst_silences,
         }
 
     def to_storage_dict(self, parsed: ParsedTranscript) -> dict:
@@ -314,5 +370,16 @@ class TranscriptParser:
             "silence_periods":  [
                 {"start": s, "end": e}
                 for s, e in parsed.silence_periods
+            ],
+            "fight_silence_count":  len(parsed.fight_silences),
+            "fight_silences": [
+                {
+                    "start_sec":     fs.start_sec,
+                    "end_sec":       fs.end_sec,
+                    "gap_sec":       fs.gap_sec,
+                    "prior_callout": fs.prior_callout,
+                    "next_callout":  fs.next_callout,
+                }
+                for fs in parsed.fight_silences
             ],
         }
