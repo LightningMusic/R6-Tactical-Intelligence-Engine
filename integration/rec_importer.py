@@ -3,6 +3,7 @@ import json
 import time
 import tempfile
 import os
+import sys
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -10,6 +11,9 @@ from app.config import R6_DISSECT_PATH
 from models.import_result import ImportResult, ImportStatus
 from models.round import Round
 
+
+# Suppress CMD windows on Windows
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 MAP_ID_LOOKUP: dict[int, str] = {
     417890697769: "Clubhouse",
@@ -38,9 +42,24 @@ MAP_ID_LOOKUP: dict[int, str] = {
     108180662680: "Close Quarter",
     108180662968: "Favela",
     108180728456: "Donut",
-    430788891316: "Theme Park",  # ThemeParkY11 — showing as Map(430788891316)
-    409325881472: "Chalet",      # ChaletY11
-    436375283234: "Villa",       # VillaY10
+    413779563590: "Bank",
+    407987100456: "Border",
+    407558616688: "Chalet",
+    407193663917: "Clubhouse",
+    413845419788: "Kafe Dostoyevsky",
+    418119057546: "Nighthaven Labs",
+    418126004176: "Consulate",
+    409325881472: "Chalet",
+    436375283234: "Villa",
+    430788891316: "Theme Park",
+    398899676157: "Fortress",
+    423767322185: "Skyscraper",
+    409880628150: "Oregon",
+    412551493246: "Coastline",
+    415956890521: "Outback",
+    419662876236: "Border",
+    422790217276: "Clubhouse",
+    434715462383: "Oregon",
 }
 
 MAX_RETRIES     = 5
@@ -51,9 +70,11 @@ DISSECT_TIMEOUT = 90
 class RecImporter:
     """
     Parses match replay folders using r6-dissect.
-    Uses temp file output (more reliable than stdout capture).
-    Sequential processing only — no threads (avoids UI deadlocks).
-    Retries each file up to MAX_RETRIES times.
+
+    For each round, extracts:
+    - Round metadata (side, site, outcome, map)
+    - Per-player stats (kills, deaths, assists from stats field)
+    - Kill feed events from matchFeedback
     """
 
     def __init__(
@@ -68,10 +89,6 @@ class RecImporter:
             raise FileNotFoundError(
                 f"r6-dissect not found at {self.dissect_path}"
             )
-
-    # =====================================================
-    # PUBLIC: Single folder — sequential
-    # =====================================================
 
     def import_match_folder(self, folder: Path) -> ImportResult:
         rec_files = sorted(folder.glob("*.rec"))
@@ -96,9 +113,7 @@ class RecImporter:
             raw, err = self._run_dissect_with_retry(rec_file)
 
             if raw is None:
-                self._log(
-                    f"  ✗ {rec_file.name} — all {MAX_RETRIES} attempts failed: {err}"
-                )
+                self._log(f"  ✗ {rec_file.name} — all {MAX_RETRIES} attempts failed: {err}")
                 failed_files.append(rec_file.name)
                 continue
 
@@ -114,14 +129,34 @@ class RecImporter:
                 if score_them is None and meta.get("score_them") is not None:
                     score_them = meta["score_them"]
 
+                our_stats   = [p for p in round_obj.raw_player_stats if p.get("is_our_team")]
+                their_stats = [p for p in round_obj.raw_player_stats if not p.get("is_our_team")]
+                our_k = sum(p["kills"]  for p in our_stats)
+                our_d = sum(p["deaths"] for p in our_stats)
+
+                # Log kill feed summary
+                ev = round_obj.round_events
+                fb_note = ""
+                if ev:
+                    fb_note = f" | feed: {len(ev.kills)}K"
+                    if ev.first_blood_killer:
+                        fb_note += f" | FB:{ev.first_blood_killer}"
+                    if ev.clutch_player:
+                        fb_note += f" | clutch:{ev.clutch_player}"
+
                 self._log(
                     f"  ✓ R{round_obj.round_number} "
                     f"| {round_obj.side} | {round_obj.outcome}"
                     f" | site: {round_obj.site or '?'}"
+                    f" | K/D: {our_k}/{our_d}"
+                    f" | {len(our_stats)} ours, {len(their_stats)} theirs"
+                    f"{fb_note}"
                 )
 
             except Exception as parse_err:
                 self._log(f"  ✗ {rec_file.name} — parse error: {parse_err}")
+                import traceback
+                self._log(f"    {traceback.format_exc()}")
                 failed_files.append(rec_file.name)
 
         if not parsed_rounds:
@@ -137,12 +172,9 @@ class RecImporter:
             )
 
         if failed_files:
-            msg = (
-                f"{len(parsed_rounds)}/{len(rec_files)} rounds parsed. "
-                f"Failed: {', '.join(failed_files)}"
-            )
-            self._log(f"PARTIAL: {msg}")
+            msg    = f"{len(parsed_rounds)}/{len(rec_files)} rounds parsed. Failed: {', '.join(failed_files)}"
             status = ImportStatus.PARTIAL_FAILURE
+            self._log(f"PARTIAL: {msg}")
         else:
             msg    = None
             status = ImportStatus.SUCCESS
@@ -157,18 +189,13 @@ class RecImporter:
             error_message=msg,
         )
 
-    # =====================================================
-    # PUBLIC: Multiple folders — sequential, no threads
-    # =====================================================
-
     def import_multiple_folders(
         self,
         folders: list[Path],
-        max_workers: int = 1,       # ignored — always sequential
+        max_workers: int = 1,
         log_callback: Optional[Callable[[str], None]] = None,
     ) -> list[ImportResult]:
         results: list[ImportResult] = []
-
         msg = f"Importing {len(folders)} folder(s) sequentially..."
         self._log(msg)
         if log_callback:
@@ -183,10 +210,7 @@ class RecImporter:
             result = self.import_match_folder(folder)
             results.append(result)
 
-            summary = (
-                f"Folder {i+1} done: {result.status.value} "
-                f"— {len(result.rounds)} rounds"
-            )
+            summary = f"Folder {i+1} done: {result.status.value} — {len(result.rounds)} rounds"
             self._log(summary)
             if log_callback:
                 log_callback(summary)
@@ -194,7 +218,7 @@ class RecImporter:
         return results
 
     # =====================================================
-    # INTERNAL: Run r6-dissect via temp file output
+    # INTERNAL: Run r6-dissect (no CMD window)
     # =====================================================
 
     def _run_dissect_with_retry(
@@ -211,16 +235,12 @@ class RecImporter:
 
             try:
                 proc = subprocess.run(
-                    [
-                        str(self.dissect_path),
-                        str(rec_file),
-                        "--format", "json",
-                        "--output", str(tmp_path),
-                    ],
-                    capture_output=True,
-                    text=True,
+                    [str(self.dissect_path), str(rec_file),
+                     "--format", "json", "--output", str(tmp_path)],
+                    capture_output=True, text=True,
                     timeout=DISSECT_TIMEOUT,
                     cwd=str(self.dissect_path.parent),
+                    creationflags=_CREATE_NO_WINDOW,  # ← no CMD window
                 )
 
                 stderr = proc.stderr.strip() if proc.stderr else ""
@@ -231,22 +251,14 @@ class RecImporter:
                         if line.startswith("panic:") or "unknown" in line.lower()
                     ]
                     panic_msg = panic_lines[0] if panic_lines else stderr[:150]
-
-                    # Only skip retries for unknown operator — that's truly unrecoverable
-                    # with the old binary. Index errors and other panics may be transient.
                     if "role unknown for operator" in panic_msg.lower():
-                        self._log(
-                            f"    r6-dissect crashed: {panic_msg}\n"
-                            f"    Unknown operator — rebuild r6-dissect with the patched binary."
-                        )
+                        self._log(f"    r6-dissect crashed: {panic_msg}")
                         return None, f"r6-dissect outdated: {panic_msg}"
                     else:
-                        # All other panics: log and retry normally
                         last_error = f"r6-dissect panic: {panic_msg}"
                         self._log(f"    Attempt {attempt}: {last_error}")
                         continue
 
-                # Check temp file first
                 if tmp_path.exists() and tmp_path.stat().st_size > 0:
                     try:
                         content = tmp_path.read_text(encoding="utf-8", errors="ignore")
@@ -261,7 +273,6 @@ class RecImporter:
                         except Exception:
                             pass
 
-                # Fallback: stdout
                 stdout = proc.stdout.strip() if proc.stdout else ""
                 if stdout:
                     data = self._parse_json_safe(stdout, rec_file.name)
@@ -282,7 +293,6 @@ class RecImporter:
                     tmp_path.unlink()
                 except Exception:
                     pass
-
             except Exception as e:
                 last_error = str(e)
                 self._log(f"    Attempt {attempt}: {last_error}")
@@ -293,28 +303,17 @@ class RecImporter:
 
         return None, last_error
 
-    def _parse_json_safe(
-        self, text: str, filename: str
-    ) -> Optional[dict]:
-        """
-        Parses JSON from text, handling leading garbage.
-        Returns None if no valid JSON found.
-        """
+    def _parse_json_safe(self, text: str, filename: str) -> Optional[dict]:
         text = text.strip()
         if not text:
             return None
-
-        # Find the first '{' — skip any BOM or debug output before JSON
         json_start = text.find("{")
         if json_start == -1:
             self._log(f"    No JSON object found in output for {filename}")
             return None
-
         try:
             return json.loads(text[json_start:])
         except json.JSONDecodeError as e:
-            # Try to find a complete JSON object
-            # r6-dissect sometimes writes multiple objects
             brace_depth = 0
             json_end    = -1
             for i, ch in enumerate(text[json_start:], start=json_start):
@@ -334,8 +333,170 @@ class RecImporter:
             return None
 
     # =====================================================
-    # INTERNAL: Parse one round's data
+    # STATIC HELPERS
     # =====================================================
+
+    @staticmethod
+    def _safe_int(value: object) -> Optional[int]:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _determine_win_type(our_team: dict, their_team: dict) -> str:
+        def norm(x: object) -> str:
+            return str(x or "").strip()
+        our_wc   = norm(our_team.get("winCondition"))
+        their_wc = norm(their_team.get("winCondition"))
+        wc = our_wc or their_wc
+        if not wc:
+            return "unknown"
+        if wc == "KilledOpponents":
+            return "kill"
+        if wc in ("DefusedBomb", "DisabledDefuser"):
+            return "plant"
+        if wc == "Time":
+            return "time"
+        if wc in ("ExtractedHostage", "ProtectedHostage"):
+            return "hostage"
+        if wc == "SecuredArea":
+            return "secure"
+        return "other"
+
+    @staticmethod
+    def _determine_outcome(our_team: dict, their_team: dict, round_num: object) -> str:
+        def norm(x: object) -> str:
+            return str(x or "").strip()
+
+        our_score   = RecImporter._safe_int(our_team.get("score"))
+        their_score = RecImporter._safe_int(their_team.get("score"))
+        our_start   = RecImporter._safe_int(our_team.get("startingScore")) \
+                      if our_team.get("startingScore") is not None else our_score
+        their_start = RecImporter._safe_int(their_team.get("startingScore")) \
+                      if their_team.get("startingScore") is not None else their_score
+
+        if (our_score is not None and their_score is not None
+                and our_start is not None and their_start is not None):
+            our_gained   = our_score   - our_start
+            their_gained = their_score - their_start
+            if our_gained > their_gained:
+                return "win"
+            if their_gained > our_gained:
+                return "loss"
+
+        our_won   = our_team.get("won")
+        their_won = their_team.get("won")
+        if our_won is True and their_won is not True:
+            return "win"
+        if their_won is True and our_won is not True:
+            return "loss"
+
+        our_wc   = norm(our_team.get("winCondition"))
+        their_wc = norm(their_team.get("winCondition"))
+        role_raw      = norm(our_team.get("role")).lower()
+        our_is_attack = role_raw in ("attack", "1")
+
+        ATTACK_WIN  = {"KilledOpponents", "DefusedBomb", "ExtractedHostage", "SecuredArea"}
+        DEFENSE_WIN = {"DisabledDefuser", "KilledOpponents", "Time", "ProtectedHostage"}
+
+        if our_wc and not their_wc:
+            return "win" if our_wc in (ATTACK_WIN if our_is_attack else DEFENSE_WIN) else "loss"
+        if their_wc and not our_wc:
+            return "loss" if their_wc in (DEFENSE_WIN if our_is_attack else ATTACK_WIN) else "win"
+        if our_wc and their_wc:
+            if our_is_attack:
+                if our_wc in ATTACK_WIN and their_wc not in ATTACK_WIN:
+                    return "win"
+                if their_wc in ATTACK_WIN and our_wc not in ATTACK_WIN:
+                    return "loss"
+            else:
+                if our_wc in DEFENSE_WIN and their_wc not in DEFENSE_WIN:
+                    return "win"
+                if their_wc in DEFENSE_WIN and our_wc not in DEFENSE_WIN:
+                    return "loss"
+
+        print(
+            f"[RecImporter] Warning: ambiguous outcome for round {round_num}. "
+            f"our_wc={our_wc!r} their_wc={their_wc!r} "
+            f"our_won={our_won} their_won={their_won} → defaulting to loss"
+        )
+        return "loss"
+
+    # =====================================================
+    # INTERNAL: Parse one round
+    # =====================================================
+
+    @staticmethod
+    def _extract_player_stats(player: dict) -> dict:
+        """
+        r6-dissect can store stats under multiple key paths.
+        Try all known variants and return the best dict found.
+        """
+        # Primary: player.stats
+        stats = player.get("stats")
+        if isinstance(stats, dict) and stats:
+            return stats
+
+        # Some versions use player.roundStats or player.playerStats
+        for key in ("roundStats", "playerStats", "stat"):
+            alt = player.get(key)
+            if isinstance(alt, dict) and alt:
+                return alt
+
+        # Fallback: check if kills/deaths are top-level on the player dict
+        if "kills" in player or "deaths" in player:
+            return {
+                "kills":     player.get("kills", 0),
+                "deaths":    player.get("deaths", 0),
+                "assists":   player.get("assists", 0),
+                "headshots": player.get("headshots", 0),
+            }
+
+        return {}
+
+    @staticmethod
+    def _extract_operator_name(player: dict) -> str:
+        """
+        r6-dissect stores operator info under multiple paths.
+        Try all known variants.
+        """
+        # Primary: player.operator.name
+        op_data = player.get("operator")
+        if isinstance(op_data, dict):
+            name = op_data.get("name") or op_data.get("operatorName") or ""
+            if name:
+                return str(name).strip()
+
+        # Some versions use player.operatorName directly
+        for key in ("operatorName", "operator_name", "operatorname"):
+            val = player.get(key)
+            if val:
+                return str(val).strip()
+
+        return ""
+
+    @staticmethod
+    def _extract_match_feedback(data: dict) -> list:
+        """
+        r6-dissect can store matchFeedback at the top level or
+        nested inside rounds[0] or similar. Find it.
+        """
+        # Top-level (most common)
+        fb = data.get("matchFeedback")
+        if isinstance(fb, list) and fb:
+            return fb
+
+        # Sometimes nested under "rounds" array
+        rounds_data = data.get("rounds")
+        if isinstance(rounds_data, list):
+            for r in rounds_data:
+                if isinstance(r, dict):
+                    fb2 = r.get("matchFeedback")
+                    if isinstance(fb2, list) and fb2:
+                        return fb2
+
+        return []
 
     def _parse_round(self, data: dict) -> tuple[Round, dict]:
         recording_player_id           = data.get("recordingPlayerID")
@@ -350,57 +511,71 @@ class RecImporter:
         score_us:   Optional[int] = None
         score_them: Optional[int] = None
         our_side:   Optional[str] = None
-        outcome:    Optional[str] = None
+        outcome:    str           = "loss"
 
         if our_team_index is not None and len(teams) >= 2:
-            our_team    = teams[our_team_index]
-            other_idx   = 1 - our_team_index
-            their_team  = teams[other_idx]
+            our_team   = teams[our_team_index]
+            other_idx  = 1 - our_team_index
+            their_team = teams[other_idx]
 
             role_raw = str(our_team.get("role", "")).lower()
             our_side = "attack" if role_raw in ("attack", "1") else "defense"
 
-            score_us   = our_team.get("score")
-            score_them = their_team.get("score")
+            score_us   = RecImporter._safe_int(our_team.get("score"))
+            score_them = RecImporter._safe_int(their_team.get("score"))
 
-            # ── Primary: score delta ───────────────────────────────
-            our_start   = our_team.get("startingScore",   score_us)
-            their_start = their_team.get("startingScore", score_them)
+            outcome = RecImporter._determine_outcome(
+                our_team, their_team, data.get("roundNumber", "?")
+            )
+        else:
+            if len(teams) == 2:
+                t0_won   = teams[0].get("won", False)
+                our_side = "attack"
+                outcome  = "win" if t0_won else "loss"
+                print(
+                    f"[RecImporter] Warning: could not find recording player "
+                    f"in round {data.get('roundNumber','?')} — guessing from team 0"
+                )
 
-            our_gained   = (score_us   or 0) - (our_start   or 0)
-            their_gained = (score_them or 0) - (their_start or 0)
+        # ── Build raw player stats — try multiple field paths ──────
+        raw_player_stats: list[dict] = []
+        for player in data.get("players", []):
+            team_idx   = player.get("teamIndex", -1)
+            stats_raw  = self._extract_player_stats(player)
+            op_name    = self._extract_operator_name(player)
 
-            if our_gained > their_gained:
-                outcome = "win"
-            elif their_gained > our_gained:
-                outcome = "loss"
-            else:
-                # ── Fallback 1: won boolean ────────────────────────
-                our_won   = bool(our_team.get("won",   False))
-                their_won = bool(their_team.get("won", False))
+            kills    = int(stats_raw.get("kills",     0) or 0)
+            deaths   = int(stats_raw.get("deaths",    0) or 0)
+            assists  = int(stats_raw.get("assists",   0) or 0)
+            headshots = int(stats_raw.get("headshots", 0) or 0)
 
-                if our_won and not their_won:
-                    outcome = "win"
-                elif their_won and not our_won:
-                    outcome = "loss"
-                else:
-                    # ── Fallback 2: winCondition ───────────────────
-                    our_wc   = str(our_team.get("winCondition",   "") or "")
-                    their_wc = str(their_team.get("winCondition", "") or "")
+            raw_player_stats.append({
+                "username":    str(player.get("username") or "").strip(),
+                "operator":    op_name,
+                "kills":       kills,
+                "deaths":      deaths,
+                "assists":     assists,
+                "headshots":   headshots,
+                "teamIndex":   team_idx,
+                "is_our_team": (team_idx == our_team_index),
+            })
 
-                    if our_wc and not their_wc:
-                        outcome = "win"
-                    elif their_wc and not our_wc:
-                        outcome = "loss"
-                    else:
-                        # Final fallback
-                        outcome = "loss"
-                        print(
-                            f"[RecImporter] Warning: ambiguous outcome for round "
-                            f"{data.get('roundNumber','?')} — defaulting to loss. "
-                            f"our_wc={our_wc!r} their_wc={their_wc!r} "
-                            f"our_won={our_won} their_won={their_won}"
-                        )
+        # ── Parse kill feed — try multiple locations in JSON ───────
+        round_events = None
+        try:
+            from analysis.event_parser import parse_round_events
+            if our_team_index is not None:
+                # Inject extracted feedback into a copy of data for the parser
+                data_with_fb = dict(data)
+                fb = self._extract_match_feedback(data)
+                data_with_fb["matchFeedback"] = fb
+                round_events = parse_round_events(
+                    data_with_fb,
+                    our_team_index=our_team_index,
+                    round_outcome=outcome,
+                )
+        except Exception as ev_err:
+            print(f"[RecImporter] Event parse warning: {ev_err}")
 
         map_data   = data.get("map", {})
         map_id_raw = map_data.get("id")
@@ -410,51 +585,21 @@ class RecImporter:
         if isinstance(round_number, int):
             round_number = round_number + 1
 
-        # ── Extract player kill/death stats from the replay ───────
-        # r6-dissect exposes per-player stats in data["players"]
-        # and also sometimes in data["stats"] or data["matchFeedback"]
-        # We pull what we can and store it in meta for the caller.
-        player_stats_raw: list[dict] = []
-        our_team_kills = 0
-
-        for player in data.get("players", []):
-            team_idx = player.get("teamIndex", -1)
-            stats    = player.get("stats", {}) or {}
-
-            kills   = int(stats.get("kills",   0) or 0)
-            deaths  = int(stats.get("deaths",  0) or 0)
-            assists = int(stats.get("assists", 0) or 0)
-
-            player_stats_raw.append({
-                "id":        player.get("id"),
-                "username":  player.get("username", ""),
-                "teamIndex": team_idx,
-                "kills":     kills,
-                "deaths":    deaths,
-                "assists":   assists,
-                "operator":  player.get("operator", {}).get("name", ""),
-                "side":      "attack" if team_idx == (our_team_index or 0) else "defense",
-            })
-
-            if team_idx == our_team_index:
-                our_team_kills += kills
-
         round_obj = Round(
             round_id=None,
             match_id=None,
             round_number=max(1, round_number),
             side=our_side or "attack",
-            site=data.get("site", ""),
-            outcome=outcome or "loss",
+            site=str(data.get("site") or ""),
+            outcome=outcome,
             resources=None,
             player_stats=[],
+            raw_player_stats=raw_player_stats,
+            round_events=round_events,
         )
 
         return round_obj, {
-            "map_name":          map_name,
-            "score_us":          score_us,
-            "score_them":        score_them,
-            "player_stats_raw":  player_stats_raw,
-            "our_team_index":    our_team_index,
-            "our_team_kills":    our_team_kills,
+            "map_name":   map_name,
+            "score_us":   score_us,
+            "score_them": score_them,
         }

@@ -1,6 +1,6 @@
 from database.db_manager import DatabaseManager
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 
 def run_migrations(db: DatabaseManager) -> None:
@@ -34,7 +34,6 @@ def run_migrations(db: DatabaseManager) -> None:
         # ── V2: maps table + map_id FK on matches + is_ai_generated ───────
         if current_version < 2:
 
-            # Maps table (may already exist from schema.sql on fresh installs)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS maps (
                     map_id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,17 +43,13 @@ def run_migrations(db: DatabaseManager) -> None:
                 )
             """)
 
-            # Add map_id FK column to matches (nullable, backwards compatible)
-            # SQLite doesn't support ADD COLUMN with FK directly, but the
-            # column itself is fine — FK is advisory on existing rows.
             try:
                 conn.execute(
                     "ALTER TABLE matches ADD COLUMN map_id INTEGER REFERENCES maps(map_id)"
                 )
             except Exception:
-                pass  # Column already exists — safe to ignore
+                pass  # Column already exists
 
-            # Add is_ai_generated to derived_metrics
             try:
                 conn.execute(
                     "ALTER TABLE derived_metrics ADD COLUMN "
@@ -62,9 +57,8 @@ def run_migrations(db: DatabaseManager) -> None:
                     "CHECK(is_ai_generated IN (0, 1))"
                 )
             except Exception:
-                pass  # Column already exists — safe to ignore
+                pass
 
-            # Back-fill map_id from the legacy map text column where possible
             conn.execute("""
                 UPDATE matches
                 SET map_id = (
@@ -73,13 +67,14 @@ def run_migrations(db: DatabaseManager) -> None:
                 WHERE map_id IS NULL
             """)
 
-            # In migrations.py, add to a new version 3 block:
+        # ── V3: metric_text column on derived_metrics ──────────────────────
+        if current_version < 3:
             try:
                 conn.execute(
                     "ALTER TABLE derived_metrics ADD COLUMN metric_text TEXT"
                 )
             except Exception:
-                pass
+                pass  # Column already exists — safe to ignore
 
         conn.commit()
 

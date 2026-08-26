@@ -3,7 +3,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QObject, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QTextEdit, QFileDialog, QMessageBox
+    QPushButton, QTextEdit, QFileDialog, QMessageBox, QInputDialog
 )
 from torch import layout
 
@@ -57,74 +57,110 @@ class RecordingView(QWidget):
         self._build_ui()
 
     def _shutdown_and_eject(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
-        confirm = QMessageBox.question(
-            self, "Shut Down & Eject",
-            "This will:\n"
-            "  1. Stop OBS recording (if active)\n"
-            "  2. Shut down the Ollama AI server\n"
-            "  3. Close R6 Analyzer\n"
-            "  4. Eject the USB drive\n\n"
-            "Proceed?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
+            from PySide6.QtWidgets import QMessageBox
+            confirm = QMessageBox.question(
+                self, "Shut Down & Eject",
+                "This will:\n"
+                "  1. Stop OBS recording (if active)\n"
+                "  2. Terminate OBS process\n"
+                "  3. Shut down the Ollama AI server\n"
+                "  4. Close R6 Analyzer\n"
+                "  5. Eject the USB drive\n\n"
+                "Proceed?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
 
-        self._log_message("Shutting down...")
+            self._log_message("Shutting down...")
 
-        # Stop recording if active
-        if self._session_active:
+            # ── Step 1: Stop OBS watchdog ─────────────────────────────
+            if hasattr(self, "_obs_watchdog"):
+                self._obs_watchdog.stop()
+
+            # ── Step 2: Stop OBS recording via websocket ──────────────
+            if self._session_active:
+                try:
+                    self.obs.stop_recording()
+                    self._log_message("OBS recording stopped.")
+                except Exception as e:
+                    self._log_message(f"OBS stop error: {e}")
+
+            # ── Step 3: Disconnect OBS websocket ──────────────────────
             try:
-                if hasattr(self, "_obs_watchdog"):
-                    self._obs_watchdog.stop()
-                self.obs.stop_recording()
-                self._log_message("OBS recording stopped.")
+                self.obs.disconnect()
+                self._log_message("OBS disconnected.")
+            except Exception:
+                pass
+
+            # ── Step 4: Kill OBS process entirely ─────────────────────
+            try:
+                import psutil
+                killed = 0
+                for proc in psutil.process_iter(["name", "pid"]):
+                    try:
+                        if proc.info["name"] and "obs64" in proc.info["name"].lower():
+                            proc.terminate()
+                            killed += 1
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                if killed:
+                    self._log_message(f"OBS process terminated ({killed} instance(s)).")
+                else:
+                    self._log_message("OBS process not found (already closed).")
             except Exception as e:
-                self._log_message(f"OBS stop error: {e}")
+                self._log_message(f"OBS process kill error: {e}")
 
-        # Stop Ollama
-        try:
-            from analysis.intel_engine import IntelEngine
-            _e = IntelEngine()
-            _e.shutdown()
-            self._log_message("Ollama server stopped.")
-        except Exception as e:
-            self._log_message(f"Ollama shutdown error: {e}")
+            # ── Step 5: Stop Ollama via IntelEngine + kill process ─────
+            try:
+                from analysis.intel_engine import IntelEngine
+                _e = IntelEngine()
+                _e.shutdown()
+                self._log_message("Ollama server stopped via API.")
+            except Exception as e:
+                self._log_message(f"Ollama shutdown error: {e}")
 
-        # Disconnect OBS
-        try:
-            self.obs.disconnect()
-            self._log_message("OBS disconnected.")
-        except Exception:
-            pass
+            # Kill ollama.exe process directly as backup
+            try:
+                import psutil
+                killed = 0
+                for proc in psutil.process_iter(["name", "pid"]):
+                    try:
+                        name = proc.info["name"] or ""
+                        if "ollama" in name.lower():
+                            proc.terminate()
+                            killed += 1
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                if killed:
+                    self._log_message(f"Ollama process terminated ({killed} instance(s)).")
+            except Exception as e:
+                self._log_message(f"Ollama process kill error: {e}")
 
-        # Eject USB — find USB drive letter from config
-        try:
-            from app.config import BASE_DIR
-            drive = BASE_DIR.drive   # e.g. "E:"
-            if drive:
+            # ── Step 6: Eject USB ─────────────────────────────────────
+            try:
+                from app.config import BASE_DIR
                 import subprocess
-                # PowerShell eject via WMI — no admin needed for removable drives
-                ps_cmd = (
-                    f"$vol = Get-WmiObject Win32_Volume -Filter "
-                    f"\"DriveLetter='{drive}'\"; "
-                    f"$vol.DriveLetter; "
-                    f"(New-Object -comObject Shell.Application)"
-                    f".Namespace(17).ParseName('{drive}\\').InvokeVerb('Eject')"
-                )
-                subprocess.Popen(
-                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
-                    "-Command", ps_cmd],
-                    creationflags=0x08000000,
-                )
-                self._log_message(f"Ejecting {drive}...")
-        except Exception as e:
-            self._log_message(f"Eject error (close app manually): {e}")
+                drive = BASE_DIR.drive   # e.g. "E:"
+                if drive and drive.upper() != "C:":
+                    ps_cmd = (
+                        f"(New-Object -comObject Shell.Application)"
+                        f".Namespace(17).ParseName('{drive}\\').InvokeVerb('Eject')"
+                    )
+                    subprocess.Popen(
+                        ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+                        "-Command", ps_cmd],
+                        creationflags=0x08000000,
+                    )
+                    self._log_message(f"Ejecting {drive}...")
+                else:
+                    self._log_message("Skipping eject (running from C: drive).")
+            except Exception as e:
+                self._log_message(f"Eject error: {e}")
 
-        # Give log a moment to show, then exit
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(1500, lambda: __import__("sys").exit(0))
+            # ── Step 7: Exit after brief delay so log updates ─────────
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(2000, lambda: __import__("sys").exit(0))
     # =====================================================
     # UI
     # =====================================================
@@ -168,6 +204,21 @@ class RecordingView(QWidget):
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._status_label.setStyleSheet("font-size: 14px; color: #888;")
         layout.addWidget(self._status_label)
+
+        # ── Storage indicator ─────────────────────────────────────
+        self._storage_label = QLabel("💾 Checking storage...")
+        self._storage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._storage_label.setStyleSheet("font-size: 11px; color: #888;")
+        layout.addWidget(self._storage_label)
+        self._refresh_storage_display()
+
+        # ── Storage management ────────────────────────────────────
+        storage_layout = QHBoxLayout()
+        cleanup_btn = QPushButton("🗑  Clean Old Recordings")
+        cleanup_btn.setMinimumHeight(32)
+        cleanup_btn.clicked.connect(self._cleanup_recordings)
+        storage_layout.addWidget(cleanup_btn)
+        layout.addLayout(storage_layout)
 
         # Buttons
         btn_layout = QHBoxLayout()
@@ -477,7 +528,6 @@ class RecordingView(QWidget):
 
         statuses = {r.status for r in results}
 
-        # Log summary
         for r in results:
             self._log_message(
                 f"  {r.status.value}: {len(r.rounds)} rounds"
@@ -488,7 +538,6 @@ class RecordingView(QWidget):
         if ImportStatus.CRITICAL_FAILURE in statuses and all(
             r.status == ImportStatus.CRITICAL_FAILURE for r in results
         ):
-            # Everything failed — no match created
             self._log_message("All imports critically failed — going to Manual Entry.")
             QMessageBox.warning(
                 self, "Import Failed",
@@ -498,17 +547,18 @@ class RecordingView(QWidget):
             self.navigate_to_match_input.emit()
             return
 
-        # At least some rounds parsed — match records were auto-created
-        # Find the best result to route with
-        success_results = [r for r in results if r.status == ImportStatus.SUCCESS]
-        partial_results = [r for r in results if r.status == ImportStatus.PARTIAL_FAILURE]
+        # ── Prompt for opponent name for each created match ───────
+        success_results  = [r for r in results if r.status == ImportStatus.SUCCESS]
+        partial_results  = [r for r in results if r.status == ImportStatus.PARTIAL_FAILURE]
+        created_results  = [r for r in results if r.match_id is not None]
+
+        if created_results:
+            self._prompt_opponent_names(created_results)
 
         if success_results:
             last_match_id = success_results[-1].match_id
             if last_match_id is not None:
-                self._log_message(
-                    f"Routing to Analysis (match {last_match_id})."
-                )
+                self._log_message(f"Routing to Analysis (match {last_match_id}).")
                 self.navigate_to_analysis.emit(last_match_id)
             else:
                 self.navigate_to_match_input.emit()
@@ -525,6 +575,43 @@ class RecordingView(QWidget):
                 f"Missing data shown in Manual Entry."
             )
             self.navigate_to_match_input_partial.emit(partial)
+            self._refresh_storage_display()
+
+    def _prompt_opponent_names(self, results: list) -> None:
+        """Ask the user to name each imported match before routing."""
+        from database.repositories import Repository
+        repo = Repository()
+
+        for result in results:
+            if result.match_id is None:
+                continue
+
+            map_display = result.map_name or "Unknown"
+            rounds_display = len(result.rounds)
+
+            opponent, ok = QInputDialog.getText(
+                self,
+                "Name This Match",
+                f"Match {result.match_id} imported:\n"
+                f"  Map: {map_display}  |  {rounds_display} rounds\n\n"
+                f"Who did you play against?\n"
+                f"(Leave blank to keep as 'Imported')",
+            )
+
+            if ok and opponent.strip():
+                try:
+                    with repo.db.get_connection() as conn:
+                        conn.execute(
+                            "UPDATE matches SET opponent_name = ? WHERE match_id = ?",
+                            (opponent.strip(), result.match_id)
+                        )
+                        conn.commit()
+                    self._log_message(
+                        f"Match {result.match_id} named: vs {opponent.strip()}"
+                    )
+                except Exception as e:
+                    self._log_message(f"Could not save opponent name: {e}")
+
 
     def _on_import_error(self, message: str) -> None:
         self._session_active = False
@@ -547,3 +634,102 @@ class RecordingView(QWidget):
         # Auto-scroll to bottom
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+
+    # =====================================================
+    # Clean Old Storage
+    # =====================================================
+    def _refresh_storage_display(self) -> None:
+        """Update the storage indicator."""
+        try:
+            from app.config import BASE_DIR, RECORDINGS_DIR
+            import shutil
+            usage = shutil.disk_usage(str(BASE_DIR))
+            free_gb  = usage.free  / (1024**3)
+            total_gb = usage.total / (1024**3)
+            pct_used = usage.used  / usage.total * 100
+
+            recordings = list(RECORDINGS_DIR.glob("*.mp4")) + \
+                        list(RECORDINGS_DIR.glob("*.mkv"))
+            rec_gb = sum(f.stat().st_size for f in recordings) / (1024**3)
+
+            color = "#55e07a"        # green
+            if pct_used > 80:
+                color = "#e0a830"    # yellow
+            if pct_used > 90:
+                color = "#e05555"    # red
+
+            self._storage_label.setText(
+                f"💾 USB: {free_gb:.1f} GB free of {total_gb:.0f} GB  "
+                f"({pct_used:.0f}% used)  |  "
+                f"Recordings: {rec_gb:.1f} GB ({len(recordings)} files)"
+            )
+            self._storage_label.setStyleSheet(
+                f"font-size: 11px; color: {color};"
+            )
+        except Exception:
+            self._storage_label.setText("💾 Storage info unavailable")
+
+    def _cleanup_recordings(self) -> None:
+        """Delete old recordings, keeping the 3 most recent."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        from app.config import RECORDINGS_DIR
+
+        # Show what's there first
+        recordings = sorted(
+            list(RECORDINGS_DIR.glob("*.mp4")) +
+            list(RECORDINGS_DIR.glob("*.mkv")),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+
+        if not recordings:
+            QMessageBox.information(self, "Cleanup", "No recordings found.")
+            return
+
+        total_gb = sum(f.stat().st_size for f in recordings) / (1024**3)
+
+        keep_n, ok = QInputDialog.getInt(
+            self,
+            "Clean Old Recordings",
+            f"Found {len(recordings)} recording(s) using {total_gb:.1f} GB.\n\n"
+            f"Keep how many most recent recordings?",
+            3, 1, len(recordings), 1
+        )
+        if not ok:
+            return
+
+        to_delete = recordings[keep_n:]
+        if not to_delete:
+            QMessageBox.information(
+                self, "Cleanup",
+                f"Nothing to delete — only {len(recordings)} recording(s) found."
+            )
+            return
+
+        delete_gb = sum(f.stat().st_size for f in to_delete) / (1024**3)
+        confirm = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Delete {len(to_delete)} recording(s) ({delete_gb:.1f} GB)?\n\n"
+            + "\n".join(f.name for f in to_delete[:5])
+            + ("\n..." if len(to_delete) > 5 else ""),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        deleted = 0
+        for f in to_delete:
+            try:
+                f.unlink()
+                self._log_message(f"Deleted: {f.name}")
+                deleted += 1
+            except Exception as e:
+                self._log_message(f"Could not delete {f.name}: {e}")
+
+        self._log_message(f"✅ Cleaned {deleted} recording(s), freed {delete_gb:.1f} GB.")
+        self._refresh_storage_display()
+        QMessageBox.information(
+            self, "Done",
+            f"Deleted {deleted} recording(s), freed approximately {delete_gb:.1f} GB."
+        )

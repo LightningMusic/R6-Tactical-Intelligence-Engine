@@ -57,30 +57,30 @@ class _Settings:
     """
 
     DEFAULTS: dict = {
+        "obs_profiles": [
+            {
+                "name": "Default",
+                "host": "localhost",
+                "port": 4455,
+                "password": "",
+                "scene_name": "R6_Comms",
+            }
+        ],
+        "obs_active_profile": 0,
+        # Legacy single-value keys kept for migration
         "obs_host":           "localhost",
         "obs_port":           4455,
         "obs_password":       "",
-        "obs_scene_name":     "R6_Intelligence",
+        "obs_scene_name":     "R6_Comms",
         "whisper_model_size": "base",
         "llm_model_filename": "model.gguf",
         "llm_gpu_layers":     0,
         "llm_n_ctx":          4096,
         "llm_n_threads":      6,
-        "stability_wait":              5,
-        "stability_checks":            4,
-        "transcribe_auto":             True,
-        "r6_replay_folder":            None,
-        "analysis_mode":               "local",
-        "server_url":                  "",
-        "api_key":                     "",
-        "upload_replays":              True,
-        "upload_voice":                False,
-        "upload_automatically":        True,
-        "upload_later_when_offline":   True,
-        "fallback_to_local_analysis":  True,
-        "request_timeout_seconds":     30,
-        "max_upload_retries":          5,
-        "client_name":                 "USB_Client",
+        "stability_wait":     5,
+        "stability_checks":   4,
+        "transcribe_auto":    True,
+        "r6_replay_folder":   None,
     }
 
     def __init__(self) -> None:

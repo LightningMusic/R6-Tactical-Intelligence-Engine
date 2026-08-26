@@ -9,16 +9,21 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from app.config import settings
 
+
 class SettingsView(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        # Internal state — initialised before _build_ui so callbacks are safe
+        self._obs_profiles: list[dict] = []
+        self._obs_active_idx: int = 0
+        self._player_edits: list[QLineEdit] = []
         self._build_ui()
         self._load_all()
 
-    # =====================================================
+    # =========================================================
     # UI BUILD
-    # =====================================================
+    # =========================================================
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -37,8 +42,13 @@ class SettingsView(QWidget):
         tabs.addTab(self._build_maps_tab(),      "🗺  Maps")
         tabs.addTab(self._build_matches_tab(),   "📋  Match Manager")
         tabs.addTab(self._build_ai_tab(),        "🤖  AI / Models")
-        tabs.addTab(self._build_discord_tab(), "🎙  Discord")
+        tabs.addTab(self._build_discord_tab(),   "🎙  Discord")
+        tabs.addTab(self._build_twitch_tab(),    "📡  Twitch")
         layout.addWidget(tabs)
+
+    # ---------------------------------------------------------
+    # General tab
+    # ---------------------------------------------------------
 
     def _build_general_tab(self) -> QWidget:
         w = QWidget()
@@ -78,34 +88,93 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
+    # ---------------------------------------------------------
+    # OBS tab
+    # ---------------------------------------------------------
+
     def _build_obs_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setSpacing(16)
+        layout.setSpacing(12)
 
-        obs_group = QGroupBox("OBS WebSocket Connection")
+        # Profile selector
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(QLabel("Profile:"))
+        self._obs_profile_combo = QComboBox()
+        self._obs_profile_combo.setMinimumWidth(160)
+        self._obs_profile_combo.currentIndexChanged.connect(self._on_obs_profile_selected)
+        profile_row.addWidget(self._obs_profile_combo, stretch=1)
+
+        add_btn = QPushButton("➕ Add")
+        add_btn.setFixedWidth(60)
+        add_btn.clicked.connect(self._add_obs_profile)
+        profile_row.addWidget(add_btn)
+
+        del_btn = QPushButton("🗑")
+        del_btn.setFixedWidth(40)
+        del_btn.clicked.connect(self._delete_obs_profile)
+        profile_row.addWidget(del_btn)
+        layout.addLayout(profile_row)
+
+        # Profile fields
+        obs_group = QGroupBox("Connection Settings")
         form = QFormLayout(obs_group)
+
+        self._obs_profile_name_edit = QLineEdit()
+        self._obs_profile_name_edit.setPlaceholderText("e.g. Lab PC, Home PC")
+        form.addRow("Profile Name:", self._obs_profile_name_edit)
+
         self._obs_host_edit = QLineEdit()
+        form.addRow("Host:", self._obs_host_edit)
+
         self._obs_port_spin = QSpinBox()
         self._obs_port_spin.setRange(1, 65535)
+        form.addRow("Port:", self._obs_port_spin)
+
         self._obs_password_edit = QLineEdit()
         self._obs_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        show_pw_cb = QCheckBox("Show")
+        show_pw_cb.toggled.connect(
+            lambda checked: self._obs_password_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        pw_row = QHBoxLayout()
+        pw_row.addWidget(self._obs_password_edit)
+        pw_row.addWidget(show_pw_cb)
+        form.addRow("Password:", pw_row)
+
         self._obs_scene_edit = QLineEdit()
-        form.addRow("Host:",     self._obs_host_edit)
-        form.addRow("Port:",     self._obs_port_spin)
-        form.addRow("Password:", self._obs_password_edit)
-        form.addRow("Scene:",    self._obs_scene_edit)
+        form.addRow("Scene Name:", self._obs_scene_edit)
+
         layout.addWidget(obs_group)
 
-        test_btn = QPushButton("Test Connection")
+        # Buttons
+        btn_row = QHBoxLayout()
+        test_btn = QPushButton("🔌 Test Connection")
         test_btn.clicked.connect(self._test_obs)
-        layout.addWidget(test_btn)
+        btn_row.addWidget(test_btn)
 
-        save_btn = QPushButton("Save OBS Settings")
+        activate_btn = QPushButton("✅ Use This Profile")
+        activate_btn.clicked.connect(self._activate_obs_profile)
+        btn_row.addWidget(activate_btn)
+
+        save_btn = QPushButton("💾 Save All Profiles")
         save_btn.clicked.connect(self._save_obs)
-        layout.addWidget(save_btn)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+        self._obs_active_label = QLabel("")
+        self._obs_active_label.setStyleSheet("color: #55e07a; font-size: 11px;")
+        self._obs_active_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._obs_active_label)
+
         layout.addStretch()
         return w
+
+    # ---------------------------------------------------------
+    # Players tab
+    # ---------------------------------------------------------
 
     def _build_players_tab(self) -> QWidget:
         w = QWidget()
@@ -113,7 +182,6 @@ class SettingsView(QWidget):
         layout.setSpacing(12)
         layout.addWidget(QLabel("Team player names (5 players):"))
 
-        self._player_edits: list[QLineEdit] = []
         for i in range(5):
             row = QHBoxLayout()
             row.addWidget(QLabel(f"Player {i+1}:"))
@@ -127,6 +195,10 @@ class SettingsView(QWidget):
         layout.addWidget(save_btn)
         layout.addStretch()
         return w
+
+    # ---------------------------------------------------------
+    # Maps tab
+    # ---------------------------------------------------------
 
     def _build_maps_tab(self) -> QWidget:
         w = QWidget()
@@ -148,6 +220,10 @@ class SettingsView(QWidget):
         save_btn.clicked.connect(self._save_maps)
         layout.addWidget(save_btn)
         return w
+
+    # ---------------------------------------------------------
+    # Matches tab
+    # ---------------------------------------------------------
 
     def _build_matches_tab(self) -> QWidget:
         w = QWidget()
@@ -186,6 +262,10 @@ class SettingsView(QWidget):
         layout.addLayout(btn_row)
         return w
 
+    # ---------------------------------------------------------
+    # AI tab
+    # ---------------------------------------------------------
+
     def _build_ai_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -195,24 +275,30 @@ class SettingsView(QWidget):
         status_layout = QFormLayout(status_group)
         self._llm_status_label     = QLabel("Checking...")
         self._whisper_status_label = QLabel("Checking...")
-        status_layout.addRow("LLM (llama-cpp):", self._llm_status_label)
-        status_layout.addRow("Whisper:",         self._whisper_status_label)
+        status_layout.addRow("LLM (Ollama / llama-cpp):", self._llm_status_label)
+        status_layout.addRow("Whisper:",                  self._whisper_status_label)
         layout.addWidget(status_group)
 
         llm_group = QGroupBox("LLM Settings")
         llm_form  = QFormLayout(llm_group)
+
+        self._ollama_model_edit = QLineEdit()
+        self._ollama_model_edit.setPlaceholderText("e.g. llama3.2:3b")
+        llm_form.addRow("Ollama Model:", self._ollama_model_edit)
+
         self._gpu_layers_spin = QSpinBox()
         self._gpu_layers_spin.setRange(0, 100)
         self._gpu_layers_spin.setSpecialValueText("0 (CPU only)")
+        llm_form.addRow("GPU Layers:", self._gpu_layers_spin)
+
         self._ctx_spin = QSpinBox()
         self._ctx_spin.setRange(1024, 16384)
-        n_ctx = settings.LLM_N_CTX
-        self._ctx_spin.setValue(n_ctx)
+        llm_form.addRow("Context Size:", self._ctx_spin)
+
         self._threads_spin = QSpinBox()
         self._threads_spin.setRange(1, 32)
-        llm_form.addRow("GPU Layers:",   self._gpu_layers_spin)
-        llm_form.addRow("Context Size:", self._ctx_spin)
-        llm_form.addRow("CPU Threads:",  self._threads_spin)
+        llm_form.addRow("CPU Threads:", self._threads_spin)
+
         layout.addWidget(llm_group)
 
         whisper_group = QGroupBox("Whisper Settings")
@@ -232,102 +318,126 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
-    def _build_discord_tab(self) -> QWidget:
-        from PySide6.QtWidgets import QWidget, QVBoxLayout, QGroupBox, QFormLayout
-        from PySide6.QtWidgets import QLineEdit, QPushButton, QLabel, QMessageBox
+    # ---------------------------------------------------------
+    # Discord tab
+    # ---------------------------------------------------------
 
+    def _build_discord_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(12)
+
+        dep_label = QLabel(
+            'Required: pip install "discord.py[voice]" discord-ext-sinks PyNaCl'
+        )
+        dep_label.setStyleSheet("color: #e0a830; font-size: 10px;")
+        layout.addWidget(dep_label)
+
+        token_group = QGroupBox("Bot Token")
+        token_form  = QFormLayout(token_group)
+        self._discord_token_edit = QLineEdit()
+        self._discord_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._discord_token_edit.setPlaceholderText("Bot token from discord.com/developers")
+        show_cb = QCheckBox("Show")
+        show_cb.toggled.connect(
+            lambda checked: self._discord_token_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        token_row = QHBoxLayout()
+        token_row.addWidget(self._discord_token_edit)
+        token_row.addWidget(show_cb)
+        token_form.addRow("Token:", token_row)
+        layout.addWidget(token_group)
+
+        ch_group = QGroupBox("Voice Channels  (one entry per server/room you use)")
+        ch_layout = QVBoxLayout(ch_group)
+
+        self._discord_channels_table = QTableWidget(0, 2)
+        self._discord_channels_table.setHorizontalHeaderLabels(["Label", "Channel ID"])
+        self._discord_channels_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        self._discord_channels_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        self._discord_channels_table.verticalHeader().setVisible(False)
+        self._discord_channels_table.setMaximumHeight(160)
+        ch_layout.addWidget(self._discord_channels_table)
+
+        ch_btn_row = QHBoxLayout()
+        add_ch_btn = QPushButton("➕ Add Channel")
+        add_ch_btn.clicked.connect(self._add_discord_channel)
+        ch_btn_row.addWidget(add_ch_btn)
+        del_ch_btn = QPushButton("🗑 Remove Selected")
+        del_ch_btn.clicked.connect(self._remove_discord_channel)
+        ch_btn_row.addWidget(del_ch_btn)
+        ch_layout.addLayout(ch_btn_row)
+        layout.addWidget(ch_group)
+
+        active_row = QHBoxLayout()
+        active_row.addWidget(QLabel("Active channel for sessions:"))
+        self._discord_active_combo = QComboBox()
+        self._discord_active_combo.setMinimumWidth(200)
+        active_row.addWidget(self._discord_active_combo, stretch=1)
+        layout.addLayout(active_row)
+
+        btn_row = QHBoxLayout()
+        test_btn = QPushButton("🔌 Test Bot Connection")
+        test_btn.clicked.connect(self._test_discord)
+        btn_row.addWidget(test_btn)
+        save_btn = QPushButton("💾 Save Discord Settings")
+        save_btn.clicked.connect(self._save_discord)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+        layout.addStretch()
+        return w
+
+    # ---------------------------------------------------------
+    # Twitch tab
+    # ---------------------------------------------------------
+
+    def _build_twitch_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(16)
 
         info = QLabel(
-            "Discord per-user voice capture gives accurate speaker identification.\n"
-            "Each player's mic becomes a separate audio track, then Whisper\n"
-            "transcribes each individually — no guessing who said what.\n\n"
-            "Requirements: pip install discord.py[voice] PyNaCl"
+            "Configure Twitch streaming settings.\n"
+            "Set your stream key in OBS: Settings → Stream → Service: Twitch → Stream Key.\n"
+            "Use '📡 Start Stream' in the Recording tab to go live."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #aaa; font-size: 11px;")
         layout.addWidget(info)
 
-        bot_group = QGroupBox("Discord Bot Settings")
-        form = QFormLayout(bot_group)
+        stream_group = QGroupBox("Twitch Stream Settings")
+        form = QFormLayout(stream_group)
 
-        self._discord_token_edit = QLineEdit()
-        self._discord_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._discord_token_edit.setPlaceholderText("Bot token from discord.com/developers")
-        form.addRow("Bot Token:", self._discord_token_edit)
+        self._twitch_channel_edit = QLineEdit()
+        self._twitch_channel_edit.setPlaceholderText("Your Twitch channel name (e.g. shroud)")
+        form.addRow("Channel Name:", self._twitch_channel_edit)
 
-        self._discord_channel_edit = QLineEdit()
-        self._discord_channel_edit.setPlaceholderText("Voice channel ID (right-click channel → Copy ID)")
-        form.addRow("Channel ID:", self._discord_channel_edit)
+        self._twitch_title_edit = QLineEdit()
+        self._twitch_title_edit.setPlaceholderText("Stream title (optional)")
+        form.addRow("Stream Title:", self._twitch_title_edit)
 
-        layout.addWidget(bot_group)
+        self._twitch_auto_start_cb = QCheckBox("Auto-start stream when session starts")
+        form.addRow("", self._twitch_auto_start_cb)
 
-        status_group = QGroupBox("Setup Guide")
-        status_layout = QVBoxLayout(status_group)
-        guide = QLabel(
-            "1. Go to discord.com/developers/applications\n"
-            "2. New Application → Bot → Reset Token → copy it\n"
-            "3. Enable: Server Members Intent + Voice States Intent\n"
-            "4. OAuth2 → URL Generator → scopes: bot → permissions:\n"
-            "   Connect, Speak, Use Voice Activity\n"
-            "5. Copy the generated URL, open it, add bot to your server\n"
-            "6. Enable Developer Mode in Discord (Settings → Advanced)\n"
-            "7. Right-click your voice channel → Copy Channel ID\n"
-            "8. Paste token and channel ID above and save."
-        )
-        guide.setStyleSheet("font-size: 10px; color: #888;")
-        status_layout.addWidget(guide)
-        layout.addWidget(status_group)
+        self._twitch_auto_stop_cb = QCheckBox("Auto-stop stream when session ends")
+        form.addRow("", self._twitch_auto_stop_cb)
 
-        test_btn = QPushButton("Test Discord Bot Connection")
-        test_btn.clicked.connect(self._test_discord)
-        layout.addWidget(test_btn)
+        layout.addWidget(stream_group)
 
-        save_btn = QPushButton("Save Discord Settings")
-        save_btn.clicked.connect(self._save_discord)
+        save_btn = QPushButton("Save Twitch Settings")
+        save_btn.clicked.connect(self._save_twitch)
         layout.addWidget(save_btn)
-
         layout.addStretch()
-
-        # Load existing values
-        from app.config import settings
-        self._discord_token_edit.setText(str(settings.get("discord_bot_token") or ""))
-        self._discord_channel_edit.setText(str(settings.get("discord_channel_id") or ""))
-
         return w
 
-
-    def _save_discord(self) -> None:
-        from app.config import settings
-        from PySide6.QtWidgets import QMessageBox
-        token      = self._discord_token_edit.text().strip()
-        channel_id = self._discord_channel_edit.text().strip()
-        settings.set_many({
-            "discord_bot_token":  token,
-            "discord_channel_id": int(channel_id) if channel_id.isdigit() else 0,
-        })
-        settings.save()
-        QMessageBox.information(self, "Saved", "Discord settings saved.")
-
-
-    def _test_discord(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
-        from integration.discord_capture import DiscordCapture
-        if not DiscordCapture.is_available():
-            QMessageBox.warning(
-                self, "Missing Dependencies",
-                DiscordCapture.install_instructions()
-            )
-            return
-        QMessageBox.information(
-            self, "Discord",
-            "Dependencies found. Bot will connect when you start a session."
-        )
-    # =====================================================
-    # LOAD
-    # =====================================================
+    # =========================================================
+    # LOAD ALL
+    # =========================================================
 
     def _load_all(self) -> None:
         self._load_general_settings()
@@ -337,9 +447,14 @@ class SettingsView(QWidget):
         self._load_matches()
         self._load_ai_settings()
         self._check_model_status()
+        self._load_discord_settings()
+        self._load_twitch_settings()
+
+    # =========================================================
+    # GENERAL — load / save / browse
+    # =========================================================
 
     def _load_general_settings(self) -> None:
-        from app.config import settings
         folder = settings.R6_REPLAY_FOLDER
         if folder:
             self._replay_folder_edit.setText(str(folder))
@@ -347,12 +462,146 @@ class SettingsView(QWidget):
         self._stability_checks_spin.setValue(settings.STABILITY_CHECKS)
         self._transcribe_checkbox.setChecked(settings.TRANSCRIBE_AUTO)
 
+    def _save_general(self) -> None:
+        folder = self._replay_folder_edit.text().strip()
+        settings.set_many({
+            "stability_wait":   self._stability_wait_spin.value(),
+            "stability_checks": self._stability_checks_spin.value(),
+            "transcribe_auto":  self._transcribe_checkbox.isChecked(),
+            "r6_replay_folder": folder if folder else None,
+        })
+        settings.save()
+        QMessageBox.information(self, "Saved", "General settings saved.")
+
+    def _browse_replay_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select R6 Replay Folder", str(Path.home())
+        )
+        if folder:
+            self._replay_folder_edit.setText(folder)
+
+    # =========================================================
+    # OBS PROFILES — load / save / CRUD
+    # =========================================================
+
     def _load_obs_settings(self) -> None:
-        from app.config import settings
-        self._obs_host_edit.setText(settings.OBS_HOST)
-        self._obs_port_spin.setValue(settings.OBS_PORT)
-        self._obs_password_edit.setText(settings.OBS_PASSWORD)
-        self._obs_scene_edit.setText(settings.OBS_SCENE_NAME)
+        self._obs_profiles = list(settings.get_obs_profiles())
+        self._obs_active_idx = int(settings.get("obs_active_profile") or 0)
+
+        if not self._obs_profiles:
+            # Migrate legacy flat keys
+            self._obs_profiles = [{
+                "name":       "Default",
+                "host":       str(settings.get("obs_host") or "localhost"),
+                "port":       int(settings.get("obs_port") or 4455),
+                "password":   str(settings.get("obs_password") or ""),
+                "scene_name": str(settings.get("obs_scene_name") or "R6_Comms"),
+            }]
+            self._obs_active_idx = 0
+
+        self._obs_profile_combo.blockSignals(True)
+        self._obs_profile_combo.clear()
+        for p in self._obs_profiles:
+            self._obs_profile_combo.addItem(p.get("name", "Unnamed"))
+        self._obs_profile_combo.blockSignals(False)
+
+        idx = min(self._obs_active_idx, len(self._obs_profiles) - 1)
+        self._obs_profile_combo.setCurrentIndex(idx)
+        self._on_obs_profile_selected(idx)
+        self._update_obs_active_label()
+
+    def _on_obs_profile_selected(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self._obs_profiles):
+            return
+        p = self._obs_profiles[idx]
+        self._obs_profile_name_edit.setText(p.get("name", ""))
+        self._obs_host_edit.setText(p.get("host", "localhost"))
+        self._obs_port_spin.setValue(int(p.get("port", 4455)))
+        self._obs_password_edit.setText(p.get("password", ""))
+        self._obs_scene_edit.setText(p.get("scene_name", "R6_Comms"))
+
+    def _save_current_profile_fields(self) -> None:
+        idx = self._obs_profile_combo.currentIndex()
+        if 0 <= idx < len(self._obs_profiles):
+            self._obs_profiles[idx] = {
+                "name":       self._obs_profile_name_edit.text().strip() or "Unnamed",
+                "host":       self._obs_host_edit.text().strip() or "localhost",
+                "port":       self._obs_port_spin.value(),
+                "password":   self._obs_password_edit.text(),
+                "scene_name": self._obs_scene_edit.text().strip() or "R6_Comms",
+            }
+            self._obs_profile_combo.blockSignals(True)
+            self._obs_profile_combo.setItemText(idx, self._obs_profiles[idx]["name"])
+            self._obs_profile_combo.blockSignals(False)
+
+    def _add_obs_profile(self) -> None:
+        self._save_current_profile_fields()
+        new_p = {
+            "name":       f"PC {len(self._obs_profiles) + 1}",
+            "host":       "localhost",
+            "port":       4455,
+            "password":   "",
+            "scene_name": "R6_Comms",
+        }
+        self._obs_profiles.append(new_p)
+        self._obs_profile_combo.addItem(new_p["name"])
+        self._obs_profile_combo.setCurrentIndex(len(self._obs_profiles) - 1)
+
+    def _delete_obs_profile(self) -> None:
+        if len(self._obs_profiles) <= 1:
+            QMessageBox.warning(self, "Cannot Delete", "You need at least one profile.")
+            return
+        idx = self._obs_profile_combo.currentIndex()
+        self._obs_profiles.pop(idx)
+        self._obs_profile_combo.removeItem(idx)
+        if self._obs_active_idx >= len(self._obs_profiles):
+            self._obs_active_idx = len(self._obs_profiles) - 1
+        self._update_obs_active_label()
+
+    def _activate_obs_profile(self) -> None:
+        self._save_current_profile_fields()
+        self._obs_active_idx = self._obs_profile_combo.currentIndex()
+        self._save_obs()
+        self._update_obs_active_label()
+        name = self._obs_profiles[self._obs_active_idx].get("name", "?")
+        QMessageBox.information(self, "Profile Activated", f"Now using: {name}")
+
+    def _update_obs_active_label(self) -> None:
+        if 0 <= self._obs_active_idx < len(self._obs_profiles):
+            name = self._obs_profiles[self._obs_active_idx].get("name", "?")
+            self._obs_active_label.setText(f"Active profile: {name}")
+
+    def _save_obs(self) -> None:
+        self._save_current_profile_fields()
+        settings.set_obs_profiles(self._obs_profiles, self._obs_active_idx)
+        settings.save()
+        QMessageBox.information(self, "Saved", "OBS profiles saved.")
+
+    def _test_obs(self) -> None:
+        self._save_current_profile_fields()
+        idx = self._obs_profile_combo.currentIndex()
+        if idx < 0 or idx >= len(self._obs_profiles):
+            return
+        p = self._obs_profiles[idx]
+        try:
+            import obswebsocket
+            client = obswebsocket.obsws(
+                p.get("host", "localhost"),
+                int(p.get("port", 4455)),
+                p.get("password", ""),
+            )
+            client.connect()
+            client.disconnect()
+            QMessageBox.information(
+                self, "OBS",
+                f"✅ Connected to {p['name']} ({p['host']}:{p['port']})"
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "OBS", f"❌ Failed: {e}")
+
+    # =========================================================
+    # PLAYERS
+    # =========================================================
 
     def _load_players(self) -> None:
         try:
@@ -363,6 +612,26 @@ class SettingsView(QWidget):
                     edit.setText(players[i].name)
         except Exception as e:
             print(f"[Settings] Failed to load players: {e}")
+
+    def _save_players(self) -> None:
+        try:
+            from database.repositories import Repository
+            from models.player import Player
+            repo = Repository()
+            repo.clear_team_players()
+            for edit in self._player_edits:
+                name = edit.text().strip()
+                if name:
+                    repo.insert_player(Player(
+                        player_id=None, name=name, is_team_member=True
+                    ))
+            QMessageBox.information(self, "Saved", "Players updated.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    # =========================================================
+    # MAPS
+    # =========================================================
 
     def _load_maps(self) -> None:
         try:
@@ -388,106 +657,8 @@ class SettingsView(QWidget):
                 cell_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 cell_layout.setContentsMargins(0, 0, 0, 0)
                 self._maps_table.setCellWidget(r, 1, cell)
-
         except Exception as e:
             print(f"[Settings] Failed to load maps: {e}")
-
-    def _load_matches(self) -> None:
-        try:
-            from database.repositories import Repository
-            matches = Repository().get_all_matches()
-            self._matches_table.setRowCount(0)
-            for m in matches:
-                r = self._matches_table.rowCount()
-                self._matches_table.insertRow(r)
-                self._matches_table.setItem(r, 0, QTableWidgetItem(str(m.match_id)))
-                self._matches_table.setItem(r, 1, QTableWidgetItem(m.opponent_name))
-                self._matches_table.setItem(r, 2, QTableWidgetItem(m.map))
-                self._matches_table.setItem(r, 3, QTableWidgetItem(m.result or "—"))
-                self._matches_table.setItem(
-                    r, 4, QTableWidgetItem(
-                        m.datetime_played.strftime("%Y-%m-%d %H:%M")
-                    )
-                )
-        except Exception as e:
-            print(f"[Settings] Failed to load matches: {e}")
-
-    def _load_ai_settings(self) -> None:
-        from app.config import settings
-        self._gpu_layers_spin.setValue(settings.LLM_GPU_LAYERS)
-        self._ctx_spin.setValue(settings.LLM_N_CTX)
-        self._threads_spin.setValue(settings.LLM_N_THREADS)
-
-        whisper_size = settings.WHISPER_MODEL_SIZE
-        idx = self._whisper_size_combo.findText(whisper_size)
-        if idx >= 0:
-            self._whisper_size_combo.setCurrentIndex(idx)
-
-    def _check_model_status(self) -> None:
-        from app.config import get_llm_model_path, get_whisper_model_path
-
-        model_path = get_llm_model_path()
-        whisper_model_path = get_whisper_model_path()
-
-        if model_path.exists():
-            mb = model_path.stat().st_size // (1024 * 1024)
-            self._llm_status_label.setText(f"✅ {model_path.name} ({mb} MB)")
-            self._llm_status_label.setStyleSheet("color: #55e07a;")
-        else:
-            self._llm_status_label.setText("❌ Not found — place a .gguf model in data/models/")
-            self._llm_status_label.setStyleSheet("color: #e05555;")
-
-        if whisper_model_path.exists():
-            mb = whisper_model_path.stat().st_size // (1024 * 1024)
-            self._whisper_status_label.setText(f"✅ {whisper_model_path.name} ({mb} MB)")
-            self._whisper_status_label.setStyleSheet("color: #55e07a;")
-        else:
-            self._whisper_status_label.setText(
-                "❌ Not found — place the selected Whisper model file in data/models/")
-            self._whisper_status_label.setStyleSheet("color: #e05555;")
-
-    # =====================================================
-    # SAVE
-    # =====================================================
-
-    def _save_general(self) -> None:
-        from app.config import settings
-        folder = self._replay_folder_edit.text().strip()
-        settings.set_many({
-            "stability_wait":   self._stability_wait_spin.value(),
-            "stability_checks": self._stability_checks_spin.value(),
-            "transcribe_auto":  self._transcribe_checkbox.isChecked(),
-            "r6_replay_folder": folder if folder else None,
-        })
-        settings.save()
-        QMessageBox.information(self, "Saved", "General settings saved.")
-
-    def _save_obs(self) -> None:
-        from app.config import settings
-        settings.set_many({
-            "obs_host":       self._obs_host_edit.text().strip(),
-            "obs_port":       self._obs_port_spin.value(),
-            "obs_password":   self._obs_password_edit.text(),
-            "obs_scene_name": self._obs_scene_edit.text().strip(),
-        })
-        settings.save()
-        QMessageBox.information(self, "Saved", "OBS settings saved.")
-
-    def _save_players(self) -> None:
-        try:
-            from database.repositories import Repository
-            from models.player import Player
-            repo = Repository()
-            repo.clear_team_players()
-            for edit in self._player_edits:
-                name = edit.text().strip()
-                if name:
-                    repo.insert_player(Player(
-                        player_id=None, name=name, is_team_member=True
-                    ))
-            QMessageBox.information(self, "Saved", "Players updated.")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
 
     def _save_maps(self) -> None:
         try:
@@ -510,20 +681,29 @@ class SettingsView(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
-    def _save_ai_settings(self) -> None:
-        from app.config import settings
-        settings.set_many({
-            "llm_gpu_layers":    self._gpu_layers_spin.value(),
-            "llm_n_ctx":         self._ctx_spin.value(),
-            "llm_n_threads":     self._threads_spin.value(),
-            "whisper_model_size": self._whisper_size_combo.currentText(),
-        })
-        settings.save()
-        QMessageBox.information(self, "Saved", "AI settings saved.")
+    # =========================================================
+    # MATCHES
+    # =========================================================
 
-    # =====================================================
-    # MATCH MANAGEMENT
-    # =====================================================
+    def _load_matches(self) -> None:
+        try:
+            from database.repositories import Repository
+            matches = Repository().get_all_matches()
+            self._matches_table.setRowCount(0)
+            for m in matches:
+                r = self._matches_table.rowCount()
+                self._matches_table.insertRow(r)
+                self._matches_table.setItem(r, 0, QTableWidgetItem(str(m.match_id)))
+                self._matches_table.setItem(r, 1, QTableWidgetItem(m.opponent_name))
+                self._matches_table.setItem(r, 2, QTableWidgetItem(m.map))
+                self._matches_table.setItem(r, 3, QTableWidgetItem(m.result or "—"))
+                self._matches_table.setItem(
+                    r, 4, QTableWidgetItem(
+                        m.datetime_played.strftime("%Y-%m-%d %H:%M")
+                    )
+                )
+        except Exception as e:
+            print(f"[Settings] Failed to load matches: {e}")
 
     def _set_match_result(self) -> None:
         selected = self._matches_table.currentRow()
@@ -541,7 +721,6 @@ class SettingsView(QWidget):
         )
         if not ok:
             return
-
         try:
             from database.repositories import Repository
             with Repository().db.get_connection() as conn:
@@ -572,7 +751,6 @@ class SettingsView(QWidget):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-
         try:
             from database.repositories import Repository
             with Repository().db.get_connection() as conn:
@@ -583,28 +761,157 @@ class SettingsView(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
-    # =====================================================
-    # OBS TEST / BROWSE
-    # =====================================================
+    # =========================================================
+    # AI / MODELS
+    # =========================================================
 
-    def _test_obs(self) -> None:
-        try:
-            from integration.obs_controller import OBSController
-            obs = OBSController()
-            if obs.connect():
-                obs.disconnect()
-                QMessageBox.information(self, "OBS", "Connection successful ✅")
-            else:
-                QMessageBox.warning(
-                    self, "OBS",
-                    "Connection failed ❌\nCheck OBS is open and WebSocket is enabled."
-                )
-        except Exception as e:
-            QMessageBox.critical(self, "OBS Error", str(e))
+    def _load_ai_settings(self) -> None:
+        self._gpu_layers_spin.setValue(settings.LLM_GPU_LAYERS)
+        self._ctx_spin.setValue(settings.LLM_N_CTX)
+        self._threads_spin.setValue(settings.LLM_N_THREADS)
+        self._ollama_model_edit.setText(str(settings.get("ollama_model") or "llama3.2:3b"))
 
-    def _browse_replay_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select R6 Replay Folder", str(Path.home())
+        whisper_size = settings.WHISPER_MODEL_SIZE
+        idx = self._whisper_size_combo.findText(whisper_size)
+        if idx >= 0:
+            self._whisper_size_combo.setCurrentIndex(idx)
+
+    def _check_model_status(self) -> None:
+        from app.config import get_llm_model_path, get_whisper_model_path
+
+        model_path   = get_llm_model_path()
+        whisper_path = get_whisper_model_path()
+
+        if model_path.exists():
+            mb = model_path.stat().st_size // (1024 * 1024)
+            self._llm_status_label.setText(f"✅ {model_path.name} ({mb} MB)")
+            self._llm_status_label.setStyleSheet("color: #55e07a;")
+        else:
+            self._llm_status_label.setText("❌ Not found — place a .gguf in data/models/")
+            self._llm_status_label.setStyleSheet("color: #e05555;")
+
+        if whisper_path.exists():
+            mb = whisper_path.stat().st_size // (1024 * 1024)
+            self._whisper_status_label.setText(f"✅ {whisper_path.name} ({mb} MB)")
+            self._whisper_status_label.setStyleSheet("color: #55e07a;")
+        else:
+            self._whisper_status_label.setText("❌ Not found — place Whisper model in data/models/")
+            self._whisper_status_label.setStyleSheet("color: #e05555;")
+
+    def _save_ai_settings(self) -> None:
+        settings.set_many({
+            "llm_gpu_layers":     self._gpu_layers_spin.value(),
+            "llm_n_ctx":          self._ctx_spin.value(),
+            "llm_n_threads":      self._threads_spin.value(),
+            "whisper_model_size": self._whisper_size_combo.currentText(),
+            "ollama_model":       self._ollama_model_edit.text().strip() or "llama3.2:3b",
+        })
+        settings.save()
+        QMessageBox.information(self, "Saved", "AI settings saved.")
+
+    # =========================================================
+    # DISCORD
+    # =========================================================
+
+    def _load_discord_settings(self) -> None:
+        self._discord_token_edit.setText(str(settings.get("discord_bot_token") or ""))
+        self._refresh_discord_channel_table()
+
+    def _refresh_discord_channel_table(self) -> None:
+        channels = settings.get_discord_channels()
+        self._discord_channels_table.setRowCount(0)
+        self._discord_active_combo.clear()
+        for ch in channels:
+            r = self._discord_channels_table.rowCount()
+            self._discord_channels_table.insertRow(r)
+            self._discord_channels_table.setItem(r, 0, QTableWidgetItem(ch.get("name", "")))
+            self._discord_channels_table.setItem(r, 1, QTableWidgetItem(str(ch.get("id", ""))))
+            self._discord_active_combo.addItem(ch.get("name", ""), ch.get("id", ""))
+
+        active_id = str(settings.get("discord_channel_id") or "")
+        for i in range(self._discord_active_combo.count()):
+            if str(self._discord_active_combo.itemData(i)) == active_id:
+                self._discord_active_combo.setCurrentIndex(i)
+                break
+
+    def _add_discord_channel(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok1 = QInputDialog.getText(
+            self, "Add Channel", "Label (e.g. 'Main Server Comms'):"
         )
-        if folder:
-            self._replay_folder_edit.setText(folder)
+        if not ok1 or not name.strip():
+            return
+        ch_id, ok2 = QInputDialog.getText(
+            self, "Add Channel", "Channel ID (right-click channel → Copy ID):"
+        )
+        if not ok2 or not ch_id.strip():
+            return
+        r = self._discord_channels_table.rowCount()
+        self._discord_channels_table.insertRow(r)
+        self._discord_channels_table.setItem(r, 0, QTableWidgetItem(name.strip()))
+        self._discord_channels_table.setItem(r, 1, QTableWidgetItem(ch_id.strip()))
+        self._discord_active_combo.addItem(name.strip(), ch_id.strip())
+
+    def _remove_discord_channel(self) -> None:
+        row = self._discord_channels_table.currentRow()
+        if row < 0:
+            return
+        self._discord_channels_table.removeRow(row)
+        self._discord_active_combo.removeItem(row)
+
+    def _save_discord(self) -> None:
+        token = self._discord_token_edit.text().strip()
+        channels: list[dict] = []
+        for r in range(self._discord_channels_table.rowCount()):
+            name_item = self._discord_channels_table.item(r, 0)
+            id_item   = self._discord_channels_table.item(r, 1)
+            if name_item and id_item:
+                channels.append({
+                    "name": name_item.text().strip(),
+                    "id":   id_item.text().strip(),
+                })
+        active_id = self._discord_active_combo.currentData() or ""
+        settings.set_many({
+            "discord_bot_token":   token,
+            "discord_channel_ids": channels,
+            "discord_channel_id":  active_id,
+        })
+        settings.save()
+        QMessageBox.information(self, "Saved", "Discord settings saved.")
+
+    def _test_discord(self) -> None:
+        try:
+            from integration.discord_capture import DiscordCapture
+            if not DiscordCapture.is_available():
+                QMessageBox.warning(
+                    self, "Missing Dependencies",
+                    DiscordCapture.install_instructions()
+                )
+                return
+            QMessageBox.information(
+                self, "Discord",
+                "Dependencies found ✅\n"
+                "Bot will connect to the active channel when you start a session."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    # =========================================================
+    # TWITCH
+    # =========================================================
+
+    def _load_twitch_settings(self) -> None:
+        self._twitch_channel_edit.setText(str(settings.get("twitch_channel") or ""))
+        self._twitch_title_edit.setText(str(settings.get("twitch_title") or ""))
+        self._twitch_auto_start_cb.setChecked(bool(settings.get("twitch_auto_start")))
+        self._twitch_auto_stop_cb.setChecked(bool(settings.get("twitch_auto_stop")))
+
+    def _save_twitch(self) -> None:
+        settings.set_many({
+            "twitch_channel":    self._twitch_channel_edit.text().strip(),
+            "twitch_title":      self._twitch_title_edit.text().strip(),
+            "twitch_auto_start": self._twitch_auto_start_cb.isChecked(),
+            "twitch_auto_stop":  self._twitch_auto_stop_cb.isChecked(),
+        })
+        settings.save()
+        QMessageBox.information(self, "Saved", "Twitch settings saved.")

@@ -11,5 +11,11 @@
   "stability_wait": 15,
   "stability_checks": 10,
   "transcribe_auto": true,
-  "r6_replay_folder": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Tom Clancy's Rainbow Six Siege\\MatchReplay"
+  "r6_replay_folder": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Tom Clancy's Rainbow Six Siege\\MatchReplay",
+  "twitch_channel": "",
+  "twitch_title": "",
+  "twitch_auto_start": false,
+  "twitch_auto_stop": false,
+  "discord_bot_token": "",
+  "discord_channel_id": ""
 }

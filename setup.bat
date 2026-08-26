@@ -42,6 +42,7 @@ if errorlevel 1 (
 echo.
 echo [2/7] Installing core runtime dependencies...
 python -m pip install PySide6 psutil watchdog obs-websocket-py openai-whisper pyinstaller 2>&1
+pip install "discord.py[voice]" discord-ext-sinks PyNaCl 2>&1
 if errorlevel 1 (
     echo [ERROR] Failed to install core runtime dependencies.
     goto :fail
@@ -132,7 +133,7 @@ echo  Run  : python main.py
 echo  Build: build_and_deploy.bat
 echo ============================================
 echo.
-pause
+if not defined R6_SKIP_PAUSE pause
 exit /b 0
 
 :resolve_python
@@ -171,5 +172,5 @@ echo ============================================
 echo  Setup failed.
 echo ============================================
 echo.
-pause
+if not defined R6_SKIP_PAUSE pause
 exit /b 1

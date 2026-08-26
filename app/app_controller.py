@@ -161,6 +161,33 @@ class AppController:
 
         metrics["players"] = player_metrics
 
+        # ── Load comms data for display ───────────────────────────
+        transcript_summary = self._load_transcript_summary(match_id)
+        if transcript_summary:
+            metrics["comms_word_count"]   = transcript_summary.get("word_count", 0)
+            metrics["comms_top_locations"] = ", ".join(
+                list(transcript_summary.get("top_locations", {}).keys())[:5]
+            ) or "none"
+            metrics["comms_top_actions"]   = ", ".join(
+                list(transcript_summary.get("top_actions", {}).keys())[:5]
+            ) or "none"
+            metrics["comms_gaps"]          = transcript_summary.get("coord_gaps", 0)
+            # Build speaker breakdown for display
+            speakers = transcript_summary.get("speakers", {})
+            if speakers:
+                speaker_lines = []
+                for spk, sd in sorted(speakers.items()):
+                    wc = sd.get("word_count", 0)
+                    tt = sd.get("talk_time", 0.0)
+                    top = sd.get("top_words", [])[:3]
+                    speaker_lines.append(
+                        f"{spk}: {wc} words, {tt:.0f}s"
+                        + (f" — {', '.join(top)}" if top else "")
+                    )
+                metrics["comms_speakers"] = "\n".join(speaker_lines)
+        else:
+            metrics["comms_word_count"] = 0
+
         try:
             ai_result = self.intel.analyze_match(match_id)
             metrics["ai_summary"] = ai_result.get("ai_match_summary", "")
@@ -168,6 +195,28 @@ class AppController:
             metrics["ai_summary"] = f"[AI unavailable: {e}]"
 
         return metrics
+
+    def _load_transcript_summary(self, match_id: int) -> dict:
+        """Load stored transcript summary from DB for display in analysis."""
+        import json
+        try:
+            with self.repo.db.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT processed_segments_json FROM transcripts WHERE match_id = ?",
+                    (match_id,)
+                ).fetchone()
+            if not row or not row["processed_segments_json"]:
+                return {}
+            data = json.loads(row["processed_segments_json"])
+            return {
+                "top_locations": data.get("location_freq") or {},
+                "top_actions":   data.get("action_freq")   or {},
+                "coord_gaps":    len(data.get("coordination_gaps") or []),
+                "word_count":    int(data.get("word_count") or 0),
+                "speakers":      data.get("speakers") or {},
+            }
+        except Exception:
+            return {}
 
     # ============================================================
     # ROUND SAVE (MANUAL ENTRY PIPELINE)

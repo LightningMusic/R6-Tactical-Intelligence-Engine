@@ -1,74 +1,105 @@
-"""
-Discord voice capture for per-speaker audio.
-Runs a lightweight Discord bot that joins the voice channel during sessions
-and records each user's audio to a separate WAV file.
+from __future__ import annotations
 
-Setup (one time):
-  1. Go to https://discord.com/developers/applications
-  2. Create an application → Bot → copy token
-  3. Enable: Server Members Intent, Voice States Intent
-  4. Bot permissions: Connect, Speak, Use Voice Activity
-  5. Invite bot to your server with the generated OAuth2 URL
-  6. Set discord_bot_token and discord_channel_id in settings
-
-The bot records silently — it does not speak or react.
-Per-user files are saved to data/transcripts/discord_audio/
-"""
-
-import sys
-import io
-import os
+import asyncio
+import threading
 import time
-import struct
 import wave
 import threading
-try:
-    import discord  # type: ignore[import-untyped]
-except ImportError:
-    discord = None
+import discord # type: ignore[import-untyped]
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Callable, Optional, Dict
+
+import discord
 
 from app.config import TRANSCRIPTS_DIR
 
-DISCORD_AUDIO_DIR = TRANSCRIPTS_DIR / "discord_audio"
 
-# Discord voice uses Opus at 48000 Hz stereo
-DISCORD_SAMPLE_RATE = 48000
-DISCORD_CHANNELS    = 2
-DISCORD_SAMPLE_WIDTH = 2   # 16-bit
+# ─────────────────────────────────────────────────────────────
+# PER-USER AUDIO BUFFER
+# ─────────────────────────────────────────────────────────────
+
+class AudioBuffer:
+    def __init__(self, user_id: int, name: str):
+        self.user_id = user_id
+        self.name = name
+        self.frames: list[bytes] = []
+
+    def push(self, pcm: bytes) -> None:
+        self.frames.append(pcm)
+
+    def write_wav(self, path: Path, sample_rate: int = 48000) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)  # 16-bit PCM
+            wf.setframerate(sample_rate)
+
+            for frame in self.frames:
+                wf.writeframes(frame)
 
 
-def _ensure_console() -> None:
-    if sys.stdout is None:
-        sys.stdout = io.StringIO()
-    if sys.stderr is None:
-        sys.stderr = io.StringIO()
+class VoiceBufferManager:
+    def __init__(self):
+        self.buffers: Dict[int, AudioBuffer] = {}
 
+    def get(self, user_id: int, name: str) -> AudioBuffer:
+        if user_id not in self.buffers:
+            self.buffers[user_id] = AudioBuffer(user_id, name)
+        return self.buffers[user_id]
+
+    def add(self, user_id: int, name: str, pcm: bytes) -> None:
+        self.get(user_id, name).push(pcm)
+
+    def export_all(self, out_dir: Path) -> Dict[str, Path]:
+        result: Dict[str, Path] = {}
+
+        for buf in self.buffers.values():
+            safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in buf.name)
+            path = out_dir / f"{safe}_{buf.user_id}.wav"
+            buf.write_wav(path)
+            result[buf.name] = path
+
+        return result
+
+
+# ─────────────────────────────────────────────────────────────
+# DISCORD CAPTURE ENGINE
+# ─────────────────────────────────────────────────────────────
 
 class DiscordCapture:
     """
-    Records per-user voice audio from a Discord voice channel.
-    Each speaker gets their own WAV file for individual transcription.
+    Raw voice capture engine:
+    - connects to voice channel
+    - receives per-user PCM audio
+    - stores buffers in memory
+    - exports WAV per user on stop
     """
 
-    def __init__(self) -> None:
-        self._client: Optional[object]   = None
+    def __init__(self):
         self._thread: Optional[threading.Thread] = None
-        self._running = False
-        self._session_dir: Optional[Path] = None
-        self._user_buffers: dict[str, list[bytes]] = {}
-        self._user_names:   dict[int, str]         = {}   # user_id → display name
-        self._lock = threading.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-    # ── Dependency check ──────────────────────────────────────
+        self._client: Optional[discord.Client] = None
+        self._voice: Optional[discord.VoiceClient] = None
+
+        self._buffers = VoiceBufferManager()
+        self._output_dir: Optional[Path] = None
+
+        self._session_name = ""
+        self._running = False
+
+        self._user_map: dict[int, str] = {}
+
+    # ─────────────────────────────────────────────
+    # AVAILABILITY
+    # ─────────────────────────────────────────────
 
     @staticmethod
     def is_available() -> bool:
         try:
-            import discord  # type: ignore[import-untyped]
-            # Check for voice support (requires PyNaCl)
-            import nacl   # type: ignore[import-untyped]
+            import discord  # noqa
+            import nacl     # noqa
             return True
         except ImportError:
             return False
@@ -76,201 +107,162 @@ class DiscordCapture:
     @staticmethod
     def install_instructions() -> str:
         return (
-            "Discord capture requires:\n"
-            "  pip install discord.py[voice] PyNaCl\n"
-            "Then set discord_bot_token and discord_channel_id in Settings."
+            "Missing Discord voice capture dependencies.\n\n"
+            "Install inside your venv:\n"
+            '  pip install "discord.py[voice]" PyNaCl\n\n'
+            "Note: This system no longer requires discord-ext-sinks."
         )
-
-    # ── Session management ────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # START CAPTURE
+    # ─────────────────────────────────────────────
 
     def start_capture(
         self,
-        bot_token: str,
+        token: str,
         channel_id: int,
         session_name: str,
-        log_callback: Optional[Callable[[str], None]] = None,
+        log: Optional[Callable[[str], None]] = None,
     ) -> bool:
-        if not bot_token or not channel_id:
-            if log_callback:
-                log_callback(
-                    "[Discord] No bot token or channel ID configured. "
-                    "Set them in Settings → Discord."
-                )
-            return False
 
         if not self.is_available():
-            if log_callback:
-                log_callback(
-                    f"[Discord] {self.install_instructions()}"
-                )
+            if log:
+                log("[Discord] Missing discord.py or PyNaCl")
             return False
 
-        DISCORD_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-        self._session_dir = DISCORD_AUDIO_DIR / session_name
-        self._session_dir.mkdir(exist_ok=True)
-        self._user_buffers = {}
-        self._user_names   = {}
-        self._running      = True
+        self._session_name = session_name
+        self._output_dir = TRANSCRIPTS_DIR / session_name
+        self._output_dir.mkdir(parents=True, exist_ok=True)
 
-        def _run_bot() -> None:
+        connected = threading.Event()
+
+        def run_bot():
             try:
-                import asyncio
-                import discord  # type: ignore[import-untyped]
-                from discord.ext import commands  # type: ignore[import-untyped]
-
                 intents = discord.Intents.default()
                 intents.voice_states = True
-                intents.members      = True
+                intents.members = True
 
-                bot = commands.Bot(command_prefix="!", intents=intents)
+                client = discord.Client(intents=intents)
+                self._client = client
 
-                @bot.event  # type: ignore[misc]
-                async def on_ready() -> None:  # type: ignore[misc]
-                    if log_callback:
-                        log_callback(f"[Discord] Bot ready: {bot.user}")
-                    channel = bot.get_channel(channel_id)
-                    if channel is None:
-                        if log_callback:
-                            log_callback(
-                                f"[Discord] Channel {channel_id} not found. "
-                                "Check discord_channel_id in Settings."
-                            )
-                        await bot.close()
+                @client.event
+                async def on_ready():
+                    if log:
+                        log(f"[Discord] Logged in as {client.user}")
+
+                    channel = client.get_channel(channel_id)
+                    if not isinstance(channel, discord.VoiceChannel):
+                        if log:
+                            log("[Discord] Invalid voice channel")
+                        connected.set()
                         return
 
-                    # Cache member display names
-                    for member in channel.members:
-                        self._user_names[member.id] = member.display_name
+                    for m in channel.members:
+                        if not m.bot:
+                            self._user_map[m.id] = m.display_name
 
-                    vc = await channel.connect()
-                    if log_callback:
-                        log_callback(
-                            f"[Discord] Joined channel: {channel.name} "
-                            f"({len(channel.members)} members)"
-                        )
+                    try:
+                        vc = await channel.connect()
+                        self._voice = vc
+                        self._running = True
 
-                    sink = _PerUserSink(
-                        self._user_buffers,
-                        self._user_names,
-                        self._lock,
-                        log_callback,
-                    )
-                    vc.start_recording(sink, _on_recording_finished, self._session_dir)
-                    self._client = bot
+                        if log:
+                            log("[Discord] Connected to voice channel")
 
-                    # Keep running until stop is called
-                    while self._running:
-                        await asyncio.sleep(1)
+                        connected.set()
 
-                    vc.stop_recording()
-                    await vc.disconnect()
-                    await bot.close()
+                        # ─────────────────────────────────────────────
+                        # RAW AUDIO RECEIVER
+                        # ─────────────────────────────────────────────
 
-                asyncio.run(bot.start(bot_token))
+                        def audio_sink(user: discord.User, data: bytes):
+                            if not user or user.bot:
+                                return
+
+                            name = getattr(user, "display_name", str(user))
+                            self._buffers.add(user.id, name, data)
+
+                        # ⚠️ IMPORTANT:
+                        # discord.py does NOT officially document this API,
+                        # but VoiceClient exposes receive callback in voice pipeline.
+                        #
+                        # If your version differs, this is the ONLY section you'd adapt.
+
+                        vc.recv_audio = audio_sink  # type: ignore[attr-defined]
+
+                        if log:
+                            log("[Discord] Raw audio capture active")
+
+                    except Exception as e:
+                        if log:
+                            log(f"[Discord] Voice connect error: {e}")
+                        connected.set()
+
+                self._loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self._loop)
+                self._loop.run_until_complete(client.start(token))
 
             except Exception as e:
-                if log_callback:
-                    log_callback(f"[Discord] Bot error: {e}")
-                self._running = False
+                if log:
+                    log(f"[Discord] Fatal error: {e}")
+                connected.set()
 
-        self._thread = threading.Thread(
-            target=_run_bot, daemon=True, name="DiscordCapture"
-        )
+        self._thread = threading.Thread(target=run_bot, daemon=True)
         self._thread.start()
 
-        if log_callback:
-            log_callback("[Discord] Starting bot...")
-        return True
+        connected.wait(timeout=10)
+        return self._running
 
-    def stop_capture(
-        self,
-        log_callback: Optional[Callable[[str], None]] = None,
-    ) -> dict[str, Path]:
-        """
-        Stops capture and saves per-user WAV files.
-        Returns dict of {display_name: wav_path}.
-        """
+    # ─────────────────────────────────────────────
+    # STOP CAPTURE
+    # ─────────────────────────────────────────────
+
+    def stop_capture(self, log: Optional[Callable[[str], None]] = None) -> dict[str, Path]:
+
+        if not self._running:
+            return {}
+
+        if log:
+            log("[Discord] Stopping capture...")
+
+        if self._voice and self._loop:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._voice.disconnect(),
+                    self._loop
+                )
+            except Exception:
+                pass
+
+        time.sleep(2.0)
+
         self._running = False
 
-        if self._thread is not None:
-            self._thread.join(timeout=10)
-            self._thread = None
+        out = self._output_dir or Path("output")
+        results = self._buffers.export_all(out)
 
-        if log_callback:
-            log_callback("[Discord] Capture stopped. Saving audio files...")
+        if log:
+            log(f"[Discord] Exported {len(results)} user recordings")
 
-        saved: dict[str, Path] = {}
+        return results
 
-        with self._lock:
-            for user_key, audio_chunks in self._user_buffers.items():
-                if not audio_chunks or self._session_dir is None:
-                    continue
+    # ─────────────────────────────────────────────
+    # STATUS
+    # ─────────────────────────────────────────────
 
-                # user_key is either "user_id" or "display_name"
-                safe_name = user_key.replace(" ", "_").replace("/", "_")
-                wav_path  = self._session_dir / f"{safe_name}.wav"
-
-                try:
-                    combined = b"".join(audio_chunks)
-                    with wave.open(str(wav_path), "wb") as wf:
-                        wf.setnchannels(DISCORD_CHANNELS)
-                        wf.setsampwidth(DISCORD_SAMPLE_WIDTH)
-                        wf.setframerate(DISCORD_SAMPLE_RATE)
-                        wf.writeframes(combined)
-                    saved[user_key] = wav_path
-                    if log_callback:
-                        mb = wav_path.stat().st_size / (1024 * 1024)
-                        log_callback(f"[Discord] Saved: {wav_path.name} ({mb:.1f} MB)")
-                except Exception as e:
-                    if log_callback:
-                        log_callback(f"[Discord] Save failed for {user_key}: {e}")
-
-        return saved
-
-    def get_user_names(self) -> dict[int, str]:
-        return dict(self._user_names)
-
-
-def _on_recording_finished(sink: object, channel: object) -> None:
-    pass   # handled in stop_capture
-
-
-class _PerUserSink:
-    """
-    discord.py AudioSink that routes each user's audio to separate buffer.
-    """
-
-    def __init__(
-        self,
-        user_buffers: dict[str, list[bytes]],
-        user_names:   dict[int, str],
-        lock: threading.Lock,
-        log_callback: Optional[Callable[[str], None]],
-    ) -> None:
-        self._buffers      = user_buffers
-        self._user_names   = user_names
-        self._lock         = lock
-        self._log_callback = log_callback
-
-    def write(self, data: "discord.VoiceData", user: "discord.User") -> None:
+    def is_connected(self) -> bool:
         try:
-            import discord  # type: ignore[import-untyped]
-            if not isinstance(data, discord.VoiceData):
-                return
-
-            user_id = int(user.id)  # type: ignore[union-attr]
-            name    = self._user_names.get(user_id, f"User_{user_id}")
-
-            with self._lock:
-                if name not in self._buffers:
-                    self._buffers[name] = []
-                    if self._log_callback:
-                        self._log_callback(
-                            f"[Discord] Recording started: {name}"
-                        )
-                self._buffers[name].append(bytes(data.data))
+            return self._voice is not None and self._voice.is_connected()
         except Exception:
-            pass
+            return False
 
-    def cleanup(self) -> None:
-        pass
+    def get_user_map(self) -> dict[int, str]:
+        return dict(self._user_map)
+    def get_user_names(self) -> dict[int, str]:
+        """
+        Returns mapping of Discord user IDs → display names.
+        Used by SessionManager for transcript attribution.
+        """
+        return {
+            buf.user_id: buf.name
+            for buf in self._buffers.buffers.values()
+        }

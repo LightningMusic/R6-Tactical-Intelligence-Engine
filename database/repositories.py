@@ -56,6 +56,83 @@ class Repository:
                 ability_max_count=row["ability_max_count"],
             )
 
+# ── Add these two methods to the Repository class in database/repositories.py ──
+
+    def get_operator_by_name(self, name: str) -> Optional["Operator"]:
+        """Exact case-insensitive operator name lookup."""
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM operators WHERE LOWER(name) = LOWER(?)",
+                (name,)
+            ).fetchone()
+            if not row:
+                return None
+            return Operator(
+                operator_id=row["operator_id"],
+                name=row["name"],
+                side=row["side"],
+                ability_name=row["ability_name"],
+                ability_max_count=row["ability_max_count"],
+            )
+
+    def get_operator_by_name_fuzzy(self, name: str) -> Optional["Operator"]:
+        """
+        Fuzzy operator lookup for r6-dissect name variations.
+        Handles accent stripping (Jager→Jäger, Capitao→Capitão, Tubarao→Tubarão),
+        substring matching, and alpha-only fallback.
+        """
+        import unicodedata
+
+        def strip_accents(s: str) -> str:
+            """Normalize unicode: Jäger→Jager, Capitão→Capitao"""
+            return "".join(
+                c for c in unicodedata.normalize("NFD", s)
+                if unicodedata.category(c) != "Mn"
+            )
+
+        search = name.lower().strip()
+        search_stripped = strip_accents(search)
+
+        with self.db.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM operators").fetchall()
+
+        def make_op(row) -> "Operator":
+            return Operator(
+                operator_id=row["operator_id"],
+                name=row["name"],
+                side=row["side"],
+                ability_name=row["ability_name"],
+                ability_max_count=row["ability_max_count"],
+            )
+
+        # Pass 1: accent-stripped exact match (Jager == Jäger)
+        for row in rows:
+            db_stripped = strip_accents(row["name"].lower())
+            if search_stripped == db_stripped:
+                return make_op(row)
+
+        # Pass 2: accent-stripped substring match
+        for row in rows:
+            db_stripped = strip_accents(row["name"].lower())
+            if search_stripped in db_stripped or db_stripped in search_stripped:
+                return make_op(row)
+
+        # Pass 3: direct substring on original
+        for row in rows:
+            db_name = row["name"].lower()
+            if search in db_name or db_name in search:
+                return make_op(row)
+
+        # Pass 4: alpha-only compare (strips all non-alpha)
+        search_alpha = "".join(c for c in search_stripped if c.isalpha())
+        for row in rows:
+            db_alpha = "".join(
+                c for c in strip_accents(row["name"].lower()) if c.isalpha()
+            )
+            if search_alpha == db_alpha:
+                return make_op(row)
+
+        return None
     # =====================================================
     # Gadgets
     # =====================================================
