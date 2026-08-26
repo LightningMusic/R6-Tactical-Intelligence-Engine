@@ -1,0 +1,41 @@
+{
+  "session_b07ccc9d-01aa-4ca0-9ef2-77ed86e0fe53": {
+    "session_id": "session_b07ccc9d-01aa-4ca0-9ef2-77ed86e0fe53",
+    "package_relpath": "session_b07ccc9d-01aa-4ca0-9ef2-77ed86e0fe53.r6session",
+    "package_status": "created",
+    "local_analysis_status": "processing",
+    "remote_analysis_status": "none",
+    "created_at": "2026-08-26T18:36:41.525973+00:00",
+    "updated_at": "2026-08-26T18:36:41.525973+00:00",
+    "retry_count": 0,
+    "last_error": null,
+    "job_id": null,
+    "source_fingerprint": "Match-2026-08-26_15-10-00-000:8de61174332d0dc9"
+  },
+  "session_7bbf3633-bcf2-42e9-b1a0-60f807f6be6d": {
+    "session_id": "session_7bbf3633-bcf2-42e9-b1a0-60f807f6be6d",
+    "package_relpath": "session_7bbf3633-bcf2-42e9-b1a0-60f807f6be6d.r6session",
+    "package_status": "created",
+    "local_analysis_status": "completed",
+    "remote_analysis_status": "none",
+    "created_at": "2026-08-26T18:37:13.333989+00:00",
+    "updated_at": "2026-08-26T18:37:13.347007+00:00",
+    "retry_count": 0,
+    "last_error": null,
+    "job_id": null,
+    "source_fingerprint": "Match-2026-08-26_15-10-00-000:8de61174332d0dc9"
+  },
+  "session_bfeadffb-8d94-48e3-8ca9-f9392f86a2cb": {
+    "session_id": "session_bfeadffb-8d94-48e3-8ca9-f9392f86a2cb",
+    "package_relpath": "session_bfeadffb-8d94-48e3-8ca9-f9392f86a2cb.r6session",
+    "package_status": "created",
+    "local_analysis_status": "completed",
+    "remote_analysis_status": "none",
+    "created_at": "2026-08-26T18:37:41.870424+00:00",
+    "updated_at": "2026-08-26T18:37:41.892451+00:00",
+    "retry_count": 0,
+    "last_error": null,
+    "job_id": null,
+    "source_fingerprint": "Match-2026-08-26_15-10-00-000:8de61174332d0dc9"
+  }
+}

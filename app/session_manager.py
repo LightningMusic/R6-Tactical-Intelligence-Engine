@@ -13,11 +13,8 @@ from models.match import Match
 from datetime import datetime
 from analysis.transcript_parser import TranscriptParser
 from analysis.timeline_aligner import TimelineAligner
-from app.config import TRANSCRIPTS_DIR
-
-        
-        
-        
+from app.packaging import SessionPackage, generate_session_id
+from app.upload_queue import UploadQueue, QUEUE_DIR
 
 
 class SessionManager:
@@ -25,6 +22,7 @@ class SessionManager:
     Handles recording session lifecycle.
     Auto-creates a DB match record for every ImportResult that has rounds,
     whether SUCCESS or PARTIAL_FAILURE — so manual entry can always save.
+    Creates standardized .r6session archives and registers them in UploadQueue.
     """
 
     def __init__(
@@ -44,7 +42,8 @@ class SessionManager:
         self.stability_checks = stability_checks
         self._snapshot: set[Path] = set()
         self._transcriber: Optional[WhisperTranscriber] = None
-        
+        self.upload_queue     = UploadQueue()
+
         self._discord = DiscordCapture()
         self._discord_user_files: dict[str, Path] = {}
 
@@ -59,7 +58,7 @@ class SessionManager:
         self,
         log_callback: Optional[Callable[[str], None]] = None,
     ) -> bool:
-        
+
         token      = str(settings.get("discord_bot_token")  or "")
         channel_id = int(settings.get("discord_channel_id") or 0)
 
@@ -123,9 +122,76 @@ class SessionManager:
             stable_folders, log_callback=log
         )
 
-        # ── Create match records immediately ─────────────────────
-        log("Creating match records...")
+        # ── Package sessions into .r6session archives ─────────────
+        log("Packaging session archives (.r6session)...")
+        from app.packaging import generate_source_fingerprint
+        created_session_ids: list[str] = []
+
+        for folder, result in zip(stable_folders, results):
+            rec_files = sorted(folder.glob("*.rec"))
+            session_id = generate_session_id()
+            source_fp = generate_source_fingerprint(folder.name, rec_files)
+
+            meta = {
+                "map_name": result.map_name or "Unknown",
+                "score_us": result.score_us,
+                "score_them": result.score_them,
+                "folder_name": folder.name,
+                "client_name": settings.CLIENT_NAME,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+            telemetry = {
+                "rounds_parsed": len(result.rounds),
+                "error_message": result.error_message,
+                "import_status": result.status.value,
+            }
+
+            is_comp = (result.status == ImportStatus.SUCCESS)
+
+            # Opt-in voice uploads
+            audio_files: list[Path] = []
+            if settings.UPLOAD_VOICE and self.recording_path and self.recording_path.exists():
+                audio_files.append(self.recording_path)
+
+            try:
+                pkg_path = SessionPackage.create_package(
+                    output_dir=QUEUE_DIR,
+                    session_id=session_id,
+                    rec_files=rec_files,
+                    metadata=meta,
+                    telemetry=telemetry,
+                    audio_files=audio_files if settings.UPLOAD_VOICE else None,
+                    is_complete=is_comp,
+                    source_fingerprint=source_fp,
+                )
+                log(f"  ✓ Package created: {pkg_path.name}")
+
+                pkg_status = "created" if settings.ANALYSIS_MODE == "local" else "pending_upload"
+                if not is_comp:
+                    pkg_status = "partial_data"
+
+                self.upload_queue.add_item(
+                    session_id=session_id,
+                    package_path=pkg_path,
+                    package_status=pkg_status,
+                    local_analysis_status="processing",
+                    source_fingerprint=source_fp,
+                )
+                created_session_ids.append(session_id)
+
+            except Exception as pkg_err:
+                log(f"  ✗ Failed to create package for {folder.name}: {pkg_err}")
+
+        # ── Create match records in local DB ──────────────────────
+        log("Creating local match records...")
         self._auto_create_matches(results, log)
+
+        # Update queue local_analysis_status to completed using created session IDs
+        for sid in created_session_ids:
+            self.upload_queue.update_item(sid, local_analysis_status="completed")
+
+        # ── Start transcription in background — don't block ──────
 
         # ── Start transcription in background — don't block ──────
         if self.transcribe and self.recording_path:

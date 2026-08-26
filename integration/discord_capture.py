@@ -22,7 +22,10 @@ import time
 import struct
 import wave
 import threading
-import discord # type: ignore[import-untyped]
+try:
+    import discord  # type: ignore[import-untyped]
+except ImportError:
+    discord = None
 from pathlib import Path
 from typing import Optional, Callable
 

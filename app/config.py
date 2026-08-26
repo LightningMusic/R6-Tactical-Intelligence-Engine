@@ -66,10 +66,21 @@ class _Settings:
         "llm_gpu_layers":     0,
         "llm_n_ctx":          4096,
         "llm_n_threads":      6,
-        "stability_wait":     5,
-        "stability_checks":   4,
-        "transcribe_auto":    True,
-        "r6_replay_folder":   None,
+        "stability_wait":              5,
+        "stability_checks":            4,
+        "transcribe_auto":             True,
+        "r6_replay_folder":            None,
+        "analysis_mode":               "local",
+        "server_url":                  "",
+        "api_key":                     "",
+        "upload_replays":              True,
+        "upload_voice":                False,
+        "upload_automatically":        True,
+        "upload_later_when_offline":   True,
+        "fallback_to_local_analysis":  True,
+        "request_timeout_seconds":     30,
+        "max_upload_retries":          5,
+        "client_name":                 "USB_Client",
     }
 
     def __init__(self) -> None:
@@ -109,27 +120,27 @@ class _Settings:
 
     @property
     def OBS_HOST(self) -> str:
-        return str(self._data["obs_host"])
+        return str(self._data.get("obs_host", "localhost"))
 
     @property
     def OBS_PORT(self) -> int:
-        return int(self._data["obs_port"])
+        return int(self._data.get("obs_port", 4455))
 
     @property
     def OBS_PASSWORD(self) -> str:
-        return str(self._data["obs_password"])
+        return str(self._data.get("obs_password", ""))
 
     @property
     def OBS_SCENE_NAME(self) -> str:
-        return str(self._data["obs_scene_name"])
+        return str(self._data.get("obs_scene_name", "R6_Intelligence"))
 
     @property
     def WHISPER_MODEL_SIZE(self) -> str:
-        return str(self._data["whisper_model_size"])
+        return str(self._data.get("whisper_model_size", "base"))
 
     @property
     def LLM_GPU_LAYERS(self) -> int:
-        return int(self._data["llm_gpu_layers"])
+        return int(self._data.get("llm_gpu_layers", 0))
 
     @property
     def LLM_MODEL_FILENAME(self) -> str:
@@ -137,23 +148,68 @@ class _Settings:
 
     @property
     def LLM_N_CTX(self) -> int:
-        return int(self._data["llm_n_ctx"])
+        return int(self._data.get("llm_n_ctx", 4096))
 
     @property
     def LLM_N_THREADS(self) -> int:
-        return int(self._data["llm_n_threads"])
+        return int(self._data.get("llm_n_threads", 6))
 
     @property
     def STABILITY_WAIT(self) -> float:
-        return float(self._data["stability_wait"])
+        return float(self._data.get("stability_wait", 5))
 
     @property
     def STABILITY_CHECKS(self) -> int:
-        return int(self._data["stability_checks"])
+        return int(self._data.get("stability_checks", 4))
 
     @property
     def TRANSCRIBE_AUTO(self) -> bool:
-        return bool(self._data["transcribe_auto"])
+        return bool(self._data.get("transcribe_auto", True))
+
+    @property
+    def ANALYSIS_MODE(self) -> str:
+        mode = str(self._data.get("analysis_mode", "local")).lower().strip()
+        return mode if mode in ("local", "remote", "automatic") else "local"
+
+    @property
+    def SERVER_URL(self) -> str:
+        return str(self._data.get("server_url", "")).strip().rstrip("/")
+
+    @property
+    def API_KEY(self) -> str:
+        return str(self._data.get("api_key", "")).strip()
+
+    @property
+    def UPLOAD_REPLAYS(self) -> bool:
+        return bool(self._data.get("upload_replays", True))
+
+    @property
+    def UPLOAD_VOICE(self) -> bool:
+        return bool(self._data.get("upload_voice", False))
+
+    @property
+    def UPLOAD_AUTOMATICALLY(self) -> bool:
+        return bool(self._data.get("upload_automatically", True))
+
+    @property
+    def UPLOAD_LATER_WHEN_OFFLINE(self) -> bool:
+        return bool(self._data.get("upload_later_when_offline", True))
+
+    @property
+    def FALLBACK_TO_LOCAL_ANALYSIS(self) -> bool:
+        return bool(self._data.get("fallback_to_local_analysis", True))
+
+    @property
+    def REQUEST_TIMEOUT_SECONDS(self) -> int:
+        return max(1, int(self._data.get("request_timeout_seconds", 30)))
+
+    @property
+    def MAX_UPLOAD_RETRIES(self) -> int:
+        return max(0, int(self._data.get("max_upload_retries", 5)))
+
+    @property
+    def CLIENT_NAME(self) -> str:
+        return str(self._data.get("client_name", "USB_Client")).strip()
 
     @property
     def R6_REPLAY_FOLDER(self) -> Path | None:
