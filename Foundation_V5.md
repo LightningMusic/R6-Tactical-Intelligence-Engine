@@ -84,6 +84,7 @@ internet --HTTPS--> Tailscale Funnel (2nd account) --> server container --> olla
 | `migrate` | copy the retired Windows server's data into the volume |
 | `cutover` | stop the old server and its tasks, final data copy, Docker takes port 8000 (`--retire-old-address` also ends the bridge) |
 | `retire-old-address` | turn off the old Funnel (`tailscale funnel reset` on the host) |
+| `rotate-tokens [api\|voice\|both] [--yes]` | generate new keys in the volume's `server_config.json` (every other setting kept), keep the old file as `server_config.json.pre-rotation`, restart the server; `rotate-tokens done` deletes that rollback copy |
 | `autostart [off]` | start the stack at Windows logon |
 | `host` / `setup` / `build` | install/refresh Docker + firewall in the distro; first-time setup; build the image |
 
@@ -221,8 +222,12 @@ Format: `inv_<8 hex id>_<secret>`. Shown **once** at creation; a lost link is re
 * `server_data/` and `laptop_smb_credentials.json` are gitignored (V4 §9). **Resolved:** `server_data/server_config.json` was never committed to git history, so V4's "check whether to rotate" concern does not apply. The six tracked `server_data/uploads/*.r6session` files are 964-byte test fixtures, not real match data.
 * Dev/build tooling secrets (SSH key-only access, the dedicated SMB account) are unchanged from V4 §9.
 
+### Rotation
+**Both keys were rotated on 2026-10-01** (`r6ctl rotate-tokens both`), after a PowerShell alias collision on 2026-09-30 had printed the old API and voice tokens into a local Claude Code session transcript (never into a repo file or git history). Verified afterwards against both the local port and the public address: new keys accepted, old keys refused with 401, the voice key refused on API-only endpoints, `public_url` preserved. Invite links were unaffected. The generated keys are 43 (API) and 32 (voice) characters of URL-safe randomness.
+
+Rotating again is one command plus a rebuild: `r6ctl rotate-tokens`, then `build_and_deploy.bat`, which re-embeds the new keys into the three exes. The pinned `api_key` in `data\settings.json` (repo and USB) was cleared so clients use the embedded key and a rotation no longer needs a settings edit. Anything built before a rotation (an old `R6Voice.exe`, a stick not rebuilt) is refused until rebuilt, which also makes the old-address bridge (§3) pointless once the second stick is rebuilt. The dashboard needs the new API key at its next sign-in.
+
 ### Known gaps
-* **Key rotation undecided.** On 2026-09-30 a PowerShell alias collision printed the API and voice tokens into a local Claude Code session transcript (not into any repo file). Rotating means regenerating `server_config.json`'s tokens, rebuilding the clients/sticks, and updating the pinned `api_key` in `data\settings.json`. Offered, not decided.
 * The server prints the API token on startup (V4's "read it off the console" convenience); in Docker that lands in the container logs (20 MB x 5 files, local driver). Removing that banner is optional hardening.
 * The only application-level abuse control is the per-invite daily audio cap. Token guessing is impractical (24-32 bytes of entropy) but there is no lockout; Funnel/Cloudflare are the outer layer.
 
@@ -297,24 +302,26 @@ Unchanged from V4 §7: `configure_logging()` tees stdout/stderr into a rotating 
 
 * **Unit/integration suite:** 223 tests collected. Run with the system Python 3.12 (`python -m pytest`), ignoring `tests/test_local_regression.py`, `tests/test_obs_profile_rotation.py`, `tests/test_should_defer_transcription.py`, and deselecting three environment-dependent tests (`test_intel_engine_overrides.py::test_generate_reports_unavailable_backend_without_crashing`, `test_server_match_analysis.py::test_real_intel_engine_with_no_backend_marks_failed_not_completed`, `test_settings.py::test_settings_defaults`). Last full run: **217 passed, 3 skipped, 3 deselected.** Two tests can wake a real Ollama, so check what you deselect on a gaming PC. Back up `data/matches.db`, `data/settings.json`, `data/queue/queue.json` around runs; tests touch them.
 * **`deploy/client_compat_test.py --base <address>`:** drives the *real* client classes with the real keys (client `test_connection`/upload/status, companion control and heartbeat, R6Voice ping and chunk upload; wrong keys must be refused). 13 checks; cleans up nothing server-side, so remove its `Compat_Test` rows afterwards. This is what proved the cutover safe.
-* **`deploy/smoke_test.py`** (server end to end; its default `--base` still says port 8001 and now needs `8000`), **`scripts/e2e_browser_recorder.py`** (throwaway server + real Edge/Chrome with a fake microphone: follows the host, chunks tile on the server clock, offline stretch queued then uploaded, revoked link refused; needs `playwright`).
+* **`deploy/smoke_test.py`** (server end to end; default `--base` is `http://127.0.0.1:8000`), **`scripts/e2e_browser_recorder.py`** (throwaway server + real Edge/Chrome with a fake microphone: follows the host, chunks tile on the server clock, offline stretch queued then uploaded, revoked link refused; needs `playwright`).
 
 ---
 
 ## 14. Open Items & Next Steps
 
 ### Do next
-1. **James's stick, then `r6ctl retire-old-address`.** The old address is the only thing keeping pre-cutover apps alive. With two sticks the gating is short: the host's own stick already has the new address; the older stick needs a fresh `R6Companion.exe` (plug it in labelled `R6_COMPANION` and run `build_and_deploy.bat`) or James simply uses his `/join` link. Any `R6Voice.exe` handed out before cutover also needs replacing. Then retire the bridge.
+1. **`r6ctl retire-old-address`.** The old-address bridge no longer protects anything: the 2026-10-01 key rotation made every pre-rotation app unusable regardless of address, and the rebuild already put the new address and keys on both sticks (`F:` and `H:\R6Companion`, verified in the finished exes). Run it once James's stick is handed over (or he uses `/join`); any `R6Voice.exe` handed out earlier is dead until replaced. The only reason to wait is if you want to keep the old URL answering "401" instead of "unreachable".
 2. **Create invite links** for each browser teammate from the dashboard (in-game name exactly as it appears in replays; they are shown once). Hand them out with `voice_recorder/FOR_TEAMMATES.txt`-style instructions adapted to the browser.
 3. **First real practice = the validation** of the whole comms timeline with real teammates. Expect to tune; watch `r6ctl logs server`.
 
-### Safety (found while writing V5)
-* **Git has not been committed since 2026-08-26.** About 127 changed/untracked paths, including everything new since then (`server/invites.py`, `join.html`, `comms_service.py`, `companion/`, `voice_recorder/`, `deploy/`, the new analysis modules, and most of V4's own work) exist only in the working tree. Commit in sensible chunks and push; do not use `git add .` (there are credential target files and a `Claude outputs/` folder).
-* **`*.spec` is gitignored**, so the four PyInstaller specs (the build recipes) are in no repository. Un-ignore them or back them up.
+### Safety
+* **Committed locally on 2026-10-01, not pushed.** Five weeks of work had gone uncommitted (last commit 2026-08-26); it is now in six commits (build tooling, Docker + server, recorders, client, tests, docs). Pushing is deliberately left to the owner: the repo's GitHub visibility has not been checked (`gh` is not installed), so confirm it is private, or accept that everything committed becomes public, before `git push`.
+* The four PyInstaller specs are now version-controlled (`*.spec` is no longer ignored); the three credential target files are committed as **empty** placeholders. Never `git add .` or `git commit -a`: that would also stage the next item.
+* **Still deliberately uncommitted:** `data/settings.json` (holds a live OBS password; the API key is now cleared), `data/matches.db`, `data/queue/queue.json` (all three are tracked, so a plain `commit -a` would publish them, and untracking them would make a `git pull` on another PC delete that PC's copies), the rebuilt `integration/bin/r6-dissect.exe`, and six deleted `server_data/uploads` test fixtures. A scratch file named `Remote` is untracked junk.
+* **The r6-dissect Go fork is not versioned.** `r6-dissect/` is a git link with no `.gitmodules`, pointing at the upstream project, and the fork's six edited Go files (`dissect/defuse.go`, `feedback.go`, `player.go`, `reader.go`, `scoreboard.go`, `time.go`) exist only as uncommitted changes in that nested repo. Decide between vendoring the sources into this repo or publishing a fork, then commit them.
+* The committed `data/settings.json` in git history already contains an `obs_password` (an API key has never been committed). It only protects the local OBS WebSocket; change it in OBS (Tools, WebSocket Server Settings) and in the app's Settings if the repo is or becomes public.
 * `r6_data` volume has no scheduled backup; use the `tar` one-liner in `deploy/README.md` periodically (it holds every match and recording).
 
 ### Decisions pending
-* Rotate the API and voice tokens (§7), or not.
 * Whether to drop the legacy `R6Server.exe` from `build_and_deploy.bat`, and delete the old Windows-server files and `D:\R6_PROJ_backup_2026-09-29`, once happy with Docker.
 * Optional: link `lammtozzz` to Zander (Settings → Players aliases); known usernames are `lammtozzz` = Zander, `LightningMusic6` = Elijah.
 * Domain + Cloudflare Tunnel when affordable (the foundation is in place, §3).
