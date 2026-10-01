@@ -1,6 +1,6 @@
 from database.db_manager import DatabaseManager
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 5
 
 
 def run_migrations(db: DatabaseManager) -> None:
@@ -75,6 +75,51 @@ def run_migrations(db: DatabaseManager) -> None:
                 )
             except Exception:
                 pass  # Column already exists — safe to ignore
+
+        # ── V4: player_aliases + transcript_speaker_labels ─────────────────
+        # Player-identity/alias system + speaker-tagging tables, added
+        # Milestone 6. CREATE TABLE IF NOT EXISTS makes this safe to run
+        # even if schema.sql already created them on a brand-new DB.
+        if current_version < 4:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS player_aliases (
+                    alias_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id INTEGER NOT NULL,
+                    alias     TEXT NOT NULL COLLATE NOCASE,
+                    UNIQUE(alias),
+                    FOREIGN KEY (player_id) REFERENCES players(player_id) ON DELETE CASCADE
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS transcript_speaker_labels (
+                    label_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    match_id    INTEGER NOT NULL,
+                    speaker_tag TEXT NOT NULL,
+                    player_id   INTEGER,
+                    UNIQUE(match_id, speaker_tag),
+                    FOREIGN KEY (match_id) REFERENCES matches(match_id) ON DELETE CASCADE,
+                    FOREIGN KEY (player_id) REFERENCES players(player_id) ON DELETE SET NULL
+                )
+            """)
+
+        # ── V5: self-updating game catalog ─────────────────────────────────
+        # The catalog tables themselves come from schema.sql (re-applied on
+        # every startup); only the new columns on existing tables need
+        # ALTERs. operators.source records where a row came from so the
+        # Ubisoft sync knows it may correct the display name of an operator
+        # learned from a replay ("IQ" arrives as "IQ", but a new one might
+        # arrive as "NOOR") without ever renaming hand-seeded ones.
+        # matches.map_game_id lets a match on a not-yet-named map be
+        # backfilled once someone names it.
+        if current_version < 5:
+            for ddl in (
+                "ALTER TABLE operators ADD COLUMN source TEXT NOT NULL DEFAULT 'seed'",
+                "ALTER TABLE matches ADD COLUMN map_game_id INTEGER",
+            ):
+                try:
+                    conn.execute(ddl)
+                except Exception:
+                    pass  # column already exists
 
         conn.commit()
 

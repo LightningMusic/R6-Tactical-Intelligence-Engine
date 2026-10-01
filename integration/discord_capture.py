@@ -4,14 +4,34 @@ import asyncio
 import threading
 import time
 import wave
-import threading
 import discord # type: ignore[import-untyped]
 from pathlib import Path
 from typing import Callable, Optional, Dict
 
-import discord
-
 from app.config import TRANSCRIPTS_DIR
+
+# 2026-09-11: real per-user voice receive. Stock discord.py's VoiceClient is
+# SEND-ONLY (it exists to play audio, e.g. music bots) -- it has no receive
+# path, no `recv_audio` hook, and no way to plug in a callback at all. The
+# previous version of this file did `vc.recv_audio = audio_sink`, which just
+# sets an unused attribute on the object; nothing in discord.py ever reads
+# it, so audio_sink() would never fire and every exported WAV would come out
+# at 0 bytes. Confirmed by installing the real packages and inspecting the
+# actual VoiceClient API directly -- this was never going to work as written.
+#
+# discord-ext-voice-recv (pip: discord-ext-voice-recv) is a community
+# extension that adds a real receive path on top of stock discord.py (it
+# extends it, not a fork -- unlike py-cord, it coexists with the existing
+# `discord.py>=2.3.0` dependency already pinned in requirements.txt).
+# It decodes Opus back to raw PCM per-speaker automatically, and its output
+# format (stereo, 16-bit, 48kHz) already matches what AudioBuffer.write_wav()
+# below expects -- this file's original per-user WAV writer was designed
+# for exactly this shape, just never wired to something that could deliver
+# it.
+try:
+    from discord.ext import voice_recv  # type: ignore[import-untyped]
+except ImportError:
+    voice_recv = None  # handled by is_available() below
 
 
 # ─────────────────────────────────────────────────────────────
@@ -100,6 +120,7 @@ class DiscordCapture:
         try:
             import discord  # noqa
             import nacl     # noqa
+            from discord.ext import voice_recv  # noqa
             return True
         except ImportError:
             return False
@@ -109,8 +130,10 @@ class DiscordCapture:
         return (
             "Missing Discord voice capture dependencies.\n\n"
             "Install inside your venv:\n"
-            '  pip install "discord.py[voice]" PyNaCl\n\n'
-            "Note: This system no longer requires discord-ext-sinks."
+            '  pip install "discord.py[voice]" PyNaCl discord-ext-voice-recv\n\n'
+            "Note: This system no longer requires discord-ext-sinks. "
+            "discord-ext-voice-recv is required for actually receiving "
+            "per-user audio -- stock discord.py can only send audio."
         )
     # ─────────────────────────────────────────────
     # START CAPTURE
@@ -161,7 +184,10 @@ class DiscordCapture:
                             self._user_map[m.id] = m.display_name
 
                     try:
-                        vc = await channel.connect()
+                        # 2026-09-11: connect with VoiceRecvClient, not the
+                        # default VoiceClient -- only the receive-capable
+                        # subclass has anything to actually listen to.
+                        vc = await channel.connect(cls=voice_recv.VoiceRecvClient)
                         self._voice = vc
                         self._running = True
 
@@ -174,20 +200,21 @@ class DiscordCapture:
                         # RAW AUDIO RECEIVER
                         # ─────────────────────────────────────────────
 
-                        def audio_sink(user: discord.User, data: bytes):
-                            if not user or user.bot:
+                        def audio_sink(user, data: "voice_recv.VoiceData"):
+                            if not user or getattr(user, "bot", False):
+                                return
+                            if data.pcm is None:
                                 return
 
                             name = getattr(user, "display_name", str(user))
-                            self._buffers.add(user.id, name, data)
+                            self._buffers.add(user.id, name, data.pcm)
 
-                        # ⚠️ IMPORTANT:
-                        # discord.py does NOT officially document this API,
-                        # but VoiceClient exposes receive callback in voice pipeline.
-                        #
-                        # If your version differs, this is the ONLY section you'd adapt.
-
-                        vc.recv_audio = audio_sink  # type: ignore[attr-defined]
+                        # BasicSink is a plain callback-based sink from
+                        # discord-ext-voice-recv; decode=True (the default)
+                        # means it hands us already-decoded stereo/48kHz/16-bit
+                        # PCM per speaker, which is exactly the format
+                        # AudioBuffer.write_wav() below writes out.
+                        vc.listen(voice_recv.BasicSink(audio_sink))
 
                         if log:
                             log("[Discord] Raw audio capture active")
@@ -230,6 +257,10 @@ class DiscordCapture:
                     self._voice.disconnect(),
                     self._loop
                 )
+            except Exception:
+                pass
+            try:
+                self._voice.stop_listening()
             except Exception:
                 pass
 

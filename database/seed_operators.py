@@ -82,6 +82,7 @@ OPERATORS = [
     ("Thatcher", "attack", "E.G.S. Disruptor", 6),
     ("Ying", "attack", "Candela", 3),
     ("Zofia", "attack", "KS79 LIFELINE", 4),
+    ("Noor", "defense", "Horus Lance Launcher", 5),  # Y11S3 "Operation Split Fire" (2026-09-01)
 ]
 
 # --------------------------------------
@@ -390,11 +391,94 @@ OPERATOR_GADGET_OPTIONS = [
     ("Denari", "Observation Blocker" ,3),
     ("Denari", "Deployable Shield" ,1),
 
+    ("Noor", "Deployable Shield", 1),
+    ("Noor", "Barbed Wire", 2),
 
 ]
+# --------------------------------------
+# In-game IDs (what replays actually contain)
+# --------------------------------------
+# Baseline only. New IDs are learned from imported matches and new
+# operators/gadgets from Ubisoft's operator pages -- see
+# database/game_catalog.py and integration/ubisoft_catalog.py -- so this
+# does not need editing when the game adds content.
+#
+# Operator IDs are cross-checked against r6-dissect's own table
+# (r6-dissect/dissect/header.go). Recruit is deliberately absent: it
+# appears on both sides, so it can never be learned as an operator.
+OPERATOR_GAME_IDS: dict[int, str] = {
+    92270642682: "Castle", 104189664704: "Aruni", 161289666230: "Kaid",
+    174977508820: "Mozzie", 92270642708: "Pulse", 104189664390: "Ace",
+    92270642214: "Echo", 378305069945: "Azami", 391752120891: "Solis",
+    92270644215: "Capitão", 92270644189: "Zofia", 92270644267: "Dokkaebi",
+    104189662920: "Warden", 92270644319: "Mira", 92270642344: "Sledge",
+    104189664273: "Melusi", 92270642526: "Bandit", 92270642188: "Valkyrie",
+    92270644059: "Rook", 92270641980: "Kapkan", 291191151607: "Zero",
+    104189664038: "Iana", 92270642656: "Ash", 92270642136: "Blackbeard",
+    288200867444: "Osa", 373711624351: "Thorn", 92270642604: "Jäger",
+    104189663920: "Kali", 92270642760: "Thermite", 288200866821: "Brava",
+    104189663607: "Amaru", 92270642292: "Ying", 92270642266: "Lesion",
+    92270644007: "Doc", 104189661861: "Lion", 92270642032: "Fuze",
+    92270642396: "Smoke", 92270644293: "Vigil", 92270642318: "Mute",
+    104189663698: "Goyo", 104189663803: "Wamai", 92270644163: "Ela",
+    92270644033: "Montagne", 104189663024: "Nøkk", 104189662071: "Alibi",
+    104189661965: "Finka", 92270644241: "Caveira", 161289666248: "Nomad",
+    288200867351: "Thunderbird", 384797789346: "Sens", 92270642578: "IQ",
+    92270642539: "Blitz", 92270642240: "Hibana", 104189662384: "Maverick",
+    328397386974: "Flores", 92270642474: "Buck", 92270644111: "Twitch",
+    174977508808: "Gridlock", 92270642422: "Thatcher", 92270642084: "Glaz",
+    92270644345: "Jackal", 374667788042: "Grim", 291437347686: "Tachanka",
+    104189664155: "Oryx", 92270642500: "Frost", 104189662175: "Maestro",
+    104189662280: "Clash", 288200867339: "Fenrir", 395943091136: "Ram",
+    288200867549: "Tubarão", 374667787816: "Deimos", 409899350463: "Striker",
+    409899350403: "Sentry", 386098331713: "Skopós", 386098331923: "Rauora",
+    374667787937: "Denari", 444310693746: "Solid Snake",
+    456757346397: "Noor",  # Y11S3, observed in a real replay
+}
+
+# Map "world IDs". Every rework ships under a new ID, hence several per
+# map. Sources: r6-dissect's header.go plus IDs observed in real replays.
+# Deliberately left out:
+#   417890697769 -- r6-dissect says modernized Lair, the old hand-kept
+#                   lookup said Clubhouse. Not asserted here; the import
+#                   links it by r6-dissect's name unless the match's bomb
+#                   sites were already seen on a different map, in which
+#                   case it's flagged for a human instead of guessed.
+#   108179795804.. -- a block from the old lookup that runs in alphabetical
+#                   order in even steps (and names maps like "Donut");
+#                   not plausible as real game IDs.
+MAP_GAME_IDS: dict[int, str] = {
+    355496559878: "Bank", 413779563590: "Bank",
+    305979357167: "Border", 407987100456: "Border", 419662876236: "Border",
+    419965653950: "Calypso Casino",
+    259816839773: "Chalet", 407558616688: "Chalet",
+    837214085: "Clubhouse", 407193663917: "Clubhouse", 422790217276: "Clubhouse",
+    42090092951: "Coastline", 412551493246: "Coastline", 436375283234: "Coastline",
+    2609221242: "Consulate", 379218689149: "Consulate", 418126004176: "Consulate",
+    365284490964: "Emerald Plains",
+    329867321446: "Favela",
+    126196841359: "Fortress", 398899676157: "Fortress",
+    127951053400: "Hereford Base",
+    237873412352: "House",
+    1378191338: "Kafe Dostoyevsky", 413845419788: "Kafe Dostoyevsky",
+    1460220617: "Kanal",
+    388073319671: "Lair",
+    378595635123: "Nighthaven Labs", 418119057546: "Nighthaven Labs",
+    231702797556: "Oregon", 409880628150: "Oregon", 434715462383: "Oregon",
+    362605108559: "Outback", 415956890521: "Outback",
+    2609218856: "Plane",
+    276279025182: "Skyscraper", 423767322185: "Skyscraper",
+    270063334510: "Stadium Bravo",
+    199824623654: "Theme Park", 430788891316: "Theme Park",
+    53627213396: "Tower",
+    88107330328: "Villa", 409325881472: "Villa",
+    1767965020: "Yacht",
+}
+
 MAPS = [
     "Bank",
     "Border",
+    "Calypso Casino",
     "Chalet",
     "Clubhouse",
     "Coastline",
@@ -425,14 +509,17 @@ MAPS = [
 def seed_database(db: DatabaseManager):
     
     with db.get_connection() as conn:
-        # Seed Operators
+        # Seed Operators. Ability *names* are only supplied for new rows:
+        # after that they belong to the Ubisoft sync, which follows the
+        # official names through reworks -- overwriting them here would
+        # revert its changes on every launch. Charge counts aren't
+        # published anywhere, so those stay owned by this list.
         for op in OPERATORS:
             conn.execute(
                 """
                 INSERT INTO operators (name, side, ability_name, ability_max_count)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(name) DO UPDATE SET
-                    ability_name = excluded.ability_name,
                     ability_max_count = excluded.ability_max_count
                 """,
                 op
@@ -453,6 +540,18 @@ def seed_database(db: DatabaseManager):
 
         success_count = 0
         fail_count = 0
+
+        # Which gadgets an operator can carry now belongs to the Ubisoft
+        # sync, which also REMOVES links when a rework changes a loadout.
+        # So the seed only fills in operators that have no links at all
+        # yet, and otherwise only refreshes counts on pairs that already
+        # exist. Re-inserting every seed pair on each startup would undo
+        # the sync's removals every time the app launched.
+        operators_with_links = {
+            row[0] for row in conn.execute(
+                "SELECT DISTINCT operator_id FROM operator_gadget_options"
+            )
+        }
 
         for mapping in OPERATOR_GADGET_OPTIONS:
             operator_name, gadget_name, max_count = mapping
@@ -485,17 +584,19 @@ def seed_database(db: DatabaseManager):
                 print(f"[ERROR] Gadget NOT FOUND: {gadget_name}")
                 fail_count += 1
                 continue
-            conn.execute(
-                """
-                INSERT INTO operator_gadget_options (operator_id, gadget_id, max_count)
-                VALUES (?, ?, ?)
-                ON CONFLICT(operator_id, gadget_id) DO UPDATE SET
-                    max_count = excluded.max_count
-                """,
-                (op_id[0], gadget_id[0], max_count),
-            )
 
-            print(f"[OK] {operator_name} -> {gadget_name}")
+            updated = conn.execute(
+                """UPDATE operator_gadget_options SET max_count = ?
+                   WHERE operator_id = ? AND gadget_id = ?""",
+                (max_count, op_id[0], gadget_id[0]),
+            ).rowcount
+            if not updated and op_id[0] not in operators_with_links:
+                conn.execute(
+                    """INSERT INTO operator_gadget_options (operator_id, gadget_id, max_count)
+                       VALUES (?, ?, ?)""",
+                    (op_id[0], gadget_id[0], max_count),
+                )
+
             success_count += 1
 
         print(f"\n=== Gadget Mapping Complete ===")
@@ -531,6 +632,21 @@ def seed_database(db: DatabaseManager):
                 ON CONFLICT(name) DO NOTHING
                 """,
                 (map_name,)
+            )
+
+        # In-game ID links. OR IGNORE: an ID already linked -- by an import,
+        # or by someone naming a flagged map -- is never overwritten here.
+        for game_id, op_name in OPERATOR_GAME_IDS.items():
+            conn.execute(
+                """INSERT OR IGNORE INTO operator_game_ids (game_id, operator_id, source)
+                   SELECT ?, operator_id, 'seed' FROM operators WHERE name = ?""",
+                (game_id, op_name),
+            )
+        for game_id, map_name in MAP_GAME_IDS.items():
+            conn.execute(
+                """INSERT OR IGNORE INTO map_game_ids (game_id, map_id, source)
+                   SELECT ?, map_id, 'seed' FROM maps WHERE name = ?""",
+                (game_id, map_name),
             )
         conn.commit()
 

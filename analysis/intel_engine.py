@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional, Callable
 
-from app.config import MODEL_PATH, OLLAMA_EXE, OLLAMA_MODELS
+_AI_FAILURE_MARKERS = ("[AI unavailable]", "[AI] Generation failed")
 
 
 def _ensure_console() -> None:
@@ -53,18 +53,83 @@ class _OllamaBackend:
     CONNECT_TIMEOUT = 5
     READ_TIMEOUT    = 300
 
-    def __init__(self) -> None:
-        from app.config import settings
-        self.model    = str(settings.get("ollama_model") or self.DEFAULT_MODEL)
+    # Without an explicit num_ctx, Ollama allocates the model's full trained
+    # context -- 131,072 tokens for llama3.2 -- which put an 18 GB footprint
+    # on an 8 GB card, forced a 60/40 CPU/GPU split and a ~56 s cold load,
+    # all for prompts a few thousand tokens long. 8192 covers every prompt
+    # this engine builds with room to spare; generate() warns if one ever
+    # gets close.
+    DEFAULT_NUM_CTX = 8192
+
+    def __init__(
+        self,
+        ollama_exe: Optional[Path] = None,
+        ollama_models: Optional[Path] = None,
+        default_model: Optional[str] = None,
+        options: Optional[dict] = None,
+        ollama_url: Optional[str] = None,
+    ) -> None:
+        """
+        ollama_url: talk to an Ollama that something else runs (a container)
+        instead of launching a local ollama.exe; nothing is spawned then.
+
+        options: Ollama runtime options applied to every request --
+        num_ctx, num_gpu, num_thread. Anything not given explicitly is read
+        from the client's settings (ollama_num_ctx / ollama_num_gpu /
+        ollama_num_thread) and otherwise left to the defaults above. num_gpu
+        is deliberately NOT defaulted: forcing CPU-only is right on a machine
+        whose GPU is slower than its CPU (the server's case) and badly wrong
+        on one with a strong GPU, and the client runs on whatever laptop the
+        USB is plugged into.
+        """
+        self.api_base: str = (ollama_url or self.API_BASE).rstrip("/")
+        self.external: bool = bool(ollama_url)
+
+        if ollama_exe is None or ollama_models is None:
+            from app.config import OLLAMA_EXE as _CLIENT_OLLAMA_EXE
+            from app.config import OLLAMA_MODELS as _CLIENT_OLLAMA_MODELS
+            ollama_exe = ollama_exe if ollama_exe is not None else _CLIENT_OLLAMA_EXE
+            ollama_models = ollama_models if ollama_models is not None else _CLIENT_OLLAMA_MODELS
+
+        self.ollama_exe: Path = ollama_exe
+        self.ollama_models: Path = ollama_models
+
+        if default_model is not None:
+            self.model = default_model
+        else:
+            from app.config import settings
+            self.model = str(settings.get("ollama_model") or self.DEFAULT_MODEL)
+
+        self.options = self._resolve_options(options or {})
+
         self._process: Optional[subprocess.Popen[bytes]] = None  # type: ignore[type-arg]
 
+    def _resolve_options(self, explicit: dict) -> dict:
+        resolved: dict = {"num_ctx": self.DEFAULT_NUM_CTX}
+        try:
+            from app.config import settings
+            for key in ("num_ctx", "num_gpu", "num_thread"):
+                val = settings.get(f"ollama_{key}")
+                if val is not None and str(val).strip() != "":
+                    resolved[key] = int(val)
+        except Exception:
+            pass
+        for key, val in explicit.items():
+            if val is not None:
+                resolved[key] = int(val)
+        return resolved
+
     def _start_server(self) -> bool:
-        if not OLLAMA_EXE.exists():
+        if self.external:
+            print(f"[AI] Ollama at {self.api_base} is not answering (it is managed outside this process).")
+            return False
+
+        if not self.ollama_exe.exists():
             print(
-                f"[AI] Ollama exe not found at {OLLAMA_EXE}\n"
+                f"[AI] Ollama exe not found at {self.ollama_exe}\n"
                 "Download ollama-windows-amd64.zip from "
                 "https://github.com/ollama/ollama/releases and extract to "
-                f"{OLLAMA_EXE.parent}"
+                f"{self.ollama_exe.parent}"
             )
             return False
 
@@ -72,23 +137,35 @@ class _OllamaBackend:
             return True
 
         env = os.environ.copy()
-        env["OLLAMA_MODELS"] = str(OLLAMA_MODELS)
+        env["OLLAMA_MODELS"] = str(self.ollama_models)
         env["OLLAMA_HOST"]   = "127.0.0.1:11434"
-        OLLAMA_MODELS.mkdir(parents=True, exist_ok=True)
+        self.ollama_models.mkdir(parents=True, exist_ok=True)
 
-        print(f"[AI] Starting Ollama server from {OLLAMA_EXE} ...")
+        print(f"[AI] Starting Ollama server from {self.ollama_exe} ...")
         try:
             self._process = subprocess.Popen(
-                [str(OLLAMA_EXE), "serve"],
+                [str(self.ollama_exe), "serve"],
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                # 2026-09-11: was DEVNULL/DEVNULL -- Ollama's own output
+                # (including why it failed, if it does, after this call
+                # returns) was being thrown away entirely. Now piped into
+                # the app's own rotating log file instead (tagged
+                # "ollama") via pipe_process_to_log() below, so a failure
+                # here is no longer a silent dead end. stderr is merged
+                # into stdout since Ollama (like most CLI tools) logs to
+                # stderr by default.
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
                 creationflags=(
                     subprocess.CREATE_NO_WINDOW
                     if sys.platform == "win32"
                     else 0
                 ),
             )
+            from app.logging_setup import pipe_process_to_log
+            pipe_process_to_log(self._process, "ollama")
         except Exception as e:
             print(f"[AI] Failed to start Ollama: {e}")
             return False
@@ -106,7 +183,7 @@ class _OllamaBackend:
         try:
             import urllib.request
             req = urllib.request.urlopen(
-                f"{self.API_BASE}/api/tags",
+                f"{self.api_base}/api/tags",
                 timeout=self.CONNECT_TIMEOUT,
             )
             return req.status == 200
@@ -131,26 +208,35 @@ class _OllamaBackend:
         try:
             import urllib.request
             req  = urllib.request.urlopen(
-                f"{self.API_BASE}/api/tags",
+                f"{self.api_base}/api/tags",
                 timeout=self.CONNECT_TIMEOUT,
             )
             data = json.loads(req.read().decode())
-            names: list[str] = [
-                str(m.get("name", ""))
+            names = {
+                self._normalize_tag(str(m.get("name", "")))
                 for m in (data.get("models") or [])
-            ]
-            target = self.model.split(":")[0].lower()
-            return any(target in n.lower() for n in names)
+            }
+            # Exact tag match. This used to substring-match on the part
+            # before the colon, so asking for "qwen2.5:7b" counted as
+            # already downloaded whenever "qwen2.5-coder:7b" existed -- the
+            # pull was skipped and every generation then failed with
+            # "model not found".
+            return self._normalize_tag(self.model) in names
         except Exception:
             return False
 
+    @staticmethod
+    def _normalize_tag(name: str) -> str:
+        name = name.strip().lower()
+        return name if ":" in name else f"{name}:latest"
+
     def pull_model(self) -> bool:
-        print(f"[AI] Pulling model: {self.model} → {OLLAMA_MODELS}")
+        print(f"[AI] Pulling model: {self.model} → {self.api_base if self.external else self.ollama_models}")
         try:
             import urllib.request
             body = json.dumps({"name": self.model}).encode()
             req  = urllib.request.Request(
-                f"{self.API_BASE}/api/pull",
+                f"{self.api_base}/api/pull",
                 data=body,
                 headers={"Content-Type": "application/json"},
                 method="POST",
@@ -190,6 +276,7 @@ class _OllamaBackend:
             "prompt": prompt,
             "stream": False,
             "options": {
+                **self.options,
                 "num_predict": max_tokens,
                 "temperature": 0.2,
                 "top_p":       0.9,
@@ -198,7 +285,7 @@ class _OllamaBackend:
         }).encode()
 
         req = urllib.request.Request(
-            f"{self.API_BASE}/api/generate",
+            f"{self.api_base}/api/generate",
             data=body,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -207,6 +294,17 @@ class _OllamaBackend:
         try:
             with urllib.request.urlopen(req, timeout=self.READ_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode())
+                # Ollama silently drops the start of a prompt that overflows
+                # num_ctx rather than erroring, which would quietly strip
+                # match data out of the analysis. Make that visible.
+                used = int(data.get("prompt_eval_count") or 0) + max_tokens
+                ctx = int(self.options.get("num_ctx") or 0)
+                if ctx and used > ctx * 0.9:
+                    print(
+                        f"[AI] WARNING: prompt ({data.get('prompt_eval_count')} tok) + "
+                        f"output budget ({max_tokens}) is near num_ctx={ctx}; "
+                        f"raise ollama_num_ctx if analyses look truncated."
+                    )
                 return str(data.get("response") or "").strip()
         except urllib.error.URLError as e:
             raise RuntimeError(f"Ollama request failed: {e}") from e
@@ -218,7 +316,11 @@ class _OllamaBackend:
 
 class _LlamaCppBackend:
 
-    def __init__(self) -> None:
+    def __init__(self, model_path: Optional[Path] = None) -> None:
+        if model_path is None:
+            from app.config import MODEL_PATH as _CLIENT_MODEL_PATH
+            model_path = _CLIENT_MODEL_PATH
+        self.model_path: Path = model_path
         self._llm: Any   = None
         self._error: Optional[str] = None
 
@@ -228,9 +330,9 @@ class _LlamaCppBackend:
         if self._error:
             raise RuntimeError(self._error)
 
-        if not MODEL_PATH.exists():
+        if not self.model_path.exists():
             self._error = (
-                f"No GGUF model at {MODEL_PATH}\n"
+                f"No GGUF model at {self.model_path}\n"
                 "Place model.gguf (Q4_K_M) in data/models/"
             )
             raise FileNotFoundError(self._error)
@@ -253,7 +355,7 @@ class _LlamaCppBackend:
 
         try:
             self._llm = Llama(
-                model_path=str(MODEL_PATH),
+                model_path=str(self.model_path),
                 n_gpu_layers=gpu_layers,
                 n_ctx=settings.LLM_N_CTX,
                 n_threads=n_threads,
@@ -262,7 +364,7 @@ class _LlamaCppBackend:
                 use_mlock=False,
                 use_mmap=True,
             )
-            print(f"[AI] llama-cpp loaded: {MODEL_PATH.name}")
+            print(f"[AI] llama-cpp loaded: {self.model_path.name}")
         except Exception as e:
             self._error = f"Model load failed: {e}"
             raise RuntimeError(self._error) from e
@@ -296,11 +398,42 @@ class IntelEngine:
     MAX_RETRIES = 2
     RETRY_DELAY = 1.0
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        model_path: Optional[Path] = None,
+        ollama_exe: Optional[Path] = None,
+        ollama_models: Optional[Path] = None,
+        default_model: Optional[str] = None,
+        db_path: Optional[Path] = None,
+        schema_path: Optional[Path] = None,
+        ollama_options: Optional[dict] = None,
+        ollama_url: Optional[str] = None,
+    ) -> None:
+        """
+        All paths default to the client's own app.config locations, same as
+        before. Passing them explicitly — as server/services/session_processing.py
+        does — points this exact class (Ollama-first, llama-cpp fallback,
+        same prompts, same MetricsEngine) at the server's own portable-Ollama
+        install and its own match database instead, with zero behavior change
+        for the client.
+        """
         _ensure_console()
-        self._ollama    = _OllamaBackend()
-        self._llama_cpp = _LlamaCppBackend()
+        self._ollama    = _OllamaBackend(ollama_exe, ollama_models, default_model, ollama_options, ollama_url)
+        self._llama_cpp = _LlamaCppBackend(model_path)
         self._backend: Optional[str] = None
+        self._db_path = db_path
+        self._schema_path = schema_path
+
+    def _make_repo(self):
+        from database.repositories import Repository
+
+        return Repository(db_path=self._db_path, schema_path=self._schema_path)
+
+    def store_ai_text(self, repo, match_id: int, name: str, value: str) -> None:
+        """Public alias for _store_metric — lets callers (e.g. the server's
+        per-player intel loop, which IntelEngine itself doesn't persist)
+        save an AI-generated text result the same way analyze_match does."""
+        self._store_metric(repo, match_id, name, value)
 
     def _select_backend(self) -> str:
         if self._backend is not None:
@@ -309,7 +442,7 @@ class IntelEngine:
         if self._ollama.ensure_running():
             if self._ollama.ensure_model():
                 self._backend = "ollama"
-                print(f"[AI] Backend: Ollama ({self._ollama.model})")
+                print(f"[AI] Backend: Ollama ({self._ollama.model}, options={self._ollama.options})")
                 return self._backend
             print("[AI] Ollama running but model pull failed.")
 
@@ -332,13 +465,20 @@ class IntelEngine:
     ) -> str:
         backend = self._select_backend()
 
+        if backend == "none" and self._ollama.external:
+            return (
+                "[AI unavailable]\n"
+                f"The Ollama service at {self._ollama.api_base} isn't answering, "
+                f"or couldn't load the model {self._ollama.model}."
+            )
+
         if backend == "none":
             return (
                 "[AI unavailable]\n"
                 "To enable AI analysis:\n"
                 "  Option A (recommended): Download ollama-windows-amd64.zip from\n"
                 "    https://github.com/ollama/ollama/releases\n"
-                f"    and extract to {OLLAMA_EXE.parent}\n"
+                f"    and extract to {self._ollama.ollama_exe.parent}\n"
                 "    The app will pull the model automatically on first run.\n\n"
                 "  Option B: Place a model.gguf (Q4_K_M) in data/models/ and install\n"
                 "    a compatible llama-cpp-python wheel."
@@ -376,10 +516,9 @@ class IntelEngine:
         match_id: int,
         progress_callback: Optional[Callable[..., Any]] = None,
     ) -> dict[str, Any]:
-        from database.repositories import Repository
         from analysis.metrics_engine import MetricsEngine
 
-        repo  = Repository()
+        repo  = self._make_repo()
         match = repo.get_match_full(match_id)
         if match is None:
             return {"error": f"Match {match_id} not found."}
@@ -413,10 +552,9 @@ class IntelEngine:
         match_id: int,
         progress_callback: Optional[Callable[..., Any]] = None,
     ) -> dict[str, Any]:
-        from database.repositories import Repository
         from analysis.metrics_engine import MetricsEngine
 
-        repo  = Repository()
+        repo  = self._make_repo()
         match = repo.get_match_full(match_id)
         if match is None:
             return {}
@@ -444,7 +582,10 @@ class IntelEngine:
                     i + 1, len(players),
                     f"Analyzing {name} ({i+1}/{len(players)})..."
                 )
-            prompt = self._build_player_prompt(stat, pdata, float(tps.get(pid, 0.0)))
+            comms_lines = self._get_player_transcript_lines(match_id, name)
+            prompt = self._build_player_prompt(
+                stat, pdata, float(tps.get(pid, 0.0)), comms_lines,
+            )
             results[name] = self.generate(prompt, max_tokens=400)
         return results
 
@@ -455,9 +596,8 @@ class IntelEngine:
         """
         result: dict[int, dict] = {}
         try:
-            from database.repositories import Repository
             import json
-            repo = Repository()
+            repo = self._make_repo()
             with repo.db.get_connection() as conn:
                 rows = conn.execute(
                     """SELECT metric_name, metric_text
@@ -568,33 +708,41 @@ class IntelEngine:
     def _build_comms_section(self, transcript: dict) -> str:
         if not transcript or int(transcript.get("word_count", 0)) == 0:
             return "  No comms data recorded this session.\n"
-    
+        if transcript.get("timeline_summary"):
+            return "\n".join(f"  {line}" for line in transcript["timeline_summary"].splitlines()) + "\n"
+
         top_locs    = list(transcript.get("top_locations", {}).keys())[:5]
         top_actions = list(transcript.get("top_actions",   {}).keys())[:5]
         gaps        = int(transcript.get("coord_gaps", 0))
         words       = int(transcript.get("word_count", 0))
         speakers    = dict(transcript.get("speakers", {}))
+        named       = dict(transcript.get("named_speakers", {}))
         fight_silence_count = int(transcript.get("fight_silence_count", 0))
         worst_silences      = list(transcript.get("worst_fight_silences", []))
-    
+
         speaker_lines = []
         for spk, sd in list(speakers.items())[:5]:
             wc  = int(sd.get("word_count", 0))
             top = list(sd.get("top_words", []))[:3]
+            label = named.get(spk, f"{spk} (untagged)")
             speaker_lines.append(
-                f"    {spk}: {wc} words — "
+                f"    {label}: {wc} words — "
                 f"top words: {', '.join(top) or 'none'}"
             )
-    
+
         section = (
             f"  Total words spoken : {words}\n"
             f"  Top location callouts : {', '.join(top_locs) or 'none'}\n"
             f"  Top action callouts   : {', '.join(top_actions) or 'none'}\n"
             f"  Communication gaps (>8s silence) : {gaps}\n"
         )
-    
+
         if speaker_lines:
-            section += "  Speakers (auto-detected, not named):\n"
+            tag_note = (
+                "named where tagged, see Analysis > Tag Speakers for the rest"
+                if len(named) < len(speakers) else "named"
+            )
+            section += f"  Speakers ({tag_note}):\n"
             section += "\n".join(speaker_lines) + "\n"
     
         if fight_silence_count > 0:
@@ -689,32 +837,10 @@ class IntelEngine:
             )
 
         # ── Comms section ─────────────────────────────────────────
-        comms_section = "  No comms data recorded this session.\n"
-        if transcript and int(transcript.get("word_count", 0)) > 0:
-            top_locs    = list(transcript.get("top_locations", {}).keys())[:5]
-            top_actions = list(transcript.get("top_actions",   {}).keys())[:5]
-            gaps        = int(transcript.get("coord_gaps", 0))
-            words       = int(transcript.get("word_count", 0))
-            speakers    = dict(transcript.get("speakers", {}))
-
-            speaker_lines = []
-            for spk, sd in list(speakers.items())[:5]:
-                wc  = int(sd.get("word_count", 0))
-                top = list(sd.get("top_words", []))[:3]
-                speaker_lines.append(
-                    f"    {spk}: {wc} words — "
-                    f"top words: {', '.join(top) or 'none'}"
-                )
-
-            comms_section = (
-                f"  Total words spoken : {words}\n"
-                f"  Top location callouts : {', '.join(top_locs) or 'none'}\n"
-                f"  Top action callouts   : {', '.join(top_actions) or 'none'}\n"
-                f"  Communication gaps (>8s silence) : {gaps}\n"
-            )
-            if speaker_lines:
-                comms_section += "  Speakers (auto-detected, not named):\n"
-                comms_section += "\n".join(speaker_lines) + "\n"
+        # (Also handles fight-intel-gap reporting — see _build_comms_section.
+        # Was duplicated inline here before Milestone 6; consolidated to one
+        # implementation so the named-speaker fix only had to be made once.)
+        comms_section = self._build_comms_section(transcript)
 
         # ── Build the full prompt ─────────────────────────────────
         prompt = f"""You are a Rainbow Six Siege post-match analyst. Your job is to write a clear, honest debrief based ONLY on the data provided below.
@@ -776,7 +902,7 @@ List what the data actually shows across multiple rounds. Reference specific rou
 Based only on the weaknesses visible in the numbers, list 2–3 specific, actionable adjustments. Do not invent context. If engagement win rate is low, say "improve gunfight consistency" not "use more smokes". If no stats were recorded, focus on observable round patterns only.
 
 ## COMMUNICATION
-Summarise comms data if present. If speaker names are "Speaker_1" etc., note these are auto-detected and may not match actual players. If no comms data, write: No comms data recorded.
+Summarise comms data if present. When talk share and flagged moments are listed, name who talked most and least, and quote one or two of the flagged moments with their round and clock -- they are measured from the recording, not guesses. If speaker names are "Speaker_1" etc., note these are auto-detected and may not match actual players. If no comms data, write: No comms data recorded.
 
 """
         return prompt
@@ -786,6 +912,7 @@ Summarise comms data if present. If speaker names are "Speaker_1" etc., note the
         stat: Any,
         pdata: dict[str, Any],
         tps_score: float,
+        comms_lines: Optional[list[str]] = None,
     ) -> str:
         k  = int(pdata.get("kills", 0))
         d  = int(pdata.get("deaths", 0))
@@ -799,9 +926,32 @@ Summarise comms data if present. If speaker names are "Speaker_1" etc., note the
                 "manual round entry was not completed for this match."
             )
 
+        # Comms section — empty until this player's speaker cluster has
+        # been tagged for this match (Analysis > Tag Speakers). Optional
+        # on purpose: quantitative feedback below doesn't depend on it.
+        comms_section = ""
+        if comms_lines:
+            quoted = "\n".join(f'  - "{line}"' for line in comms_lines)
+            comms_section = (
+                f"\nCOMMS (things {stat.player.name} said this match, "
+                f"per tagged transcript segments):\n{quoted}\n"
+            )
+
+        # Replays don't carry ability/gadget charges, so for imported matches
+        # these totals are 0 and "Utility Efficiency 0%" just means "unknown".
+        # Showing it anyway had the model telling nearly every player to
+        # practise using their gadgets.
+        utility_line = ""
+        if int(pdata.get("ability_total", 0)) + int(pdata.get("gadget_total", 0)) > 0:
+            utility_line = (
+                f"Utility Efficiency  : {float(pdata.get('utility_efficiency', 0)):.0%}  "
+                f"(ability + gadget usage rate)\n"
+            )
+
         return (
             "You are a Rainbow Six Siege performance coach. Be direct and specific.\n"
-            "RULES: Only reference stats shown below. Do not invent operators or strategies.\n\n"
+            "RULES: Only reference stats and comms shown below. Do not invent operators, "
+            "strategies, or things this player didn't say.\n\n"
             f"PLAYER: {stat.player.name}\n"
             f"ROUNDS PLAYED: {rp}\n"
             f"K/D/A: {k}/{d}/{a}  KD: {float(pdata.get('kd_ratio', 0)):.2f}\n"
@@ -809,67 +959,125 @@ Summarise comms data if present. If speaker names are "Speaker_1" etc., note the
             f"(gunfights won out of taken)\n"
             f"Survival Rate       : {float(pdata.get('survival_rate', 0)):.0%}  "
             f"(rounds survived)\n"
-            f"Utility Efficiency  : {float(pdata.get('utility_efficiency', 0)):.0%}  "
-            f"(ability + gadget usage rate)\n"
-            f"TPS Score           : {tps_score:.3f}  (composite performance)\n\n"
-            "Respond in EXACTLY this format, citing only the stats above:\n"
-            "STRENGTH: [one specific strength — cite the stat that shows it]\n"
-            "FOCUS: [one area to improve — cite the stat that shows it]\n"
+            f"{utility_line}"
+            f"TPS Score          : {tps_score:.3f}  (composite performance)\n"
+            f"{comms_section}\n"
+            "Respond in EXACTLY this format, citing only the stats (and comms, if given) above:\n"
+            "STRENGTH: [one specific strength — cite the stat or comms line that shows it]\n"
+            "FOCUS: [one area to improve — cite the stat or comms line that shows it]\n"
             "DRILL: [one concrete practice activity that addresses the focus area]\n"
         )
 
     def _get_transcript_summary(self, match_id: int) -> dict:
-        import json
         try:
-            from database.repositories import Repository
-            repo = Repository()
+            repo = self._make_repo()
+            # A comms timeline (server: speaker-separated tracks lined up
+            # with the kill feed) says who said what and when; prefer its
+            # measured summary over the keyword counts below.
             with repo.db.get_connection() as conn:
                 row = conn.execute(
-                    "SELECT processed_segments_json FROM transcripts WHERE match_id = ?",
-                    (match_id,)
+                    "SELECT metric_text FROM derived_metrics WHERE match_id = ? AND metric_name = 'comms_summary'",
+                    (match_id,),
                 ).fetchone()
-            if not row or not row["processed_segments_json"]:
+            if row and row[0]:
+                return {"timeline_summary": row[0], "word_count": 1}
+            data = repo.get_transcript_processed_data(match_id)
+            if not data:
                 return {}
-            data = json.loads(row["processed_segments_json"])
+            named = repo.get_named_speaker_map(match_id)
             return {
                 "top_locations":        data.get("location_freq") or {},
                 "top_actions":          data.get("action_freq")   or {},
                 "coord_gaps":           len(data.get("coordination_gaps") or []),
                 "word_count":           int(data.get("word_count") or 0),
                 "speakers":             data.get("speakers") or {},
+                "named_speakers":       named,  # {"Speaker_1": "PlayerName", ...} — only tagged ones
                 "fight_silence_count":  int(data.get("fight_silence_count") or 0),
                 "worst_fight_silences": data.get("fight_silences") or [],
             }
         except Exception:
             return {}
 
+    def _get_player_transcript_lines(
+        self, match_id: int, player_name: str, max_lines: int = 8
+    ) -> list[str]:
+        """
+        Lines this specific player said in comms, resolved through the
+        manual speaker-tagging map (transcript_speaker_labels — see
+        gui/speaker_tagging_dialog.py). Empty until someone has actually
+        tagged a speaker as this player for this match; that's expected
+        and get_player_intel()/_build_player_prompt() handle it gracefully
+        rather than treating it as an error.
+        """
+        try:
+            repo = self._make_repo()
+            data = repo.get_transcript_processed_data(match_id)
+            if not data:
+                return []
+            named = repo.get_named_speaker_map(match_id)
+            my_tags = [tag for tag, name in named.items() if name == player_name]
+            if not my_tags:
+                return []
+
+            speakers = data.get("speakers") or {}
+            lines: list[tuple[float, str]] = []
+            for tag in my_tags:
+                for seg in (speakers.get(tag, {}).get("segments") or []):
+                    text = str(seg.get("text") or "").strip()
+                    if text:
+                        lines.append((float(seg.get("start") or 0.0), text))
+
+            lines.sort(key=lambda x: x[0])
+            return [text for _, text in lines[:max_lines]]
+        except Exception:
+            return []
+
     def _store_metric(self, repo, match_id: int, name: str, value: str) -> None:
-        """Store AI-generated text metric. metric_value = char count, metric_text = full text."""
+        """Store AI-generated text metric. metric_value = char count, metric_text = full text.
+
+        Update-then-insert rather than INSERT ... ON CONFLICT(match_id,
+        metric_name): derived_metrics has no unique constraint on that pair,
+        so the ON CONFLICT form raises "ON CONFLICT clause does not match any
+        PRIMARY KEY or UNIQUE constraint" on every single call. That sat
+        behind a bare `except` that assumed the only possible cause was an
+        old DB missing metric_text, and quietly fell back to writing the
+        char count with no text at all -- so every AI summary and every piece
+        of player intel was generated, paid for in GPU time, reported as
+        "completed", and then thrown away, on both the client and the server.
+        This form needs no constraint, works on old and new databases alike,
+        and does not create duplicate rows.
+
+        A failure message ("[AI unavailable]...", "[AI] Generation failed...")
+        never replaces text that was already generated successfully: a
+        re-run that hits a transient Ollama error (out of memory, server
+        restarting) used to wipe out a perfectly good summary with the error.
+        """
         try:
             with repo.db.get_connection() as conn:
-                # Try INSERT with metric_text; fall back gracefully if column missing
-                try:
+                if value.startswith(_AI_FAILURE_MARKERS):
+                    existing = conn.execute(
+                        "SELECT metric_text FROM derived_metrics WHERE match_id = ? AND metric_name = ?",
+                        (match_id, name),
+                    ).fetchone()
+                    if existing and existing[0] and not existing[0].startswith(_AI_FAILURE_MARKERS):
+                        return
+                updated = conn.execute(
+                    """UPDATE derived_metrics
+                       SET metric_value = ?, metric_text = ?, is_ai_generated = 1
+                       WHERE match_id = ? AND metric_name = ?""",
+                    (float(len(value)), value, match_id, name),
+                ).rowcount
+
+                if not updated:
                     conn.execute(
                         """INSERT INTO derived_metrics
                         (match_id, metric_name, metric_value, metric_text, is_ai_generated)
-                        VALUES (?, ?, ?, ?, 1)
-                        ON CONFLICT(match_id, metric_name) DO UPDATE SET
-                            metric_value = excluded.metric_value,
-                            metric_text  = excluded.metric_text""",
+                        VALUES (?, ?, ?, ?, 1)""",
                         (match_id, name, float(len(value)), value),
-                    )
-                except Exception:
-                    # metric_text column may not exist on old DBs — use float-only fallback
-                    conn.execute(
-                        """INSERT INTO derived_metrics
-                        (match_id, metric_name, metric_value, is_ai_generated)
-                        VALUES (?, ?, ?, 1)
-                        ON CONFLICT DO NOTHING""",
-                        (match_id, name, float(len(value))),
                     )
                 conn.commit()
         except Exception as e:
-            print(f"[AI] Store metric failed: {e}")
+            print(f"[AI] Store metric failed for '{name}': {e}")
 
     def shutdown(self) -> None:
         self._ollama.stop_server()

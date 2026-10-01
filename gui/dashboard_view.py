@@ -1,76 +1,252 @@
 """
 gui/dashboard_view.py
 
-Landing dashboard showing team performance at a glance.
-Loads from the database on demand — no live polling needed.
+Landing dashboard: team form, maps, operators, players, and whether the
+server and the upload queue are healthy. Data is loaded on a worker thread
+and only when the database has actually changed, so switching to this tab
+never freezes the window.
 """
 from __future__ import annotations
 
+import json
+import threading
 from datetime import datetime
 from typing import Optional
 
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
-    QScrollArea, QSizePolicy, QGridLayout, QSpacerItem
+    QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QPushButton,
+    QScrollArea, QSizePolicy, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont
+
+BG = "#0f1115"
+PANEL = "#171a21"
+PANEL_ALT = "#1b1f27"
+BORDER = "#262b35"
+TEXT = "#e6e8ec"
+MUTED = "#8a93a3"
+FAINT = "#5b6474"
+GREEN = "#3ecf8e"
+RED = "#ef5b5b"
+AMBER = "#f2b84b"
+BLUE = "#5b9cf2"
+ORANGE = "#f28b4b"
+PURPLE = "#a47cf2"
+
+_RATE_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+def _pct(v: Optional[float]) -> str:
+    return "—" if v is None else f"{v:.0%}"
+
+
+def _rate_color(v: Optional[float]) -> str:
+    if v is None:
+        return MUTED
+    return GREEN if v >= 0.55 else RED if v < 0.45 else AMBER
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SMALL STAT CARD WIDGET
+# SMALL WIDGETS
 # ─────────────────────────────────────────────────────────────────────────────
 
-class _StatCard(QFrame):
-    def __init__(
-        self,
-        title: str,
-        value: str,
-        sub: str = "",
-        color: str = "#55e07a",
-        parent: Optional[QWidget] = None,
-    ) -> None:
+class _Card(QFrame):
+    def __init__(self, title: str, accent: str = GREEN, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setStyleSheet(f"""
-            QFrame {{
-                background: #1e1e1e;
-                border: 1px solid #333;
-                border-radius: 8px;
-                padding: 4px;
-            }}
-        """)
+        self.setObjectName("card")
+        self.setStyleSheet(
+            f"#card {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 10px; "
+            f"border-top: 3px solid {accent}; }}"
+        )
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumHeight(90)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(2)
+        t = QLabel(title.upper())
+        t.setStyleSheet(f"color: {MUTED}; font-size: 10px; font-weight: 600; letter-spacing: 1px; border: none;")
+        self._value = QLabel("—")
+        self._value.setStyleSheet(f"color: {TEXT}; font-size: 26px; font-weight: 700; border: none;")
+        self._sub = QLabel("")
+        self._sub.setStyleSheet(f"color: {FAINT}; font-size: 11px; border: none;")
+        lay.addWidget(t)
+        lay.addWidget(self._value)
+        lay.addWidget(self._sub)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(2)
+    def set(self, value: str, sub: str = "", color: str = TEXT) -> None:
+        self._value.setText(value)
+        self._value.setStyleSheet(f"color: {color}; font-size: 26px; font-weight: 700; border: none;")
+        self._sub.setText(sub)
 
-        title_lbl = QLabel(title)
-        title_lbl.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; letter-spacing: 1px;")
-        layout.addWidget(title_lbl)
 
-        self._value_lbl = QLabel(value)
-        self._value_lbl.setStyleSheet(f"color: {color}; font-size: 26px; font-weight: bold;")
-        layout.addWidget(self._value_lbl)
+class _Pill(QLabel):
+    def set_state(self, text: str, color: str) -> None:
+        self.setText(f"●  {text}")
+        self.setStyleSheet(
+            f"color: {color}; background: {PANEL}; border: 1px solid {BORDER}; "
+            f"border-radius: 11px; padding: 3px 10px; font-size: 11px; font-weight: 600;"
+        )
 
-        if sub:
-            sub_lbl = QLabel(sub)
-            sub_lbl.setStyleSheet("color: #666; font-size: 10px;")
-            layout.addWidget(sub_lbl)
 
-        layout.addStretch()
+class _FormStrip(QWidget):
+    """Last-10 results as coloured tiles, oldest on the left."""
 
-    def set_value(self, value: str, color: str = "") -> None:
-        self._value_lbl.setText(value)
-        if color:
-            current = self._value_lbl.styleSheet()
-            # Replace colour
-            import re
-            updated = re.sub(r"color: #[0-9a-fA-F]+;", f"color: {color};", current)
-            self._value_lbl.setStyleSheet(updated)
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._form: list[str] = []
+        self.setFixedHeight(30)
+        self.setMinimumWidth(10 * 30)
+
+    def set_form(self, form: list[str]) -> None:
+        self._form = form
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        size, gap = 26, 5
+        for i, res in enumerate(self._form):
+            r = QRectF(i * (size + gap), 2, size, size)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(GREEN if res == "win" else RED))
+            p.drawRoundedRect(r, 6, 6)
+            p.setPen(QColor("#0b0d10"))
+            f = p.font()
+            f.setBold(True)
+            p.setFont(f)
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, "W" if res == "win" else "L")
+        if not self._form:
+            p.setPen(QColor(FAINT))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignVCenter, "No decided matches yet")
+
+
+class _Sparkline(QWidget):
+    """TPS per match, dots coloured by the match result."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._rows: list[dict] = []
+        self.setMinimumHeight(110)
+        self.setStyleSheet(f"background: {PANEL}; border: 1px solid {BORDER}; border-radius: 10px;")
+
+    def set_rows(self, rows: list[dict]) -> None:
+        self._rows = rows
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(BORDER), 1))
+        p.setBrush(QColor(PANEL))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+        vals = [r["tps"] for r in self._rows]
+        if len(vals) < 2:
+            p.setPen(QColor(FAINT))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Trend appears after 2+ matches")
+            return
+        left, right, top, bottom = 44, 14, 14, 20
+        w = self.width() - left - right
+        h = self.height() - top - bottom
+        lo, hi = min(vals), max(vals)
+        if hi - lo < 1e-9:
+            lo, hi = lo - 0.05, hi + 0.05
+
+        def pt(i: int, v: float) -> QPointF:
+            return QPointF(left + w * i / (len(vals) - 1), top + h * (1 - (v - lo) / (hi - lo)))
+
+        p.setPen(QColor(FAINT))
+        f = p.font()
+        f.setPointSize(8)
+        p.setFont(f)
+        for v in (lo, hi):
+            p.drawText(QRectF(0, pt(0, v).y() - 8, left - 6, 16),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{v:.2f}")
+        path = QPainterPath(pt(0, vals[0]))
+        for i, v in enumerate(vals[1:], 1):
+            path.lineTo(pt(i, v))
+        p.setPen(QPen(QColor(PURPLE), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        p.setPen(Qt.PenStyle.NoPen)
+        for i, r in enumerate(self._rows):
+            p.setBrush(QColor(GREEN if r["result"] == "win" else RED))
+            p.drawEllipse(pt(i, r["tps"]), 3.5, 3.5)
+
+
+class _RateBarDelegate(QStyledItemDelegate):
+    """Draws a thin win-rate bar under cells that carry a rate."""
+
+    def paint(self, painter, option, index) -> None:  # type: ignore[override]
+        rate = index.data(_RATE_ROLE)
+        if rate is not None:
+            painter.save()
+            r = option.rect.adjusted(8, option.rect.height() - 6, -8, -3)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(BORDER))
+            painter.drawRoundedRect(r, 1.5, 1.5)
+            filled = QRectF(r)
+            filled.setWidth(r.width() * max(0.0, min(1.0, rate)))
+            painter.setBrush(QColor(_rate_color(rate)))
+            painter.drawRoundedRect(filled, 1.5, 1.5)
+            painter.restore()
+        super().paint(painter, option, index)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BACKGROUND LOADING
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _Signals(QObject):
+    data_ready = Signal(object)
+    data_failed = Signal(str)
+    status_ready = Signal(object)
+
+
+def _load_dashboard(force: bool, last_signature) -> dict:
+    from analysis.dashboard_stats import build_dashboard
+    from database.repositories import Repository
+
+    repo = Repository()
+    sig = repo.data_signature()
+    if not force and sig == last_signature:
+        return {"unchanged": True, "signature": sig}
+    matches = repo.get_all_matches_full()
+    roster = [(p.player_id, p.name) for p in repo.get_team_players()]
+    vm = build_dashboard(matches, {pid for pid, _ in roster}, roster)
+    vm["roster"] = roster
+    vm["unlinked"] = repo.get_frequent_unlinked_players()
+    vm["signature"] = sig
+    return vm
+
+
+def _load_connection_status() -> dict:
+    from app.config import settings
+    from app.upload_queue import QUEUE_FILE
+    from app.uploader import SessionUploader
+
+    status: dict = {"configured": bool(settings.SERVER_URL) and settings.ANALYSIS_MODE != "local"}
+    if status["configured"]:
+        res = SessionUploader().test_connection()
+        status["online"] = res.success
+        status["error"] = res.error
+    counts = {"uploaded": 0, "waiting": 0, "failed": 0}
+    try:
+        data = json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
+        items = data.get("items", data) if isinstance(data, dict) else data
+        items = list(items.values()) if isinstance(items, dict) else items
+        for it in items:
+            st = it.get("package_status")
+            if st == "uploaded":
+                counts["uploaded"] += 1
+            elif st == "upload_failed":
+                counts["failed"] += 1
+            elif st in ("pending_upload", "uploading", "partial_data"):
+                counts["waiting"] += 1
+    except (OSError, ValueError):
+        pass
+    status["queue"] = counts
+    return status
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,467 +254,458 @@ class _StatCard(QFrame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DashboardView(QWidget):
+    STATUS_INTERVAL_MS = 60_000
+    PLAYER_ROWS = 12
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self._vm: dict = {}
+        self._signature = None
+        self._loading = False
+        self._checking = False
+        self._signals = _Signals(self)
+        self._signals.data_ready.connect(self._on_data)
+        self._signals.data_failed.connect(self._on_failed)
+        self._signals.status_ready.connect(self._on_status)
         self._build_ui()
-        # Auto-refresh when tab becomes visible
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.setSingleShot(True)
-        self._refresh_timer.timeout.connect(self.refresh)
+
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(self.STATUS_INTERVAL_MS)
+        self._status_timer.timeout.connect(self._check_connection)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
-        # Defer refresh slightly so the tab finishes painting first
-        self._refresh_timer.start(50)
+        QTimer.singleShot(0, lambda: self.refresh(force=False))
+        self._check_connection()
+        self._status_timer.start()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        super().hideEvent(event)
+        self._status_timer.stop()
 
     # ─────────────────────────────────────────────────────────────────────────
     # UI BUILD
     # ─────────────────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
+        self.setStyleSheet(f"DashboardView {{ background: {BG}; }}")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        # Scrollable content area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-
         content = QWidget()
-        content.setStyleSheet("background: #121212;")
-        self._layout = QVBoxLayout(content)
-        self._layout.setContentsMargins(24, 20, 24, 24)
-        self._layout.setSpacing(20)
+        content.setObjectName("dashContent")
+        content.setStyleSheet(f"#dashContent {{ background: {BG}; }} QLabel {{ color: {TEXT}; }}")
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(24, 20, 24, 28)
+        lay.setSpacing(16)
 
-        # ── Header row ────────────────────────────────────────────
-        header_row = QHBoxLayout()
+        # Header
+        head = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
         title = QLabel("Team Dashboard")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #fff;")
-        header_row.addWidget(title)
-        header_row.addStretch()
-
-        self._last_updated = QLabel("")
-        self._last_updated.setStyleSheet("font-size: 10px; color: #555;")
-        header_row.addWidget(self._last_updated)
-
-        refresh_btn = QPushButton("↺  Refresh")
-        refresh_btn.setFixedHeight(30)
-        refresh_btn.setFixedWidth(90)
-        refresh_btn.setStyleSheet(
-            "QPushButton { background: #1e1e1e; border: 1px solid #444; "
-            "color: #aaa; border-radius: 4px; font-size: 11px; }"
-            "QPushButton:hover { background: #2a2a2a; color: #fff; }"
+        title.setStyleSheet(f"font-size: 24px; font-weight: 700; color: {TEXT};")
+        self._subtitle = QLabel("Loading…")
+        self._subtitle.setStyleSheet(f"font-size: 12px; color: {MUTED};")
+        titles.addWidget(title)
+        titles.addWidget(self._subtitle)
+        head.addLayout(titles)
+        head.addStretch()
+        self._server_pill = _Pill()
+        self._server_pill.set_state("Server: checking…", MUTED)
+        self._queue_pill = _Pill()
+        self._queue_pill.set_state("Uploads: —", MUTED)
+        head.addWidget(self._server_pill)
+        head.addWidget(self._queue_pill)
+        refresh = QPushButton("↻  Refresh")
+        refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh.setStyleSheet(
+            f"QPushButton {{ background: {PANEL}; border: 1px solid {BORDER}; color: {TEXT}; "
+            f"border-radius: 6px; padding: 6px 14px; font-size: 12px; }}"
+            f"QPushButton:hover {{ background: {PANEL_ALT}; border-color: {BLUE}; }}"
         )
-        refresh_btn.clicked.connect(self.refresh)
-        header_row.addWidget(refresh_btn)
-        self._layout.addLayout(header_row)
+        refresh.clicked.connect(lambda: (self.refresh(force=True), self._check_connection()))
+        head.addWidget(refresh)
+        lay.addLayout(head)
 
-        # ── Stat cards row ────────────────────────────────────────
-        cards_grid = QGridLayout()
-        cards_grid.setSpacing(12)
-
-        self._card_matches   = _StatCard("MATCHES PLAYED", "—", color="#55e07a")
-        self._card_winrate   = _StatCard("OVERALL WIN RATE", "—", color="#55e07a")
-        self._card_atk       = _StatCard("ATTACK WIN RATE", "—", color="#5599e0")
-        self._card_def       = _StatCard("DEFENSE WIN RATE", "—", color="#e09955")
-        self._card_ewr       = _StatCard("AVG ENGAGEMENT WIN%", "—", color="#aa55e0")
-        self._card_streak    = _StatCard("CURRENT STREAK", "—", color="#e05555")
-
-        cards_grid.addWidget(self._card_matches,  0, 0)
-        cards_grid.addWidget(self._card_winrate,  0, 1)
-        cards_grid.addWidget(self._card_atk,      0, 2)
-        cards_grid.addWidget(self._card_def,      1, 0)
-        cards_grid.addWidget(self._card_ewr,      1, 1)
-        cards_grid.addWidget(self._card_streak,   1, 2)
-        self._layout.addLayout(cards_grid)
-
-        # ── Section: Recent Matches ───────────────────────────────
-        self._layout.addWidget(self._section_label("RECENT MATCHES"))
-        self._matches_table = self._make_table(
-            ["#", "Date", "Opponent", "Map", "Score", "Result", "ATK%", "DEF%"],
-            stretch_col=2,
+        # Unlinked-teammate hint
+        self._unlinked = QLabel("")
+        self._unlinked.setWordWrap(True)
+        self._unlinked.setStyleSheet(
+            f"background: #2a2314; color: {AMBER}; border: 1px solid #4a3b1a; "
+            f"border-radius: 8px; padding: 9px 12px; font-size: 12px;"
         )
-        self._matches_table.setMaximumHeight(220)
-        self._layout.addWidget(self._matches_table)
+        self._unlinked.hide()
+        lay.addWidget(self._unlinked)
 
-        # ── Section: Player Leaderboard ───────────────────────────
-        self._layout.addWidget(self._section_label("PLAYER LEADERBOARD  (all matches)"))
-        self._players_table = self._make_table(
-            ["Player", "Matches", "K", "D", "A", "K/D", "Eng Win%", "Survival%", "TPS"],
-            stretch_col=0,
+        # KPI cards
+        cards = QGridLayout()
+        cards.setSpacing(12)
+        self._c_record = _Card("Record", GREEN)
+        self._c_winrate = _Card("Match win rate", GREEN)
+        self._c_rounds = _Card("Round win rate", PURPLE)
+        self._c_atk = _Card("Attack", BLUE)
+        self._c_def = _Card("Defense", ORANGE)
+        self._c_streak = _Card("Current streak", RED)
+        for i, c in enumerate((self._c_record, self._c_winrate, self._c_rounds,
+                               self._c_atk, self._c_def, self._c_streak)):
+            cards.addWidget(c, i // 3, i % 3)
+        lay.addLayout(cards)
+
+        # Form
+        form_row = QHBoxLayout()
+        form_row.addWidget(self._section("Last 10 matches"))
+        form_row.addSpacing(12)
+        self._form = _FormStrip()
+        form_row.addWidget(self._form)
+        form_row.addStretch()
+        lay.addLayout(form_row)
+
+        # Recent matches | Maps
+        two = QHBoxLayout()
+        two.setSpacing(16)
+        self._recent = self._table(["Date", "Map", "Rounds", "ATK", "DEF", "Result"], stretch=1)
+        self._maps = self._table(["Map", "Played", "W–L", "Win %", "ATK %", "DEF %"], stretch=0)
+        two.addLayout(self._panel("Recent matches", self._recent), 3)
+        two.addLayout(self._panel("Map performance", self._maps), 2)
+        lay.addLayout(two)
+
+        # Leaderboard
+        self._board = self._table(["Player", "Matches", "Kills", "Deaths", "Assists", "K/D", "Survival", "Avg TPS"], stretch=0)
+        lay.addLayout(self._panel("Player leaderboard  ·  linked teammates", self._board))
+
+        # Player detail
+        detail_head = QHBoxLayout()
+        detail_head.addWidget(self._section("Player detail"))
+        detail_head.addSpacing(12)
+        self._player_combo = QComboBox()
+        self._player_combo.setMinimumWidth(220)
+        self._player_combo.setStyleSheet(
+            f"QComboBox {{ background: {PANEL}; color: {TEXT}; border: 1px solid {BORDER}; "
+            f"border-radius: 6px; padding: 4px 8px; }}"
         )
-        self._players_table.setMaximumHeight(200)
-        self._layout.addWidget(self._players_table)
+        self._player_combo.currentIndexChanged.connect(self._render_player)
+        detail_head.addWidget(self._player_combo)
+        detail_head.addStretch()
+        lay.addLayout(detail_head)
 
-        # ── Section: Most-Played Maps ─────────────────────────────
-        self._layout.addWidget(self._section_label("MAP PERFORMANCE"))
-        self._maps_table = self._make_table(
-            ["Map", "Played", "Wins", "Win%", "ATK Win%", "DEF Win%"],
-            stretch_col=0,
+        pcards = QGridLayout()
+        pcards.setSpacing(12)
+        self._p_matches = _Card("Matches", GREEN)
+        self._p_tps = _Card("Avg TPS", PURPLE)
+        self._p_trend = _Card("Recent trend", BLUE)
+        self._p_consistency = _Card("Consistency", ORANGE)
+        self._p_consistency.setToolTip(
+            "Spread of this player's TPS across matches — lower means steadier performance."
         )
-        self._maps_table.setMaximumHeight(180)
-        self._layout.addWidget(self._maps_table)
+        for i, c in enumerate((self._p_matches, self._p_tps, self._p_trend, self._p_consistency)):
+            pcards.addWidget(c, 0, i)
+        lay.addLayout(pcards)
+        self._spark = _Sparkline()
+        lay.addWidget(self._spark)
+        self._p_table = self._table(["Date", "Map", "Result", "K–D–A", "K/D", "Survival", "TPS"], stretch=1)
+        lay.addWidget(self._p_table)
+        self._p_more = QLabel("")
+        self._p_more.setStyleSheet(f"color: {FAINT}; font-size: 11px;")
+        lay.addWidget(self._p_more)
 
-        # ── Section: Most-Played Operators ───────────────────────
-        self._layout.addWidget(self._section_label("OPERATOR USAGE  (team picks, replay data)"))
-        self._ops_table = self._make_table(
-            ["Operator", "Side", "Rounds Played", "Wins", "Win%"],
-            stretch_col=0,
-        )
-        self._ops_table.setMaximumHeight(180)
-        self._layout.addWidget(self._ops_table)
+        # Operators
+        ops = QHBoxLayout()
+        ops.setSpacing(16)
+        self._ops_atk = self._table(["Operator", "Rounds", "Won", "Win %"], stretch=0)
+        self._ops_def = self._table(["Operator", "Rounds", "Won", "Win %"], stretch=0)
+        ops.addLayout(self._panel("Attack picks  ·  your team", self._ops_atk), 1)
+        ops.addLayout(self._panel("Defense picks  ·  your team", self._ops_def), 1)
+        lay.addLayout(ops)
 
-        self._layout.addStretch()
-
+        lay.addStretch()
         scroll.setWidget(content)
         outer.addWidget(scroll)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # HELPERS
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _section_label(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setStyleSheet(
-            "color: #666; font-size: 10px; font-weight: bold; "
-            "letter-spacing: 1px; padding-top: 4px;"
-        )
+    def _section(self, text: str) -> QLabel:
+        lbl = QLabel(text.upper())
+        lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px; font-weight: 600; letter-spacing: 1px;")
         return lbl
 
-    def _make_table(self, headers: list[str], stretch_col: int = 0) -> QTableWidget:
+    def _panel(self, title: str, table: QTableWidget) -> QVBoxLayout:
+        v = QVBoxLayout()
+        v.setSpacing(8)
+        v.addWidget(self._section(title))
+        v.addWidget(table)
+        return v
+
+    def _table(self, headers: list[str], stretch: int) -> QTableWidget:
         t = QTableWidget(0, len(headers))
         t.setHorizontalHeaderLabels(headers)
         t.verticalHeader().setVisible(False)
-        t.setAlternatingRowColors(True)
+        t.verticalHeader().setDefaultSectionSize(30)
         t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        t.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        t.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         t.setShowGrid(False)
-        t.horizontalHeader().setSectionResizeMode(
-            stretch_col, QHeaderView.ResizeMode.Stretch
-        )
+        t.setAlternatingRowColors(True)
+        t.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        t.setItemDelegate(_RateBarDelegate(t))
+        hh = t.horizontalHeader()
         for i in range(len(headers)):
-            if i != stretch_col:
-                t.horizontalHeader().setSectionResizeMode(
-                    i, QHeaderView.ResizeMode.ResizeToContents
-                )
-        t.setStyleSheet("""
-            QTableWidget { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; }
-            QTableWidget::item { padding: 5px 8px; color: #ddd; }
-            QTableWidget::item:alternate { background: #1e1e1e; }
-            QHeaderView::section { background: #222; color: #888; padding: 6px 8px;
-                font-size: 10px; font-weight: bold; border: none; border-bottom: 1px solid #333; }
-        """)
+            hh.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch if i == stretch
+                                    else QHeaderView.ResizeMode.ResizeToContents)
+        t.setStyleSheet(
+            f"QTableWidget {{ background: {PANEL}; alternate-background-color: {PANEL_ALT}; "
+            f"border: 1px solid {BORDER}; border-radius: 10px; color: {TEXT}; }}"
+            f"QTableWidget::item {{ padding: 0 10px; border: none; }}"
+            f"QHeaderView::section {{ background: {PANEL}; color: {MUTED}; padding: 8px 10px; "
+            f"font-size: 10px; font-weight: 600; border: none; border-bottom: 1px solid {BORDER}; }}"
+        )
         return t
 
-    def _cell(self, text: str, color: str = "") -> QTableWidgetItem:
-        item = QTableWidgetItem(str(text))
-        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        if color:
-            item.setForeground(QColor(color))
-        return item
+    @staticmethod
+    def _cell(text, color: str = TEXT, rate: Optional[float] = None,
+              align=Qt.AlignmentFlag.AlignCenter, tip: str = "") -> QTableWidgetItem:
+        it = QTableWidgetItem(str(text))
+        it.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+        it.setForeground(QColor(color))
+        if rate is not None:
+            it.setData(_RATE_ROLE, rate)
+        if tip:
+            it.setToolTip(tip)
+        return it
+
+    @staticmethod
+    def _fit(t: QTableWidget, rows: int) -> None:
+        """Show every row without an inner scrollbar; the page scrolls."""
+        t.setRowCount(rows)
+        h = t.horizontalHeader().height() + max(rows, 1) * t.verticalHeader().defaultSectionSize() + 4
+        t.setFixedHeight(h)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # DATA LOADING
+    # LOADING
     # ─────────────────────────────────────────────────────────────────────────
 
-    def refresh(self) -> None:
-        try:
-            from database.repositories import Repository
-            from analysis.metrics_engine import MetricsEngine
-            repo = Repository()
-            matches = repo.get_all_matches()
-
-            if not matches:
-                self._show_empty()
-                return
-
-            # Load full match objects (with rounds + player stats)
-            full_matches = []
-            for m in matches:
-                if m.match_id is None:
-                    continue
-                try:
-                    fm = repo.get_match_full(m.match_id)
-                    if fm is not None:
-                        full_matches.append(fm)
-                except Exception:
-                    pass
-
-            self._populate_cards(full_matches)
-            self._populate_recent_matches(full_matches[-10:][::-1])  # 10 most recent
-            self._populate_player_leaderboard(full_matches, MetricsEngine)
-            self._populate_map_stats(full_matches)
-            self._populate_operator_stats(full_matches)
-
-            self._last_updated.setText(
-                f"Last updated: {datetime.now().strftime('%H:%M:%S')}"
-            )
-
-        except Exception as e:
-            self._last_updated.setText(f"Error loading data: {e}")
-
-    def _show_empty(self) -> None:
-        self._card_matches.set_value("0")
-        self._card_winrate.set_value("—")
-        self._card_atk.set_value("—")
-        self._card_def.set_value("—")
-        self._card_ewr.set_value("—")
-        self._card_streak.set_value("—")
-        self._last_updated.setText("No matches recorded yet.")
-
-    def _populate_cards(self, matches: list) -> None:
-        from analysis.metrics_engine import MetricsEngine
-
-        completed = [m for m in matches if m.result in ("win", "loss")]
-        n = len(completed)
-
-        if n == 0:
-            self._show_empty()
+    def refresh(self, force: bool = True) -> None:
+        if self._loading:
             return
+        self._loading = True
+        if not self._vm:
+            self._subtitle.setText("Loading…")
+        sig = self._signature
 
-        wins = sum(1 for m in completed if m.result == "win")
-        win_rate = wins / n
-
-        # Aggregate metrics across all completed matches
-        total_atk_rounds = total_atk_wins = 0
-        total_def_rounds = total_def_wins = 0
-        total_eng_taken = total_eng_won = 0
-
-        for m in completed:
-            for r in m.rounds:
-                if r.side == "attack":
-                    total_atk_rounds += 1
-                    if r.outcome == "win":
-                        total_atk_wins += 1
-                else:
-                    total_def_rounds += 1
-                    if r.outcome == "win":
-                        total_def_wins += 1
-                for ps in r.player_stats:
-                    total_eng_taken += ps.engagements_taken
-                    total_eng_won   += ps.engagements_won
-
-        atk_wr = total_atk_wins / total_atk_rounds if total_atk_rounds else 0
-        def_wr = total_def_wins / total_def_rounds if total_def_rounds else 0
-        ewr    = total_eng_won  / total_eng_taken  if total_eng_taken  else 0
-
-        # Current streak
-        streak_val = 0
-        streak_type = ""
-        for m in reversed(completed):
-            if streak_val == 0:
-                streak_type = m.result
-                streak_val = 1
-            elif m.result == streak_type:
-                streak_val += 1
-            else:
-                break
-
-        streak_color = "#55e07a" if streak_type == "win" else "#e05555"
-        streak_text  = f"{'W' if streak_type == 'win' else 'L'}{streak_val}"
-
-        wr_color = "#55e07a" if win_rate >= 0.5 else "#e05555"
-        self._card_matches.set_value(str(n))
-        self._card_winrate.set_value(f"{win_rate:.0%}", wr_color)
-        self._card_atk.set_value(f"{atk_wr:.0%}")
-        self._card_def.set_value(f"{def_wr:.0%}")
-        self._card_ewr.set_value(f"{ewr:.0%}")
-        self._card_streak.set_value(streak_text, streak_color)
-
-
-    def _populate_recent_matches(self, matches: list) -> None:
-        t = self._matches_table
-        t.setRowCount(0)
-
-        for m in matches:
-            if m.match_id is None:          # ← FIX: guard against None
-                continue
-
-            rounds = m.rounds
-            atk_rounds = [r for r in rounds if r.side == "attack"]
-            def_rounds = [r for r in rounds if r.side == "defense"]
-            atk_wins = sum(1 for r in atk_rounds if r.outcome == "win")
-            def_wins = sum(1 for r in def_rounds if r.outcome == "win")
-            total_wins   = sum(1 for r in rounds if r.outcome == "win")
-            total_losses = sum(1 for r in rounds if r.outcome == "loss")
-
-            atk_pct = f"{atk_wins}/{len(atk_rounds)}" if atk_rounds else "—"
-            def_pct = f"{def_wins}/{len(def_rounds)}" if def_rounds else "—"
-
-            result_text  = (m.result or "—").upper()
-            result_color = (
-                "#55e07a" if m.result == "win"
-                else "#e05555" if m.result == "loss"
-                else "#888"
-            )
-
-            row = t.rowCount()
-            t.insertRow(row)
-            t.setItem(row, 0, self._cell(str(m.match_id)))
-            t.setItem(row, 1, self._cell(m.datetime_played.strftime("%m/%d %H:%M")))
-            t.setItem(row, 2, self._cell(m.opponent_name or "—"))
-            t.setItem(row, 3, self._cell(m.map or "—"))
-            t.setItem(row, 4, self._cell(f"{total_wins}–{total_losses}"))
-            t.setItem(row, 5, self._cell(result_text, result_color))
-            t.setItem(row, 6, self._cell(atk_pct))
-            t.setItem(row, 7, self._cell(def_pct))
-
-    def _populate_player_leaderboard(self, matches: list, MetricsEngine) -> None:  # type: ignore[type-arg]
-        t = self._players_table
-        t.setRowCount(0)
-
-        # Aggregate across all matches
-        player_totals: dict[int, dict] = {}
-
-        for m in matches:
-            if not m.rounds:
-                continue
+        def work() -> None:
             try:
-                engine = MetricsEngine(m)
-                summary = engine.player_summary()
-                tps     = engine.tactical_performance_score()
+                self._signals.data_ready.emit(_load_dashboard(force, sig))
+            except Exception as e:  # shown in the header, never crashes the tab
+                self._signals.data_failed.emit(str(e))
 
-                for pid, data in summary.items():
-                    if pid not in player_totals:
-                        player_totals[pid] = {
-                            "name":            data["player"].name,
-                            "matches":         0,
-                            "kills":           0,
-                            "deaths":          0,
-                            "assists":         0,
-                            "eng_taken":       0,
-                            "eng_won":         0,
-                            "rounds_survived": 0,
-                            "rounds_played":   0,
-                            "tps_scores":      [],
-                        }
-                    pt = player_totals[pid]
-                    pt["matches"]         += 1
-                    pt["kills"]           += data["kills"]
-                    pt["deaths"]          += data["deaths"]
-                    pt["assists"]         += data["assists"]
-                    pt["eng_taken"]       += data["engagements_taken"]
-                    pt["eng_won"]         += data["engagements_won"]
-                    pt["rounds_survived"] += data.get("rounds_survived", 0)
-                    pt["rounds_played"]   += data["rounds_played"]
-                    pt["tps_scores"].append(tps.get(pid, 0.0))
-            except Exception:
-                continue
+        threading.Thread(target=work, daemon=True, name="DashboardLoad").start()
 
-        if not player_totals:
+    def _check_connection(self) -> None:
+        if self._checking:
             return
+        self._checking = True
 
-        # Sort by avg TPS descending
-        sorted_players = sorted(
-            player_totals.items(),
-            key=lambda x: (
-                sum(x[1]["tps_scores"]) / len(x[1]["tps_scores"])
-                if x[1]["tps_scores"] else 0
-            ),
-            reverse=True,
+        def work() -> None:
+            try:
+                self._signals.status_ready.emit(_load_connection_status())
+            except Exception as e:
+                self._signals.status_ready.emit({"configured": True, "online": False, "error": str(e), "queue": {}})
+
+        threading.Thread(target=work, daemon=True, name="DashboardStatus").start()
+
+    def _on_failed(self, msg: str) -> None:
+        self._loading = False
+        self._subtitle.setText(f"Could not load data: {msg}")
+
+    def _on_status(self, st: dict) -> None:
+        self._checking = False
+        if not st.get("configured"):
+            self._server_pill.set_state("Server: local mode", MUTED)
+        elif st.get("online"):
+            self._server_pill.set_state("Server online", GREEN)
+            self._server_pill.setToolTip(f"Checked {datetime.now():%H:%M:%S}")
+        else:
+            self._server_pill.set_state("Server unreachable", RED)
+            self._server_pill.setToolTip(str(st.get("error") or ""))
+        q = st.get("queue") or {}
+        pending = q.get("waiting", 0) + q.get("failed", 0)
+        if pending:
+            self._queue_pill.set_state(f"{pending} upload(s) waiting", AMBER)
+            self._queue_pill.setToolTip(
+                f"{q.get('waiting', 0)} queued, {q.get('failed', 0)} retrying. "
+                f"They send on their own when the server is reachable."
+            )
+        elif q.get("uploaded"):
+            self._queue_pill.set_state(f"All {q['uploaded']} uploads sent", GREEN)
+            self._queue_pill.setToolTip("")
+        else:
+            self._queue_pill.set_state("No uploads yet", MUTED)
+            self._queue_pill.setToolTip("")
+
+    def _on_data(self, vm: dict) -> None:
+        self._loading = False
+        self._signature = vm.get("signature")
+        if vm.get("unchanged"):
+            return
+        self._vm = vm
+        self._render()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # RENDER
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _render(self) -> None:
+        vm = self._vm
+        if not vm.get("matches"):
+            self._subtitle.setText("No matches recorded yet — they appear here after your first import.")
+        else:
+            last = vm["last_played"]
+            self._subtitle.setText(
+                f"{vm['matches']} matches  ·  last played {last:%b %d, %H:%M}  ·  updated {datetime.now():%H:%M:%S}"
+            )
+
+        names = [n for n, _ in vm.get("unlinked", [])]
+        if names:
+            listed = ", ".join(f"{n} ({c})" for n, c in vm["unlinked"][:4])
+            self._unlinked.setText(
+                f"⚠  Frequent players not linked to a teammate: {listed}.  Match counts in brackets — "
+                f"link them in Settings › Players so their stats count in the leaderboard."
+            )
+            self._unlinked.show()
+        else:
+            self._unlinked.hide()
+
+        d, w, l = vm.get("decided", 0), vm.get("wins", 0), vm.get("losses", 0)
+        self._c_record.set(f"{w}–{l}" if d else "—", f"{d} of {vm.get('matches', 0)} matches decided")
+        self._c_winrate.set(_pct(vm.get("win_rate")), "matches won", _rate_color(vm.get("win_rate")))
+        rw, rt = vm.get("rounds_won", 0), vm.get("rounds_total", 0)
+        rr = rw / rt if rt else None
+        self._c_rounds.set(_pct(rr), f"{rw} of {rt} rounds", _rate_color(rr))
+        for card, key in ((self._c_atk, "atk"), (self._c_def, "def")):
+            won, tot = vm.get(key, (0, 0))
+            rate = won / tot if tot else None
+            card.set(_pct(rate), f"{won} of {tot} rounds won", _rate_color(rate))
+        kind, n = vm.get("streak", (None, 0))
+        self._c_streak.set(f"{'W' if kind == 'win' else 'L'}{n}" if kind else "—",
+                           "wins in a row" if kind == "win" else "losses in a row" if kind else "",
+                           GREEN if kind == "win" else RED if kind else TEXT)
+        self._form.set_form(vm.get("form", []))
+
+        self._render_recent(vm.get("recent", []))
+        self._render_maps(vm.get("maps", []))
+        self._render_board(vm.get("leaderboard", []))
+        self._render_ops(self._ops_atk, vm.get("operators", {}).get("attack", [])[:10])
+        self._render_ops(self._ops_def, vm.get("operators", {}).get("defense", [])[:10])
+        self._fill_player_combo()
+
+    def _render_recent(self, rows: list[dict]) -> None:
+        t = self._recent
+        self._fit(t, len(rows))
+        for i, r in enumerate(rows):
+            res = r["result"]
+            label = (res or "draw/unknown").upper()
+            color = GREEN if res == "win" else RED if res == "loss" else MUTED
+            tip = "Result worked out from the round scores (older import)." if r["derived"] else ""
+            t.setItem(i, 0, self._cell(f"{r['date']:%b %d  %H:%M}", MUTED))
+            t.setItem(i, 1, self._cell(r["map"], align=Qt.AlignmentFlag.AlignLeft))
+            t.setItem(i, 2, self._cell(f"{r['rounds_won']}–{r['rounds_lost']}"))
+            aw, at = r["atk"]
+            dw, dt = r["def"]
+            t.setItem(i, 3, self._cell(f"{aw}/{at}" if at else "—", BLUE))
+            t.setItem(i, 4, self._cell(f"{dw}/{dt}" if dt else "—", ORANGE))
+            t.setItem(i, 5, self._cell(label + (" *" if r["derived"] else ""), color, tip=tip))
+
+    def _render_maps(self, rows: list[dict]) -> None:
+        t = self._maps
+        self._fit(t, len(rows))
+        for i, m in enumerate(rows):
+            t.setItem(i, 0, self._cell(m["map"], align=Qt.AlignmentFlag.AlignLeft))
+            t.setItem(i, 1, self._cell(m["played"]))
+            t.setItem(i, 2, self._cell(f"{m['wins']}–{m['losses']}", MUTED))
+            t.setItem(i, 3, self._cell(_pct(m["win_rate"]), _rate_color(m["win_rate"]), m["win_rate"]))
+            t.setItem(i, 4, self._cell(_pct(m["atk_rate"]), MUTED, m["atk_rate"]))
+            t.setItem(i, 5, self._cell(_pct(m["def_rate"]), MUTED, m["def_rate"]))
+
+    def _render_board(self, rows: list[dict]) -> None:
+        t = self._board
+        self._fit(t, len(rows))
+        for i, p in enumerate(rows):
+            t.setItem(i, 0, self._cell(p["name"], align=Qt.AlignmentFlag.AlignLeft))
+            t.setItem(i, 1, self._cell(p["matches"]))
+            t.setItem(i, 2, self._cell(p["kills"]))
+            t.setItem(i, 3, self._cell(p["deaths"]))
+            t.setItem(i, 4, self._cell(p["assists"], BLUE))
+            t.setItem(i, 5, self._cell(f"{p['kd']:.2f}", GREEN if p["kd"] >= 1 else RED))
+            t.setItem(i, 6, self._cell(_pct(p["survival"]), MUTED, p["survival"]))
+            t.setItem(i, 7, self._cell(f"{p['tps']:.3f}", PURPLE))
+
+    def _render_ops(self, t: QTableWidget, rows: list[dict]) -> None:
+        self._fit(t, len(rows))
+        for i, o in enumerate(rows):
+            t.setItem(i, 0, self._cell(o["operator"], align=Qt.AlignmentFlag.AlignLeft))
+            t.setItem(i, 1, self._cell(o["rounds"]))
+            t.setItem(i, 2, self._cell(o["wins"], MUTED))
+            t.setItem(i, 3, self._cell(_pct(o["win_rate"]), _rate_color(o["win_rate"]), o["win_rate"]))
+
+    # ── Player detail ────────────────────────────────────────────────────────
+
+    def _fill_player_combo(self) -> None:
+        detail = self._vm.get("player_detail", {})
+        roster = sorted(self._vm.get("roster", []),
+                        key=lambda p: (-len(detail.get(p[0], {}).get("rows", [])), p[1].lower()))
+        combo = self._player_combo
+        prev = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        for pid, name in roster:
+            n = len(detail.get(pid, {}).get("rows", []))
+            combo.addItem(f"{name}  ({n} match{'es' if n != 1 else ''})" if n else f"{name}  (no matches yet)", pid)
+        idx = combo.findData(prev) if prev is not None else -1
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+        self._render_player()
+
+    def _render_player(self, *_args) -> None:
+        pid = self._player_combo.currentData()
+        info = self._vm.get("player_detail", {}).get(pid) if pid is not None else None
+        rows = info["rows"] if info else []
+        self._spark.set_rows(rows)
+        t = self._p_table
+        shown = list(reversed(rows))[:self.PLAYER_ROWS]
+        self._fit(t, len(shown))
+        self._p_more.setText(
+            f"Showing the latest {len(shown)} of {len(rows)} matches — the chart above covers all of them."
+            if len(rows) > len(shown) else ""
         )
+        for i, r in enumerate(shown):
+            t.setItem(i, 0, self._cell(f"{r['date']:%b %d  %H:%M}", MUTED))
+            t.setItem(i, 1, self._cell(r["map"], align=Qt.AlignmentFlag.AlignLeft))
+            t.setItem(i, 2, self._cell(r["result"].upper(), GREEN if r["result"] == "win" else RED))
+            t.setItem(i, 3, self._cell(f"{r['k']}–{r['d']}–{r['a']}"))
+            t.setItem(i, 4, self._cell(f"{r['kd']:.2f}", GREEN if r["kd"] >= 1 else RED))
+            t.setItem(i, 5, self._cell(_pct(r["survival"]), MUTED, r["survival"]))
+            t.setItem(i, 6, self._cell(f"{r['tps']:.3f}", PURPLE))
 
-        for pid, pt in sorted_players:
-            kd = pt["kills"] / pt["deaths"] if pt["deaths"] else float(pt["kills"])
-            ewr = pt["eng_won"] / pt["eng_taken"] if pt["eng_taken"] else 0.0
-            surv = pt["rounds_survived"] / pt["rounds_played"] if pt["rounds_played"] else 0.0
-            avg_tps = sum(pt["tps_scores"]) / len(pt["tps_scores"]) if pt["tps_scores"] else 0.0
-
-            row = t.rowCount()
-            t.insertRow(row)
-            t.setItem(row, 0, self._cell(pt["name"]))
-            t.setItem(row, 1, self._cell(str(pt["matches"])))
-            t.setItem(row, 2, self._cell(str(pt["kills"])))
-            t.setItem(row, 3, self._cell(str(pt["deaths"])))
-            t.setItem(row, 4, self._cell(str(pt["assists"])))
-            t.setItem(row, 5, self._cell(f"{kd:.2f}"))
-            t.setItem(row, 6, self._cell(f"{ewr:.0%}"))
-            t.setItem(row, 7, self._cell(f"{surv:.0%}"))
-            t.setItem(row, 8, self._cell(f"{avg_tps:.3f}"))
-
-    def _populate_map_stats(self, matches: list) -> None:
-        t = self._maps_table
-        t.setRowCount(0)
-
-        map_data: dict[str, dict] = {}
-
-        for m in matches:
-            if m.result not in ("win", "loss"):
-                continue
-            key = m.map or "Unknown"
-            if key not in map_data:
-                map_data[key] = {
-                    "played": 0, "wins": 0,
-                    "atk_rounds": 0, "atk_wins": 0,
-                    "def_rounds": 0, "def_wins": 0,
-                }
-            md = map_data[key]
-            md["played"] += 1
-            if m.result == "win":
-                md["wins"] += 1
-            for r in m.rounds:
-                if r.side == "attack":
-                    md["atk_rounds"] += 1
-                    if r.outcome == "win":
-                        md["atk_wins"] += 1
-                else:
-                    md["def_rounds"] += 1
-                    if r.outcome == "win":
-                        md["def_wins"] += 1
-
-        sorted_maps = sorted(map_data.items(), key=lambda x: x[1]["played"], reverse=True)
-
-        for map_name, md in sorted_maps:
-            wr  = md["wins"]      / md["played"]      if md["played"]      else 0
-            awr = md["atk_wins"]  / md["atk_rounds"]  if md["atk_rounds"]  else 0
-            dwr = md["def_wins"]  / md["def_rounds"]  if md["def_rounds"]  else 0
-
-            wr_color = "#55e07a" if wr >= 0.5 else "#e05555"
-
-            row = t.rowCount()
-            t.insertRow(row)
-            t.setItem(row, 0, self._cell(map_name))
-            t.setItem(row, 1, self._cell(str(md["played"])))
-            t.setItem(row, 2, self._cell(str(md["wins"])))
-            t.setItem(row, 3, self._cell(f"{wr:.0%}", wr_color))
-            t.setItem(row, 4, self._cell(f"{awr:.0%}"))
-            t.setItem(row, 5, self._cell(f"{dwr:.0%}"))
-
-    def _populate_operator_stats(self, matches: list) -> None:
-        t = self._ops_table
-        t.setRowCount(0)
-
-        op_data: dict[str, dict] = {}
-
-        for m in matches:
-            for r in m.rounds:
-                for ps in r.player_stats:
-                    op_name = ps.operator.name
-                    op_side = ps.operator.side
-                    key = op_name
-                    if key not in op_data:
-                        op_data[key] = {
-                            "side": op_side,
-                            "rounds": 0,
-                            "round_wins": 0,
-                        }
-                    op_data[key]["rounds"] += 1
-                    if r.outcome == "win":
-                        op_data[key]["round_wins"] += 1
-
-        sorted_ops = sorted(op_data.items(), key=lambda x: x[1]["rounds"], reverse=True)[:20]
-
-        for op_name, od in sorted_ops:
-            wr = od["round_wins"] / od["rounds"] if od["rounds"] else 0
-            wr_color = "#55e07a" if wr >= 0.5 else "#e05555"
-            side_color = "#5599e0" if od["side"] == "attack" else "#e09955"
-
-            row = t.rowCount()
-            t.insertRow(row)
-            t.setItem(row, 0, self._cell(op_name))
-            t.setItem(row, 1, self._cell(od["side"].capitalize(), side_color))
-            t.setItem(row, 2, self._cell(str(od["rounds"])))
-            t.setItem(row, 3, self._cell(str(od["round_wins"])))
-            t.setItem(row, 4, self._cell(f"{wr:.0%}", wr_color))
+        if not rows:
+            for c in (self._p_matches, self._p_tps, self._p_trend, self._p_consistency):
+                c.set("—", "")
+            if pid is not None:
+                self._p_matches.set("0", "no linked stats yet")
+            return
+        wins = sum(1 for r in rows if r["result"] == "win")
+        self._p_matches.set(str(len(rows)), f"{wins}–{len(rows) - wins} in those matches")
+        self._p_tps.set(f"{info['avg_tps']:.3f}", "tactical performance score", PURPLE)
+        tr = info["trend"]
+        if tr is None:
+            self._p_trend.set("—", "needs 4+ matches", MUTED)
+        elif abs(tr) < 0.01:
+            self._p_trend.set("Flat", "recent third vs earlier", MUTED)
+        else:
+            self._p_trend.set(f"{'▲' if tr > 0 else '▼'} {abs(tr):.3f}", "recent third vs earlier",
+                              GREEN if tr > 0 else RED)
+        cs = info["consistency"]
+        if cs is None:
+            self._p_consistency.set("—", "needs 2+ matches", MUTED)
+        else:
+            self._p_consistency.set(f"{cs:.3f}", "lower is steadier",
+                                    GREEN if cs < 0.05 else AMBER if cs < 0.12 else RED)

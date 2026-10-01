@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget
+from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget, QApplication
 
 from app.app_controller import AppController
 from gui.dashboard_view import DashboardView
@@ -9,14 +9,54 @@ from gui.settings_view import SettingsView
 from models.import_result import ImportResult
 from gui.export_view import ExportView
 
+# Preferred window size on a normal desktop display. Every view already
+# scrolls internally (QScrollArea), so this is a comfortable default, not
+# a hard requirement.
+_PREFERRED_SIZE = (1200, 750)
+
+# Real floor for usability — below this, tabs/buttons start overlapping.
+# Deliberately lower than _PREFERRED_SIZE: this app is built for
+# "no admin rights, USB-portable" use on whatever computer is at hand
+# (school/lab machines included), and those commonly run 1366x768 or
+# smaller with a taskbar eating into the usable height.
+_MINIMUM_SIZE = (1024, 600)
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("R6 Tactical Intelligence Engine")
-        self.setMinimumSize(1200, 750)
+        self.setMinimumSize(*_MINIMUM_SIZE)
         self.controller = AppController()
         self.init_ui()
+        self._fit_to_screen()
+
+    def _fit_to_screen(self) -> None:
+        """Size and place the window so it never opens larger than the
+        screen actually has room for.
+
+        A window taller than the available desktop (screen minus taskbar)
+        doesn't get shrunk by Windows — it gets shoved partly off-screen,
+        which reads as the whole UI being "cut off" at the top and bottom
+        even though nothing inside is actually broken. Clamping the
+        initial size (and centering within the *available* area, not the
+        raw screen) keeps the window fully on-screen on smaller displays;
+        the user can still resize it larger by hand if their monitor
+        supports it.
+        """
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(*_PREFERRED_SIZE)
+            return
+
+        avail = screen.availableGeometry()
+        target_w = max(self.minimumWidth(), min(_PREFERRED_SIZE[0], avail.width()))
+        target_h = max(self.minimumHeight(), min(_PREFERRED_SIZE[1], avail.height()))
+        self.resize(target_w, target_h)
+
+        frame = self.frameGeometry()
+        frame.moveCenter(avail.center())
+        self.move(frame.topLeft())
 
     def init_ui(self):
         central_widget = QWidget()

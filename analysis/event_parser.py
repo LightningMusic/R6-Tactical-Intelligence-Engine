@@ -69,7 +69,25 @@ class EventParser:
         plant_events: list[PlantEvent] = []
 
         for item in (feedback or []):
-            event_type = str(item.get("type") or item.get("feedbackType") or "")
+            # 2026-09-16 fix: on this build's r6-dissect version, matchFeedback
+            # items carry "type" as a nested {"name": "Kill", "id": 0} object,
+            # not a bare string. The old `str(item.get("type") or ...)` call
+            # stringified that whole dict -- "{'name': 'Kill', 'id': 0}" --
+            # which never matched KILL_TYPES/DEFUSER_TYPES (plain strings
+            # like "Kill"), so every round's kill feed silently came back
+            # empty even though real "Kill"/"DefuserPlantComplete" events
+            # were present in the data the whole time. Confirmed straight
+            # from a real device log via the diagnostic logging added
+            # 2026-09-15 (types_seen showed literal dict reprs). Unwrap the
+            # dict's "name" field; still falls back to a bare string for any
+            # r6-dissect version/build that serializes type as a plain string.
+            type_field = item.get("type")
+            if type_field is None:
+                type_field = item.get("feedbackType")
+            if isinstance(type_field, dict):
+                event_type = str(type_field.get("name") or type_field.get("Name") or "")
+            else:
+                event_type = str(type_field or "")
 
             time_str = str(item.get("time") or item.get("timeInSeconds") or "0")
             time_sec = _parse_time(time_str)

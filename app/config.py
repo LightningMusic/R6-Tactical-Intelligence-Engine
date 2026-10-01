@@ -32,6 +32,15 @@ MODEL_PATH         = MODEL_DIR / "model.gguf"
 WHISPER_MODEL_PATH = MODEL_DIR / "whisper-base.pt"
 SETTINGS_PATH      = DATA_DIR / "settings.json"
 
+# Under DATA_DIR (not BASE_DIR) for the same reason as everything else here:
+# it lives on the USB, excluded from the deploy sync's /PURGE right along
+# with settings.json and matches.db, so it survives updates and never gets
+# deleted out from under a running app. See app/logging_setup.py -- this is
+# where every print()/error the app produces actually ends up, since the
+# client exe is built with console=False (no console window at all) and
+# would otherwise have nowhere for that output to go.
+LOGS_DIR           = DATA_DIR / "logs"
+
 # These must use BUNDLE_DIR to find files inside _internal
 SCHEMA_PATH        = BUNDLE_DIR / "database" / "schema.sql"
 INTEGRATION_DIR    = BUNDLE_DIR / "integration"
@@ -45,6 +54,28 @@ OBS_EXE_PATH       = OBS_DIR / "bin" / "64bit" / "obs64.exe"
 OLLAMA_DIR     = BASE_DIR.parent / "ollama"
 OLLAMA_EXE     = OLLAMA_DIR / "ollama.exe"
 OLLAMA_MODELS  = BASE_DIR / "data" / "ollama_models"  # store models on USB too
+
+
+def _embedded_server_url() -> str:
+    """Lazily reads app/server_credentials.py's build-time-embedded server
+    URL. Lazy (not a top-level import) so a from-source dev checkout works
+    identically whether or not that generated file happens to exist, and so
+    nothing here ever hard-crashes app startup over a build-tooling detail."""
+    try:
+        from app.server_credentials import EMBEDDED_SERVER_URL
+        return str(EMBEDDED_SERVER_URL or "").strip()
+    except ImportError:
+        return ""
+
+
+def _embedded_api_key() -> str:
+    """Lazily reads app/server_credentials.py's build-time-embedded API key.
+    See _embedded_server_url for why this is a lazy import."""
+    try:
+        from app.server_credentials import EMBEDDED_API_KEY
+        return str(EMBEDDED_API_KEY or "").strip()
+    except ImportError:
+        return ""
 
 
 # ── Settings singleton ────────────────────────────────────────
@@ -81,6 +112,30 @@ class _Settings:
         "stability_checks":   4,
         "transcribe_auto":    True,
         "r6_replay_folder":   None,
+        # Discord per-user audio capture (optional feature)
+        "discord_bot_token":   "",
+        "discord_channel_id":  "",
+        "discord_channel_ids": [],
+        # Client/server distributed-analysis settings (Milestone 1/2).
+        # Defaults to "automatic": once a server_url is configured in
+        # Settings, every session is uploaded automatically after local
+        # analysis finishes (local analysis always runs regardless — this
+        # only controls the optional upload leg). With no server_url set,
+        # "automatic" behaves exactly like "local" (SyncCoordinator never
+        # attempts an upload without a configured server), so a fresh USB
+        # stick with no server yet is unaffected. Still fully overridable
+        # in Settings -> Remote Sync for anyone who wants local-only.
+        "analysis_mode":             "automatic",
+        "server_url":                "",
+        "api_key":                   "",
+        "upload_replays":            True,
+        "upload_voice":              False,
+        "upload_automatically":      True,
+        "upload_later_when_offline": True,
+        "fallback_to_local_analysis": True,
+        "request_timeout_seconds":   30,
+        "max_upload_retries":        5,
+        "client_name":               "USB_Client",
     }
 
     def __init__(self) -> None:
@@ -115,6 +170,31 @@ class _Settings:
 
     def set_many(self, updates: dict) -> None:
         self._data.update(updates)
+
+    # ── OBS multi-profile helpers ──────────────────────────────
+    # (gui/settings_view.py manages a list of named OBS connection
+    # profiles — one per PC the USB stick is used on — on top of the
+    # single "obs_host"/"obs_port"/... legacy keys kept for migration.)
+
+    def get_obs_profiles(self) -> list:
+        profiles = self._data.get("obs_profiles")
+        if not isinstance(profiles, list) or not profiles:
+            # Fall back to a fresh copy of the single default profile
+            # rather than a shared mutable reference to DEFAULTS.
+            return [dict(p) for p in self.DEFAULTS["obs_profiles"]]
+        return profiles
+
+    def set_obs_profiles(self, profiles: list, active_idx: int = 0) -> None:
+        """Mutates in-memory settings only — callers persist with .save()
+        explicitly, matching the existing set()/set_many() convention."""
+        self._data["obs_profiles"] = list(profiles)
+        self._data["obs_active_profile"] = int(active_idx)
+
+    # ── Discord channel helpers ────────────────────────────────
+
+    def get_discord_channels(self) -> list:
+        channels = self._data.get("discord_channel_ids")
+        return channels if isinstance(channels, list) else []
 
     # ── Typed properties ──────────────────────────────────────
 
@@ -173,11 +253,23 @@ class _Settings:
 
     @property
     def SERVER_URL(self) -> str:
-        return str(self._data.get("server_url", "")).strip().rstrip("/")
+        manual = str(self._data.get("server_url", "")).strip().rstrip("/")
+        if manual:
+            return manual
+        # Milestone 5: fall back to whatever build_and_deploy.bat baked into
+        # app/server_credentials.py at build time (typically a Tailscale
+        # Funnel HTTPS address), so a client built against a configured
+        # server needs zero manual setup and works from any network. A
+        # manually-entered Settings value above always wins, e.g. to point
+        # a build at a different/local server for testing.
+        return _embedded_server_url().rstrip("/")
 
     @property
     def API_KEY(self) -> str:
-        return str(self._data.get("api_key", "")).strip()
+        manual = str(self._data.get("api_key", "")).strip()
+        if manual:
+            return manual
+        return _embedded_api_key()
 
     @property
     def UPLOAD_REPLAYS(self) -> bool:
@@ -298,5 +390,5 @@ def get_whisper_model_path() -> Path:
 
 def ensure_data_dirs() -> None:
     for d in (DATA_DIR, RECORDINGS_DIR, TRANSCRIPTS_DIR,
-              REPORTS_DIR, EXPORTS_DIR, MODEL_DIR):
+              REPORTS_DIR, EXPORTS_DIR, MODEL_DIR, LOGS_DIR):
         d.mkdir(parents=True, exist_ok=True)

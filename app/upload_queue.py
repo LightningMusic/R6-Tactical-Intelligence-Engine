@@ -1,5 +1,4 @@
 import json
-import shutil
 import threading
 from pathlib import Path
 from datetime import datetime, timezone
@@ -93,9 +92,14 @@ class UploadQueue:
     Queue items store USB-portable relative paths ('package_relpath').
     """
 
-    def __init__(self, queue_dir: Path = QUEUE_DIR) -> None:
+    def __init__(self, queue_dir: Optional[Path] = None) -> None:
+        # NOTE: default is resolved here (not as a parameter default) so that
+        # monkeypatching/reassigning the module-level QUEUE_DIR at runtime
+        # (e.g. in tests, or after the USB drive root changes) is honored.
+        # A parameter default of `QUEUE_DIR` would bind the value once at
+        # function-definition time and silently ignore later reassignment.
         self._lock = threading.Lock()
-        self.queue_dir = queue_dir
+        self.queue_dir = queue_dir if queue_dir is not None else QUEUE_DIR
         self.queue_file = self.queue_dir / "queue.json"
         self.queue_dir.mkdir(parents=True, exist_ok=True)
         self.items: Dict[str, QueueItem] = {}
@@ -202,9 +206,14 @@ class UploadQueue:
             except Exception:
                 pass
 
+        # An "uploaded" item with no file on disk is not an orphan: the sync
+        # coordinator deletes the local archive on purpose once the server
+        # confirms receipt, to keep the USB from filling up. Dropping those
+        # entries here would erase the record that they were ever sent and
+        # stop remote status polling from following their analysis jobs.
         missing_ids = [
             sid for sid, item in self.items.items()
-            if not item.package_path.exists()
+            if not item.package_path.exists() and item.package_status != "uploaded"
         ]
         for sid in missing_ids:
             del self.items[sid]

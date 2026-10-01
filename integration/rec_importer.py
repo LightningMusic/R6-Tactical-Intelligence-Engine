@@ -15,53 +15,6 @@ from models.round import Round
 # Suppress CMD windows on Windows
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
-MAP_ID_LOOKUP: dict[int, str] = {
-    417890697769: "Clubhouse",
-    108179795804: "Bank",
-    108179870768: "Border",
-    108179936024: "Chalet",
-    108179936776: "Consulate",
-    108180068392: "Coastline",
-    108180068680: "Hereford Base",
-    108180134456: "House",
-    108180134744: "Kafe Dostoyevsky",
-    108180200520: "Kanal",
-    108180200808: "Oregon",
-    108180266296: "Plane",
-    108180266584: "Skyscraper",
-    108180332360: "Theme Park",
-    108180332648: "Tower",
-    108180398424: "Villa",
-    108180398712: "Yacht",
-    108180464488: "Fortress",
-    108180464776: "Outback",
-    108180530552: "Emerald Plains",
-    108180530840: "Stadium Bravo",
-    108180596616: "Nighthaven Labs",
-    108180596904: "Lair",
-    108180662680: "Close Quarter",
-    108180662968: "Favela",
-    108180728456: "Donut",
-    413779563590: "Bank",
-    407987100456: "Border",
-    407558616688: "Chalet",
-    407193663917: "Clubhouse",
-    413845419788: "Kafe Dostoyevsky",
-    418119057546: "Nighthaven Labs",
-    418126004176: "Consulate",
-    409325881472: "Chalet",
-    436375283234: "Villa",
-    430788891316: "Theme Park",
-    398899676157: "Fortress",
-    423767322185: "Skyscraper",
-    409880628150: "Oregon",
-    412551493246: "Coastline",
-    415956890521: "Outback",
-    419662876236: "Border",
-    422790217276: "Clubhouse",
-    434715462383: "Oregon",
-}
-
 MAX_RETRIES     = 5
 RETRY_DELAY     = 2.0
 DISSECT_TIMEOUT = 90
@@ -73,7 +26,9 @@ class RecImporter:
 
     For each round, extracts:
     - Round metadata (side, site, outcome, map)
-    - Per-player stats (kills, deaths, assists from stats field)
+    - Per-player stats (kills, deaths, assists — joined from the
+      top-level "stats" array onto each player by username; see
+      _build_stats_by_username)
     - Kill feed events from matchFeedback
     """
 
@@ -105,12 +60,23 @@ class RecImporter:
         parsed_rounds: list[Round] = []
         failed_files:  list[str]  = []
         map_name:      Optional[str] = None
+        map_game_id:   Optional[int] = None
+        last_scored_round = 0
+        played_at:     Optional[str] = None
         score_us:      Optional[int] = None
         score_them:    Optional[int] = None
 
-        for rec_file in rec_files:
+        round_timestamps: list[str] = []
+        timeline_rounds: list[dict] = []
+
+        # r6-dissect is a separate process per file, so the files are parsed
+        # in parallel; results are still handled in round order below.
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(4, len(rec_files))) as pool:
+            dissected = list(pool.map(self._run_dissect_with_retry, rec_files))
+
+        for rec_file, (raw, err) in zip(rec_files, dissected):
             self._log(f"  Parsing {rec_file.name}...")
-            raw, err = self._run_dissect_with_retry(rec_file)
 
             if raw is None:
                 self._log(f"  ✗ {rec_file.name} — all {MAX_RETRIES} attempts failed: {err}")
@@ -120,14 +86,27 @@ class RecImporter:
             try:
                 round_obj, meta = self._parse_round(raw)
                 parsed_rounds.append(round_obj)
+                try:
+                    timeline_rounds.append(self.timeline_round(raw, round_obj.round_number))
+                except Exception as tl_err:
+                    self._log(f"  (comms timeline data unavailable for {rec_file.name}: {tl_err})")
 
                 if map_name is None and meta.get("map_name"):
                     map_name = meta["map_name"]
-                    self._log(f"  Map: {map_name}")
-                if score_us is None and meta.get("score_us") is not None:
+                    map_game_id = meta.get("map_game_id")
+                    self._log(f"  Map (as the replay reports it): {map_name}")
+                # A replay's team scores are the running score after that
+                # round, so the match score is the LAST round's. Taking the
+                # first file's (as this used to) made every match 1-0 or 0-1.
+                ts = meta.get("timestamp")
+                if ts:
+                    round_timestamps.append(str(ts))
+                if ts and (played_at is None or str(ts) < played_at):
+                    played_at = str(ts)
+                if meta.get("score_us") is not None and round_obj.round_number >= last_scored_round:
+                    last_scored_round = round_obj.round_number
                     score_us = meta["score_us"]
-                if score_them is None and meta.get("score_them") is not None:
-                    score_them = meta["score_them"]
+                    score_them = meta.get("score_them")
 
                 our_stats   = [p for p in round_obj.raw_player_stats if p.get("is_our_team")]
                 their_stats = [p for p in round_obj.raw_player_stats if not p.get("is_our_team")]
@@ -143,6 +122,16 @@ class RecImporter:
                         fb_note += f" | FB:{ev.first_blood_killer}"
                     if ev.clutch_player:
                         fb_note += f" | clutch:{ev.clutch_player}"
+
+                # The game sometimes only writes part of a round's replay
+                # (a few hundred KB instead of ~9 MB): the round header, and so
+                # the win/loss taken from its score, is intact, but no kills
+                # were recorded. Worth saying, since it reads as a round
+                # where nobody did anything.
+                if round_obj.raw_player_stats and not any(
+                    p["kills"] or p["deaths"] for p in round_obj.raw_player_stats
+                ) and not (ev and ev.kills):
+                    fb_note += " | ⚠ incomplete replay -- no kills recorded, result from score header"
 
                 self._log(
                     f"  ✓ R{round_obj.round_number} "
@@ -169,6 +158,8 @@ class RecImporter:
                 status=ImportStatus.CRITICAL_FAILURE,
                 error_message=msg,
                 map_name=map_name,
+                map_game_id=map_game_id,
+                dissect_map_name=map_name,
             )
 
         if failed_files:
@@ -183,11 +174,55 @@ class RecImporter:
         return ImportResult(
             status=status,
             map_name=map_name,
+            map_game_id=map_game_id,
+            dissect_map_name=map_name,
             score_us=score_us,
             score_them=score_them,
             rounds=parsed_rounds,
             error_message=msg,
+            played_at=played_at,
+            round_timestamps=round_timestamps,
+            timeline_rounds=timeline_rounds,
         )
+
+    @classmethod
+    def timeline_round(cls, data: dict, round_number: int) -> dict:
+        """
+        What the comms timeline needs from one round's replay, small enough
+        to ship in a package's metadata: when the round started, who was on
+        our team, and every kill-feed event with its elapsedSeconds (seconds
+        since prep began -- see r6-dissect's readTime).
+        """
+        players = data.get("players") or []
+        recording_id = data.get("recordingPlayerID")
+        recorder = next((p for p in players if p.get("id") == recording_id), None)
+        our_team = recorder.get("teamIndex") if recorder else None
+        ours = [str(p.get("username") or "") for p in players
+                if our_team is not None and p.get("teamIndex") == our_team]
+        theirs = [str(p.get("username") or "") for p in players
+                  if our_team is not None and p.get("teamIndex") != our_team]
+        events = []
+        for m in cls._extract_match_feedback(data):
+            t = m.get("type")
+            name = t.get("name") if isinstance(t, dict) else t
+            if name in (None, "OperatorSwap", "Other"):
+                continue
+            events.append({
+                "type": str(name),
+                "username": m.get("username") or "",
+                "target": m.get("target") or "",
+                "headshot": bool(m.get("headshot")),
+                "clock": m.get("time") or "",
+                "elapsed": float(m.get("elapsedSeconds") or 0.0),
+            })
+        return {
+            "round_number": int(round_number),
+            "timestamp": str(data.get("timestamp") or ""),
+            "recording_username": str(recorder.get("username") or "") if recorder else "",
+            "ours": ours,
+            "theirs": theirs,
+            "events": events,
+        }
 
     def import_multiple_folders(
         self,
@@ -380,10 +415,14 @@ class RecImporter:
                 and our_start is not None and their_start is not None):
             our_gained   = our_score   - our_start
             their_gained = their_score - their_start
-            if our_gained > their_gained:
-                return "win"
-            if their_gained > our_gained:
-                return "loss"
+            # Exactly one point changes hands per round. startingScore only
+            # exists from Y9S4 on; in older replays it reads 0, so these
+            # "gains" are really cumulative match scores and would call any
+            # round a loss while the team trails overall (seen on a real
+            # replay: round won, recorded as a loss at 2-3). Only trust the
+            # delta when it is a genuine single-round delta.
+            if our_gained + their_gained == 1:
+                return "win" if our_gained == 1 else "loss"
 
         our_won   = our_team.get("won")
         their_won = their_team.get("won")
@@ -428,10 +467,43 @@ class RecImporter:
     # =====================================================
 
     @staticmethod
+    def _build_stats_by_username(data: dict) -> dict[str, dict]:
+        """
+        The real per-round kill/death numbers, confirmed against r6-dissect's
+        actual Go source (main.go's `output` struct and the `dissect`
+        package's `PlayerRoundStats`) rather than guessed: they live in a
+        *separate, top-level* "stats" array — one entry per player — joined
+        back to `players` by username. They are NOT nested inside each
+        player object (that's what _extract_player_stats used to assume,
+        which is why kills/deaths were silently always zero).
+
+        PlayerRoundStats also uses a `died` bool, not a `deaths` int, so
+        that gets converted here on the way in.
+        """
+        by_username: dict[str, dict] = {}
+        for entry in data.get("stats", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            username = str(entry.get("username") or "").strip()
+            if not username:
+                continue
+            by_username[username.lower()] = {
+                "kills":     entry.get("kills", 0),
+                "deaths":    1 if entry.get("died") else 0,
+                "assists":   entry.get("assists", 0),
+                "headshots": entry.get("headshots", 0),
+            }
+        return by_username
+
+    @staticmethod
     def _extract_player_stats(player: dict) -> dict:
         """
-        r6-dissect can store stats under multiple key paths.
-        Try all known variants and return the best dict found.
+        Defensive fallback only — used when a player has no matching entry
+        in the top-level "stats" array (older/unexpected r6-dissect output).
+        Tries the same nested-key guesses this method always has; on
+        current r6-dissect output these never match anything real, but
+        keeping them costs nothing and avoids a hard regression if a future
+        dissect version nests stats differently again.
         """
         # Primary: player.stats
         stats = player.get("stats")
@@ -458,23 +530,34 @@ class RecImporter:
     @staticmethod
     def _extract_operator_name(player: dict) -> str:
         """
-        r6-dissect stores operator info under multiple paths.
-        Try all known variants.
+        r6-dissect's name for the operator -- "Operator(<id>)" when its
+        built-in table doesn't know it yet. That placeholder is fine here:
+        database/game_catalog.py resolves operators by game ID (and by the
+        game's own roleName), not by this string.
         """
-        # Primary: player.operator.name
         op_data = player.get("operator")
         if isinstance(op_data, dict):
             name = op_data.get("name") or op_data.get("operatorName") or ""
             if name:
                 return str(name).strip()
 
-        # Some versions use player.operatorName directly
         for key in ("operatorName", "operator_name", "operatorname"):
             val = player.get(key)
             if val:
                 return str(val).strip()
 
         return ""
+
+    @staticmethod
+    def _extract_operator_game_id(player: dict) -> Optional[int]:
+        op_data = player.get("operator")
+        if isinstance(op_data, dict):
+            try:
+                gid = int(op_data.get("id") or 0)
+                return gid or None
+            except (TypeError, ValueError):
+                return None
+        return None
 
     @staticmethod
     def _extract_match_feedback(data: dict) -> list:
@@ -537,21 +620,39 @@ class RecImporter:
                     f"in round {data.get('roundNumber','?')} — guessing from team 0"
                 )
 
-        # ── Build raw player stats — try multiple field paths ──────
+        # ── Build raw player stats ──────────────────────────────────
+        # Real kills/deaths/assists live in the top-level "stats" array,
+        # joined by username (see _build_stats_by_username). Fall back to
+        # the old nested-key guesses only if a player has no entry there.
+        stats_by_username = self._build_stats_by_username(data)
         raw_player_stats: list[dict] = []
         for player in data.get("players", []):
             team_idx   = player.get("teamIndex", -1)
-            stats_raw  = self._extract_player_stats(player)
+            username   = str(player.get("username") or "").strip()
             op_name    = self._extract_operator_name(player)
+
+            stats_raw = stats_by_username.get(username.lower())
+            if stats_raw is None:
+                stats_raw = self._extract_player_stats(player)
 
             kills    = int(stats_raw.get("kills",     0) or 0)
             deaths   = int(stats_raw.get("deaths",    0) or 0)
             assists  = int(stats_raw.get("assists",   0) or 0)
             headshots = int(stats_raw.get("headshots", 0) or 0)
 
+            team_role = ""
+            if isinstance(team_idx, int) and 0 <= team_idx < len(teams):
+                team_role = str(teams[team_idx].get("role") or "").lower()
+
             raw_player_stats.append({
-                "username":    str(player.get("username") or "").strip(),
+                "username":    username,
                 "operator":    op_name,
+                # What the game catalog learns from. roleName is the game's
+                # own name for the operator ("FROST"); it's only recorded for
+                # one team per replay, so it is often empty.
+                "operator_game_id": self._extract_operator_game_id(player),
+                "role_name":   str(player.get("roleName") or "").strip(),
+                "side":        team_role if team_role in ("attack", "defense") else None,
                 "kills":       kills,
                 "deaths":      deaths,
                 "assists":     assists,
@@ -568,6 +669,18 @@ class RecImporter:
                 # Inject extracted feedback into a copy of data for the parser
                 data_with_fb = dict(data)
                 fb = self._extract_match_feedback(data)
+
+                # Only a malformed replay is worth a log line here; an empty
+                # feed is a truncated replay, which the round summary flags.
+                if not fb:
+                    raw_mf = data.get("matchFeedback")
+                    if raw_mf is None:
+                        print(f"[RecImporter] 'matchFeedback' missing from this round's JSON. "
+                              f"Top-level keys: {sorted(data.keys())}")
+                    elif not isinstance(raw_mf, list):
+                        print(f"[RecImporter] 'matchFeedback' is not a list -- "
+                              f"type={type(raw_mf).__name__}, value={str(raw_mf)[:200]!r}")
+
                 data_with_fb["matchFeedback"] = fb
                 round_events = parse_round_events(
                     data_with_fb,
@@ -577,9 +690,12 @@ class RecImporter:
         except Exception as ev_err:
             print(f"[RecImporter] Event parse warning: {ev_err}")
 
-        map_data   = data.get("map", {})
-        map_id_raw = map_data.get("id")
-        map_name   = MAP_ID_LOOKUP.get(map_id_raw, map_data.get("name"))
+        map_data = data.get("map", {}) or {}
+        try:
+            map_game_id: Optional[int] = int(map_data.get("id") or 0) or None
+        except (TypeError, ValueError):
+            map_game_id = None
+        dissect_map_name = str(map_data.get("name") or "").strip() or None
 
         round_number = data.get("roundNumber", 0)
         if isinstance(round_number, int):
@@ -599,7 +715,10 @@ class RecImporter:
         )
 
         return round_obj, {
-            "map_name":   map_name,
-            "score_us":   score_us,
-            "score_them": score_them,
+            "timestamp":        data.get("timestamp"),
+            "map_name":         dissect_map_name,
+            "map_game_id":      map_game_id,
+            "dissect_map_name": dissect_map_name,
+            "score_us":         score_us,
+            "score_them":       score_them,
         }

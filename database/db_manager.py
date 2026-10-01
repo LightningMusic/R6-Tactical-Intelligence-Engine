@@ -1,7 +1,6 @@
 import sqlite3
 from pathlib import Path
-
-from app.config import DB_PATH, SCHEMA_PATH
+from typing import Optional
 
 
 class DatabaseManager:
@@ -12,11 +11,27 @@ class DatabaseManager:
     - Schema initialization
     - Foreign key enforcement
     - Schema version tracking
+
+    db_path/schema_path default to the client's own app.config paths (the
+    import is deferred into __init__, not module level, so this class can
+    be imported in contexts — like the server — that don't have app.config
+    available at all). Passing explicit paths is what lets the server point
+    an otherwise-identical DatabaseManager/Repository/IntelEngine stack at
+    its own match database (Milestone 4, phase 2) instead of the client's.
     """
 
-    def __init__(self) -> None:
-        self.db_path: Path = DB_PATH
-        self.schema_path: Path = SCHEMA_PATH
+    def __init__(
+        self,
+        db_path: Optional[Path] = None,
+        schema_path: Optional[Path] = None,
+    ) -> None:
+        if db_path is None or schema_path is None:
+            from app.config import DB_PATH, SCHEMA_PATH
+            db_path = db_path if db_path is not None else DB_PATH
+            schema_path = schema_path if schema_path is not None else SCHEMA_PATH
+
+        self.db_path: Path = db_path
+        self.schema_path: Path = schema_path
         self._ensure_database_exists()
         self._initialize_schema()
 

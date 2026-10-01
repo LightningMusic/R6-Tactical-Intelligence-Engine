@@ -4,10 +4,26 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QSpinBox, QCheckBox,
     QGroupBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QMessageBox, QFileDialog, QTabWidget, QComboBox, QAbstractItemView
+    QMessageBox, QFileDialog, QTabWidget, QComboBox, QAbstractItemView,
+    QScrollArea, QFrame
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, QObject, Signal
 from app.config import settings
+
+
+class _TestConnectionWorker(QObject):
+    """Runs SessionUploader.test_connection() off the UI thread. Pure Qt
+    plumbing — the actual HTTP logic lives in app/uploader.py, which has
+    no Qt dependency and is unit-tested headlessly."""
+    finished = Signal(bool, str)
+
+    def run(self) -> None:
+        from app.uploader import SessionUploader
+        result = SessionUploader().test_connection()
+        if result.success:
+            self.finished.emit(True, "Connected and authenticated.")
+        else:
+            self.finished.emit(False, result.error or "Connection failed.")
 
 
 class SettingsView(QWidget):
@@ -17,7 +33,9 @@ class SettingsView(QWidget):
         # Internal state — initialised before _build_ui so callbacks are safe
         self._obs_profiles: list[dict] = []
         self._obs_active_idx: int = 0
-        self._player_edits: list[QLineEdit] = []
+        self._player_edits: list[dict] = []  # {"player_id", "name": QLineEdit, "aliases": QLineEdit}
+        self._test_conn_thread: QThread | None = None
+        self._test_conn_worker: _TestConnectionWorker | None = None
         self._build_ui()
         self._load_all()
 
@@ -36,15 +54,30 @@ class SettingsView(QWidget):
         layout.addWidget(header)
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_general_tab(),  "⚙  General")
-        tabs.addTab(self._build_obs_tab(),       "🎙  OBS")
-        tabs.addTab(self._build_players_tab(),   "👥  Players")
-        tabs.addTab(self._build_maps_tab(),      "🗺  Maps")
-        tabs.addTab(self._build_matches_tab(),   "📋  Match Manager")
-        tabs.addTab(self._build_ai_tab(),        "🤖  AI / Models")
-        tabs.addTab(self._build_discord_tab(),   "🎙  Discord")
-        tabs.addTab(self._build_twitch_tab(),    "📡  Twitch")
+        tabs.addTab(self._scrollable(self._build_general_tab()),  "⚙  General")
+        tabs.addTab(self._scrollable(self._build_obs_tab()),       "🎙  OBS")
+        tabs.addTab(self._scrollable(self._build_players_tab()),   "👥  Players")
+        tabs.addTab(self._scrollable(self._build_maps_tab()),      "🗺  Maps")
+        tabs.addTab(self._scrollable(self._build_matches_tab()),   "📋  Match Manager")
+        tabs.addTab(self._scrollable(self._build_ai_tab()),        "🤖  AI / Models")
+        tabs.addTab(self._scrollable(self._build_discord_tab()),   "🎙  Discord")
+        tabs.addTab(self._scrollable(self._build_twitch_tab()),    "📡  Twitch")
+        tabs.addTab(self._scrollable(self._build_sync_tab()),      "🔄  Remote Sync")
         layout.addWidget(tabs)
+
+    def _scrollable(self, content: QWidget) -> QWidget:
+        """Wraps a settings tab's content widget in a QScrollArea so it
+        scrolls instead of clipping when its content is taller than the
+        visible tab area — e.g. on a laptop screen shorter than
+        MainWindow's 750px minimum height, or a tab (like Sync) whose
+        notes/rows add up to more height than a tab page ever got before.
+        setWidgetResizable(True) lets the content still expand to fill the
+        scroll area's width; only vertical overflow scrolls."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(content)
+        return scroll
 
     # ---------------------------------------------------------
     # General tab
@@ -167,6 +200,7 @@ class SettingsView(QWidget):
         self._obs_active_label = QLabel("")
         self._obs_active_label.setStyleSheet("color: #55e07a; font-size: 11px;")
         self._obs_active_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._obs_active_label.setWordWrap(True)
         layout.addWidget(self._obs_active_label)
 
         layout.addStretch()
@@ -180,19 +214,75 @@ class SettingsView(QWidget):
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(12)
-        layout.addWidget(QLabel("Team player names (5 players):"))
 
+        intro = QLabel(
+            "Team player names (5 players). \"Aliases\" are other in-game "
+            "usernames/tags this same person has played under — list them "
+            "comma-separated and imports will tie that username to this "
+            "player automatically instead of creating a duplicate."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        grid = QFormLayout()
+        grid.setSpacing(8)
         for i in range(5):
-            row = QHBoxLayout()
-            row.addWidget(QLabel(f"Player {i+1}:"))
-            edit = QLineEdit()
-            self._player_edits.append(edit)
-            row.addWidget(edit)
-            layout.addLayout(row)
+            name_edit = QLineEdit()
+            name_edit.setPlaceholderText(f"Player {i+1} name")
+            alias_edit = QLineEdit()
+            alias_edit.setPlaceholderText("aliases, comma, separated (optional)")
+
+            pair = QVBoxLayout()
+            pair.addWidget(name_edit)
+            pair.addWidget(alias_edit)
+            pair_widget = QWidget()
+            pair_widget.setLayout(pair)
+
+            grid.addRow(f"Player {i+1}:", pair_widget)
+            self._player_edits.append({
+                "player_id": None,
+                "name": name_edit,
+                "aliases": alias_edit,
+            })
+        layout.addLayout(grid)
 
         save_btn = QPushButton("Save Players")
         save_btn.clicked.connect(self._save_players)
         layout.addWidget(save_btn)
+
+        # ---------------------------------------------------------
+        # Merge duplicate ("ghost") player into a real team player
+        # ---------------------------------------------------------
+        merge_box = QGroupBox("Merge a duplicate player")
+        merge_layout = QVBoxLayout(merge_box)
+        merge_note = QLabel(
+            "If a username didn't match anyone (a typo, a new tag, an alt "
+            "account) the app saved it as its own separate player. Pick it "
+            "here and fold it into the correct team player — their stats "
+            "move over and the username is remembered as an alias."
+        )
+        merge_note.setWordWrap(True)
+        merge_layout.addWidget(merge_note)
+
+        merge_row = QHBoxLayout()
+        merge_row.addWidget(QLabel("Duplicate player:"))
+        self._merge_ghost_combo = QComboBox()
+        merge_row.addWidget(self._merge_ghost_combo, 1)
+        merge_row.addWidget(QLabel("Merge into:"))
+        self._merge_target_combo = QComboBox()
+        merge_row.addWidget(self._merge_target_combo, 1)
+        merge_layout.addLayout(merge_row)
+
+        merge_btn_row = QHBoxLayout()
+        refresh_btn = QPushButton("Refresh List")
+        refresh_btn.clicked.connect(self._refresh_merge_dropdowns)
+        merge_btn_row.addWidget(refresh_btn)
+        merge_btn = QPushButton("Merge")
+        merge_btn.clicked.connect(self._merge_players)
+        merge_btn_row.addWidget(merge_btn)
+        merge_layout.addLayout(merge_btn_row)
+
+        layout.addWidget(merge_box)
         layout.addStretch()
         return w
 
@@ -275,6 +365,8 @@ class SettingsView(QWidget):
         status_layout = QFormLayout(status_group)
         self._llm_status_label     = QLabel("Checking...")
         self._whisper_status_label = QLabel("Checking...")
+        self._llm_status_label.setWordWrap(True)
+        self._whisper_status_label.setWordWrap(True)
         status_layout.addRow("LLM (Ollama / llama-cpp):", self._llm_status_label)
         status_layout.addRow("Whisper:",                  self._whisper_status_label)
         layout.addWidget(status_group)
@@ -435,6 +527,139 @@ class SettingsView(QWidget):
         layout.addStretch()
         return w
 
+    # ---------------------------------------------------------
+    # Remote Sync tab (Milestone 3 client uploader)
+    # ---------------------------------------------------------
+
+    def _build_sync_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(16)
+
+        info = QLabel(
+            "Configure whether match sessions are analyzed locally, uploaded to a "
+            "remote server, or both. This never affects local recording or local "
+            "analysis — it only controls the optional upload leg."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #aaa; font-size: 11px;")
+        layout.addWidget(info)
+
+        mode_group = QGroupBox("Analysis Mode")
+        mode_form  = QFormLayout(mode_group)
+
+        self._sync_mode_combo = QComboBox()
+        self._sync_mode_combo.addItems(["local", "remote", "automatic"])
+        mode_form.addRow("Mode:", self._sync_mode_combo)
+
+        self._sync_client_name_edit = QLineEdit()
+        self._sync_client_name_edit.setPlaceholderText("e.g. USB_Client, Elijah_Laptop")
+        mode_form.addRow("Client Name:", self._sync_client_name_edit)
+
+        layout.addWidget(mode_group)
+
+        conn_group = QGroupBox("Server Connection")
+        conn_outer = QVBoxLayout(conn_group)
+
+        # This note is added directly to conn_outer (a QVBoxLayout) rather
+        # than as a QFormLayout row: a word-wrapped QLabel inside
+        # QFormLayout.addRow(widget) doesn't reliably reserve enough height
+        # for its own text before the layout knows its final width, and
+        # visibly clips the top/bottom of multi-line notes as a result.
+        # QVBoxLayout doesn't have this problem — it correctly consults the
+        # label's heightForWidth() — which is also why every other
+        # multi-line note elsewhere in this file already uses addWidget
+        # into a QVBoxLayout instead of a form row.
+        conn_note = QLabel(
+            "Leave both fields blank to use the address and key this build was "
+            "made with (see build_and_deploy.bat) — set one here only to point "
+            "this copy at a different server, e.g. for local testing."
+        )
+        conn_note.setWordWrap(True)
+        conn_note.setStyleSheet("color: #999;")
+        conn_outer.addWidget(conn_note)
+
+        conn_form = QFormLayout()
+        conn_outer.addLayout(conn_form)
+
+        self._sync_server_url_edit = QLineEdit()
+        self._sync_server_url_edit.setPlaceholderText("Blank = use this build's address, or http://100.x.x.x:8000")
+        conn_form.addRow("Server URL:", self._sync_server_url_edit)
+
+        self._sync_api_key_edit = QLineEdit()
+        self._sync_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._sync_api_key_edit.setPlaceholderText("Blank = use this build's key, or paste one from R6Server.exe")
+        show_key_cb = QCheckBox("Show")
+        show_key_cb.toggled.connect(
+            lambda checked: self._sync_api_key_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        key_row = QHBoxLayout()
+        key_row.addWidget(self._sync_api_key_edit)
+        key_row.addWidget(show_key_cb)
+        conn_form.addRow("API Key:", key_row)
+
+        self._sync_timeout_spin = QSpinBox()
+        self._sync_timeout_spin.setRange(1, 300)
+        self._sync_timeout_spin.setSuffix(" sec")
+        conn_form.addRow("Request Timeout:", self._sync_timeout_spin)
+
+        self._sync_max_retries_spin = QSpinBox()
+        self._sync_max_retries_spin.setRange(0, 50)
+        conn_form.addRow("Max Upload Retries:", self._sync_max_retries_spin)
+
+        test_row = QHBoxLayout()
+        self._sync_test_btn = QPushButton("🔌 Test Connection")
+        self._sync_test_btn.clicked.connect(self._test_sync_connection)
+        self._sync_test_status_label = QLabel("")
+        self._sync_test_status_label.setWordWrap(True)
+        test_row.addWidget(self._sync_test_btn)
+        test_row.addWidget(self._sync_test_status_label, stretch=1)
+        conn_form.addRow("", test_row)
+
+        layout.addWidget(conn_group)
+
+        behavior_group = QGroupBox("Upload Behavior")
+        behavior_layout = QVBoxLayout(behavior_group)
+
+        self._sync_upload_replays_cb = QCheckBox("Include replay (.rec) files in uploaded packages")
+        self._sync_upload_voice_cb = QCheckBox(
+            "Include voice/audio recordings in uploaded packages — required for "
+            "the server to transcribe for you (see below)"
+        )
+        self._sync_upload_auto_cb = QCheckBox("Upload automatically after each session (automatic mode)")
+        self._sync_upload_offline_cb = QCheckBox("Queue uploads for later when the server is unreachable")
+        self._sync_fallback_local_cb = QCheckBox(
+            "Fall back to local transcription if the server can't be reached when a session ends"
+        )
+
+        for cb in (
+            self._sync_upload_replays_cb, self._sync_upload_voice_cb,
+            self._sync_upload_auto_cb, self._sync_upload_offline_cb,
+            self._sync_fallback_local_cb,
+        ):
+            behavior_layout.addWidget(cb)
+
+        sync_transcription_note = QLabel(
+            "When mode is Remote or Automatic, voice upload is on, and the "
+            "server is reachable when a session ends, transcription runs on "
+            "the server instead of here — nothing to wait for before you "
+            "disconnect the USB. Otherwise (or if unreachable), it runs "
+            "locally as usual, per the fallback setting above."
+        )
+        sync_transcription_note.setWordWrap(True)
+        sync_transcription_note.setStyleSheet("color: gray; font-size: 11px;")
+        behavior_layout.addWidget(sync_transcription_note)
+
+        layout.addWidget(behavior_group)
+
+        save_btn = QPushButton("Save Remote Sync Settings")
+        save_btn.clicked.connect(self._save_sync_settings)
+        layout.addWidget(save_btn)
+        layout.addStretch()
+        return w
+
     # =========================================================
     # LOAD ALL
     # =========================================================
@@ -449,6 +674,7 @@ class SettingsView(QWidget):
         self._check_model_status()
         self._load_discord_settings()
         self._load_twitch_settings()
+        self._load_sync_settings()
 
     # =========================================================
     # GENERAL — load / save / browse
@@ -606,26 +832,95 @@ class SettingsView(QWidget):
     def _load_players(self) -> None:
         try:
             from database.repositories import Repository
-            players = Repository().get_team_players()
-            for i, edit in enumerate(self._player_edits):
+            players = Repository().get_team_players_with_aliases()
+            for i, row in enumerate(self._player_edits):
                 if i < len(players):
-                    edit.setText(players[i].name)
+                    row["player_id"] = players[i]["player_id"]
+                    row["name"].setText(players[i]["name"])
+                    row["aliases"].setText(", ".join(players[i]["aliases"]))
+                else:
+                    row["player_id"] = None
+                    row["name"].clear()
+                    row["aliases"].clear()
         except Exception as e:
             print(f"[Settings] Failed to load players: {e}")
+        self._refresh_merge_dropdowns()
 
     def _save_players(self) -> None:
+        # Updates existing players in place (by player_id) instead of
+        # deleting and recreating the team — deleting a player with
+        # existing match stats would violate the player_round_stats
+        # foreign key and fail outright once a team has played matches.
+        # A blank name field just leaves that slot's existing player (if
+        # any) untouched, so this can never silently delete match history.
         try:
             from database.repositories import Repository
             from models.player import Player
             repo = Repository()
-            repo.clear_team_players()
-            for edit in self._player_edits:
-                name = edit.text().strip()
-                if name:
-                    repo.insert_player(Player(
-                        player_id=None, name=name, is_team_member=True
-                    ))
+            for row in self._player_edits:
+                name = row["name"].text().strip()
+                aliases = [a for a in row["aliases"].text().split(",")]
+                player_id = row["player_id"]
+
+                if not name:
+                    continue
+
+                if player_id is None:
+                    player_id = repo.insert_player(
+                        Player(player_id=None, name=name, is_team_member=True)
+                    )
+                    row["player_id"] = player_id
+                else:
+                    repo.update_player_name(player_id, name)
+
+                repo.set_player_aliases(player_id, aliases)
+
             QMessageBox.information(self, "Saved", "Players updated.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+        self._refresh_merge_dropdowns()
+
+    def _refresh_merge_dropdowns(self) -> None:
+        try:
+            from database.repositories import Repository
+            repo = Repository()
+            ghosts = repo.get_non_team_players()
+            team = repo.get_team_players()
+
+            self._merge_ghost_combo.clear()
+            for p in ghosts:
+                self._merge_ghost_combo.addItem(p.name, p.player_id)
+
+            self._merge_target_combo.clear()
+            for p in team:
+                self._merge_target_combo.addItem(p.name, p.player_id)
+        except Exception as e:
+            print(f"[Settings] Failed to refresh merge dropdowns: {e}")
+
+    def _merge_players(self) -> None:
+        ghost_id = self._merge_ghost_combo.currentData()
+        target_id = self._merge_target_combo.currentData()
+        if ghost_id is None or target_id is None:
+            QMessageBox.warning(self, "Merge", "Nothing to merge — no duplicate or target player.")
+            return
+
+        ghost_name = self._merge_ghost_combo.currentText()
+        target_name = self._merge_target_combo.currentText()
+        confirm = QMessageBox.question(
+            self, "Merge Players",
+            f"Merge '{ghost_name}' into '{target_name}'? All of "
+            f"'{ghost_name}'s stats will move to '{target_name}', and "
+            f"'{ghost_name}' will be remembered as one of their aliases. "
+            f"This cannot be undone.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            from database.repositories import Repository
+            Repository().merge_player(ghost_id, target_id)
+            QMessageBox.information(self, "Merged", f"'{ghost_name}' merged into '{target_name}'.")
+            self._load_players()
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
@@ -915,3 +1210,93 @@ class SettingsView(QWidget):
         })
         settings.save()
         QMessageBox.information(self, "Saved", "Twitch settings saved.")
+
+    # =========================================================
+    # REMOTE SYNC — load / save / test connection
+    # =========================================================
+
+    def _load_sync_settings(self) -> None:
+        idx = self._sync_mode_combo.findText(settings.ANALYSIS_MODE)
+        self._sync_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._sync_client_name_edit.setText(settings.CLIENT_NAME)
+        self._sync_server_url_edit.setText(settings.SERVER_URL)
+        self._sync_api_key_edit.setText(settings.API_KEY)
+        self._sync_timeout_spin.setValue(settings.REQUEST_TIMEOUT_SECONDS)
+        self._sync_max_retries_spin.setValue(settings.MAX_UPLOAD_RETRIES)
+        self._sync_upload_replays_cb.setChecked(settings.UPLOAD_REPLAYS)
+        self._sync_upload_voice_cb.setChecked(settings.UPLOAD_VOICE)
+        self._sync_upload_auto_cb.setChecked(settings.UPLOAD_AUTOMATICALLY)
+        self._sync_upload_offline_cb.setChecked(settings.UPLOAD_LATER_WHEN_OFFLINE)
+        self._sync_fallback_local_cb.setChecked(settings.FALLBACK_TO_LOCAL_ANALYSIS)
+
+    def _save_sync_settings(self) -> None:
+        settings.set_many({
+            "analysis_mode":              self._sync_mode_combo.currentText(),
+            "client_name":                self._sync_client_name_edit.text().strip() or "USB_Client",
+            "server_url":                 self._sync_server_url_edit.text().strip(),
+            "api_key":                    self._sync_api_key_edit.text().strip(),
+            "request_timeout_seconds":    self._sync_timeout_spin.value(),
+            "max_upload_retries":         self._sync_max_retries_spin.value(),
+            "upload_replays":             self._sync_upload_replays_cb.isChecked(),
+            "upload_voice":               self._sync_upload_voice_cb.isChecked(),
+            "upload_automatically":       self._sync_upload_auto_cb.isChecked(),
+            "upload_later_when_offline":  self._sync_upload_offline_cb.isChecked(),
+            "fallback_to_local_analysis": self._sync_fallback_local_cb.isChecked(),
+        })
+        settings.save()
+        QMessageBox.information(self, "Saved", "Remote sync settings saved.")
+
+    def _test_sync_connection(self) -> None:
+        # Save first so the test hits whatever the user just typed, not
+        # whatever was loaded when the tab opened.
+        self._save_sync_settings_quiet()
+
+        if not settings.SERVER_URL:
+            QMessageBox.warning(self, "No Server URL", "Enter a server URL before testing the connection.")
+            return
+
+        if self._test_conn_thread is not None and self._test_conn_thread.isRunning():
+            return  # Already testing — ignore duplicate clicks.
+
+        self._sync_test_btn.setEnabled(False)
+        self._sync_test_status_label.setText("Testing...")
+        self._sync_test_status_label.setStyleSheet("color: #999;")
+
+        self._test_conn_thread = QThread()
+        self._test_conn_worker = _TestConnectionWorker()
+        self._test_conn_worker.moveToThread(self._test_conn_thread)
+
+        self._test_conn_thread.started.connect(self._test_conn_worker.run)
+        self._test_conn_worker.finished.connect(self._on_test_connection_finished)
+        self._test_conn_worker.finished.connect(self._test_conn_thread.quit)
+        self._test_conn_thread.finished.connect(self._test_conn_cleanup)
+
+        self._test_conn_thread.start()
+
+    def _save_sync_settings_quiet(self) -> None:
+        """Same as _save_sync_settings() but without the confirmation dialog
+        — used before Test Connection so it always tests current field values."""
+        settings.set_many({
+            "analysis_mode":              self._sync_mode_combo.currentText(),
+            "client_name":                self._sync_client_name_edit.text().strip() or "USB_Client",
+            "server_url":                 self._sync_server_url_edit.text().strip(),
+            "api_key":                    self._sync_api_key_edit.text().strip(),
+            "request_timeout_seconds":    self._sync_timeout_spin.value(),
+            "max_upload_retries":         self._sync_max_retries_spin.value(),
+        })
+        settings.save()
+
+    def _on_test_connection_finished(self, success: bool, message: str) -> None:
+        self._sync_test_btn.setEnabled(True)
+        if success:
+            self._sync_test_status_label.setText(f"✅ {message}")
+            self._sync_test_status_label.setStyleSheet("color: #55e07a;")
+        else:
+            self._sync_test_status_label.setText(f"❌ {message}")
+            self._sync_test_status_label.setStyleSheet("color: #e05555;")
+
+    def _test_conn_cleanup(self) -> None:
+        if self._test_conn_thread is not None:
+            self._test_conn_thread.deleteLater()
+        self._test_conn_thread = None
+        self._test_conn_worker = None

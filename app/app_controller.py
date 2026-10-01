@@ -1,5 +1,4 @@
 from datetime import datetime
-from re import Match
 from typing import Dict, Optional
 
 from database.repositories import Repository

@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QInputDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QTableWidget, QTableWidgetItem, QPushButton, QSpinBox,
     QCheckBox, QMessageBox, QHeaderView, QTabWidget, QAbstractScrollArea,
-    QGroupBox, QFormLayout
+    QGroupBox, QFormLayout, QScrollArea, QFrame
 )
 from PySide6.QtCore import Qt
 from typing import cast
@@ -204,7 +204,24 @@ class MatchView(QWidget):
         btn_layout.addWidget(report_btn)
         layout.addLayout(btn_layout)
 
-        self.setLayout(layout)
+        # Wrap the whole page in a QScrollArea (same pattern used across the
+        # other views) so it scrolls instead of clipping on a short screen —
+        # the two player tables scroll internally already, but the meta
+        # group + tabs + buttons stacked around them had no fallback of
+        # their own.
+        content = QWidget()
+        content.setLayout(layout)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
         self.populate_tables()
         self.update_objective_headers()
         self._update_resource_widgets()

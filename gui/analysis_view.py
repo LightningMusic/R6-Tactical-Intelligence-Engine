@@ -2,7 +2,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox,
     QHeaderView, QTabWidget, QTextEdit, QSplitter, QInputDialog,
-    QDialog, QDialogButtonBox, QFormLayout, QLineEdit
+    QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
+    QScrollArea, QFrame
 )
 from PySide6.QtCore import Qt
 
@@ -17,7 +18,21 @@ class AnalysisView(QWidget):
         self.load_matches()
 
     def _build_layout(self) -> None:
-        layout = QVBoxLayout(self)
+        # Wrapped in a QScrollArea (same pattern as dashboard_view.py): the
+        # inner _tabs' own tables/text areas already scroll internally, but
+        # the outer page (header + selector row + summary bar + tabs) had
+        # no fallback if it ever needed more vertical room than a short
+        # screen has to give.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
@@ -49,6 +64,13 @@ class AnalysisView(QWidget):
         report_btn = QPushButton("📄  Generate Report")
         report_btn.clicked.connect(self.generate_report)
         selection_layout.addWidget(report_btn)
+
+        tag_speakers_btn = QPushButton("🗣  Tag Speakers")
+        tag_speakers_btn.setToolTip(
+            "Assign real player names to this match's diarized comms speakers"
+        )
+        tag_speakers_btn.clicked.connect(self._tag_speakers)
+        selection_layout.addWidget(tag_speakers_btn)
 
         layout.addLayout(selection_layout)
 
@@ -125,6 +147,9 @@ class AnalysisView(QWidget):
         self._tabs.addTab(inspector_widget, "🔍 Data Inspector")
 
         layout.addWidget(self._tabs)
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
     # =====================================================
     # DATA INSPECTOR TAB
@@ -291,6 +316,15 @@ class AnalysisView(QWidget):
     # =====================================================
     # RENAME MATCH
     # =====================================================
+
+    def _tag_speakers(self) -> None:
+        match_id = self.match_dropdown.currentData()
+        if match_id is None:
+            QMessageBox.warning(self, "No Match", "Select a match first.")
+            return
+        from gui.speaker_tagging_dialog import SpeakerTaggingDialog
+        dlg = SpeakerTaggingDialog(match_id, parent=self)
+        dlg.exec()
 
     def _rename_match(self) -> None:
         match_id = self.match_dropdown.currentData()
