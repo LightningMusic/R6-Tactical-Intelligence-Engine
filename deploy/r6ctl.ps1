@@ -379,6 +379,55 @@ function Cmd-RetireOldAddress {
     Say 'Old Tailscale Funnel turned off: the old address no longer reaches anything.' 'Gray'
 }
 
+function Cmd-RotateTokens {
+    # r6ctl rotate-tokens [api|voice|both] [--yes]
+    Ensure-Docker
+    if ($Rest -contains 'done') {
+        Compose exec -T server rm -f /data/server_config.json.pre-rotation
+        Say 'Rollback copy of the old keys deleted.' 'Green'
+        return
+    }
+    $which = 'both'
+    foreach ($a in $Rest) { if ($a -in 'api', 'voice', 'both') { $which = $a } }
+    Say ''
+    Say "ROTATE TOKENS ($which): the server gets new keys; the old ones stop working at once." 'Yellow'
+    Say '  - R6Analyzer.exe (api), R6Companion.exe and R6Voice.exe (voice) must be rebuilt with the new' 'Yellow'
+    Say '    keys (build_and_deploy.bat); copies already handed out will be refused until then.' 'Yellow'
+    Say '  - Browser invite links are NOT affected. Dashboard sign-in needs the new api key.' 'Yellow'
+    Say '  - The old keys are kept in /data/server_config.json.pre-rotation (inside the volume) so this' 'Yellow'
+    Say '    can be undone; delete it once every client works:  r6ctl rotate-tokens done' 'Yellow'
+    if ($Rest -notcontains '--yes') {
+        if ((Read-Host 'Continue? (y/N)') -notmatch '^[yY]') { Say 'Cancelled.'; return }
+    }
+    $py = @'
+import datetime, json, os, secrets, shutil, sys
+p = '/data/server_config.json'
+which = sys.argv[1]
+with open(p, encoding='utf-8-sig') as f:
+    d = json.load(f)
+backup = p + '.pre-rotation'
+shutil.copyfile(p, backup)
+os.chmod(backup, 0o600)
+if which in ('both', 'api'):
+    d['api_token'] = secrets.token_urlsafe(32)
+if which in ('both', 'voice'):
+    d['voice_token'] = secrets.token_urlsafe(24)
+d['rotated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+tmp = p + '.tmp'
+with open(tmp, 'w', encoding='utf-8') as f:
+    json.dump(d, f, indent=2)
+os.replace(tmp, p)
+print('server_config.json updated (' + which + '); other settings kept')
+'@
+    $py = $py -replace "`r`n", "`n"
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($py))
+    Run --cd "$Src/deploy" --exec sh -c "echo $b64 | base64 -d | docker compose exec -T server python - '$which'"
+    if ($LASTEXITCODE -ne 0) { Fail 'Could not rewrite server_config.json; nothing was changed.' }
+    Say 'Restarting the server so it loads the new keys...'
+    Compose restart server
+    Say 'Done. Next: run build_and_deploy.bat, then update data\settings.json api_key on the USB if one is pinned.' 'Green'
+}
+
 function Cmd-Keepalive {
     # Holds the WSL VM open and lowers its CPU priority so games always win.
     $p = Start-Process wsl.exe -ArgumentList '-d', $Distro, '-u', 'root', '--exec', '/usr/bin/sleep', 'infinity' `
@@ -430,6 +479,7 @@ r6ctl -- the R6 server, running in Docker inside an isolated WSL environment
     cutover        retire the old Windows server, final data copy; the old address keeps
                    working as a bridge   [--yes] [--retire-old-address]
     retire-old-address   turn off the old Funnel (after every client has the new address)
+    rotate-tokens  new api/voice keys   [api|voice|both] [--yes]  (then: done, to drop the rollback copy)
     autostart     start the stack automatically at Windows logon   [off]
 
   every day
@@ -458,6 +508,7 @@ switch ($Command.ToLowerInvariant()) {
     'migrate'   { Cmd-Migrate }
     'cutover'   { Cmd-Cutover }
     'retire-old-address' { Cmd-RetireOldAddress }
+    'rotate-tokens' { Cmd-RotateTokens }
     'keepalive' { Cmd-Keepalive }
     'autostart' { Cmd-Autostart }
     default     { Cmd-Help }
