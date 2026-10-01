@@ -1,0 +1,26 @@
+R6 COMPANION -- records your mic at practice for the team's comms review
+========================================================================
+
+Each practice
+  1. Plug in this USB stick.
+  2. Open the R6Companion folder and double-click R6Companion.exe.
+  3. That's it. Leave it open (you can minimise it). It starts and stops
+     recording by itself when the main app starts and stops the session,
+     and uploads your audio after practice.
+
+First time only
+  - Type your in-game (Ubisoft) name exactly as it shows in the kill feed,
+    and press Save.
+  - Once OBS has started (a few seconds), pick the microphone you use for
+    Discord and press Use.
+  - If Windows asks whether OBS may communicate on networks, you can press
+    Cancel -- it only talks to R6 Companion on this PC.
+
+Good to know
+  - It only records your microphone -- no screen, no one else's audio.
+    (OBS insists on a video track, so the file has a black 640x360 picture.)
+  - "Start now" / "Stop now" work any time; "Follow team" goes back to
+    starting and stopping with the main app.
+  - If the internet drops, it keeps recording; uploads catch up later, even
+    after closing the app.
+  - Closing the window stops your recording.

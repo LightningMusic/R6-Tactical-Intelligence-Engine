@@ -1,0 +1,30 @@
+R6 VOICE -- records your mic during practice for the team's comms review
+==========================================================================
+
+What it's for
+  Discord mixes everyone together, so the review can't tell who said what.
+  If each of us records our own mic, every callout gets the right name and
+  lines up with the kill feed -- who called what, who got talked over, who
+  died right after a warning.
+
+Setup (once)
+  1. Put R6Voice.exe anywhere (Desktop is fine) and double-click it.
+     Windows may say "Windows protected your PC" because the app isn't
+     signed -- click "More info", then "Run anyway".
+  2. Type your in-game (Ubisoft) name exactly as it shows in the kill feed.
+  3. Pick your microphone -- the same one Discord uses.
+  4. Make sure Windows' clock is set automatically
+     (Settings > Time & language > Date & time > "Set time automatically").
+
+Every practice
+  - Press "Start recording" when practice starts, "Stop recording" when it
+    ends. That's it. It uploads by itself as it goes (every 5 minutes); if
+    your internet drops, it catches up later -- even after a restart.
+  - "Pause" records silence until you press "Resume".
+
+Privacy
+  - It only ever records your own mic -- nobody else's audio.
+  - Only what you say while you're actually talking in Discord is used.
+    Anything your mic hears while you're muted (or not holding push-to-talk)
+    is thrown away on the server automatically.
+  - The recordings go only to our team's own server.
