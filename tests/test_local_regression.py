@@ -97,4 +97,8 @@ def test_full_local_session_end_to_end_regression(tmp_path: Path, monkeypatch):
     assert report_path.exists()
     report_content = report_path.read_text(encoding="utf-8")
     assert "Oregon" in report_content
-    assert "MATCH REPORT" in report_content
+    # ReportGenerator's existing (pre-Milestone-1) HTML title is "Match Report"
+    # (mixed case) — assert against actual, unchanged report behavior rather
+    # than an assumed literal, per criterion 14 (existing report behavior
+    # must remain unchanged).
+    assert "Match Report" in report_content

@@ -172,10 +172,12 @@ def test_zip_slip_rejection(client: TestClient, tmp_path: Path):
             files={"file": (malicious.name, f, "application/zip")},
         )
     assert resp.status_code == 400
-    assert "Path traversal attempt blocked" in resp.json()["detail"]
+    # Message now comes from the shared app.packaging.SessionPackage
+    # validator (server no longer duplicates this check independently).
+    assert "Unsafe file path" in resp.json()["detail"]
 
 
-def test_duplicate_policy_cases(client: TestClient, valid_package_file: Path, tmp_path: Path):
+def test_duplicate_policy_cases(client: TestClient, valid_package_file: Path, tmp_path: Path, test_repo: ServerRepository):
     # Upload 1
     with valid_package_file.open("rb") as f:
         r1 = client.post(
@@ -266,6 +268,18 @@ def test_worker_processing_flow_and_retry(client: TestClient, valid_package_file
     assert st2.status_code == 200
     assert st2.json()["status"] == "completed"
 
+    # The session record itself (not just the job) must reflect the real
+    # outcome — map/score resolved from 'Pending', status flipped to
+    # 'completed' — since the dashboard and /sessions list read this table
+    # directly rather than joining against jobs.
+    detail = client.get(f"/api/v1/sessions/{sid}", headers=AUTH_HEADER)
+    assert detail.status_code == 200
+    session = detail.json()["session"]
+    assert session["status"] == "completed"
+    assert session["map_name"] == "Border"
+    assert session["score_us"] == 4
+    assert session["score_them"] == 1
+
     # Simulate job failure and verify retry
     test_repo.update_job_status(job_id=jid, status="failed", error_message="Test failure")
 
@@ -274,8 +288,68 @@ def test_worker_processing_flow_and_retry(client: TestClient, valid_package_file
     assert retry_resp.json()["status"] == "queued"
 
 
+def test_worker_failure_marks_session_failed(client: TestClient, test_repo: ServerRepository):
+    # A processing failure (missing archive on disk) must propagate onto the
+    # session record's status, not just the job's — otherwise the dashboard
+    # would show a permanently-uploaded session that actually failed.
+    test_repo.create_session(session_id="sess_missing_archive", client_name="tester")
+    test_repo.create_package(
+        package_hash="nonexistent_hash", session_id="sess_missing_archive",
+        file_name="sess_missing_archive.r6session", file_size_bytes=10,
+    )
+    test_repo.create_job(job_id="job_missing", session_id="sess_missing_archive", package_hash="nonexistent_hash")
+
+    worker = ServerWorker(repo=test_repo)
+    assert worker.process_single_job() is True
+
+    session = test_repo.get_session("sess_missing_archive")
+    assert session["status"] == "failed"
+
+    job = test_repo.get_job("job_missing")
+    assert job["status"] == "failed"
+    assert "not found" in job["error_message"].lower()
+
+
 def test_deferred_report_and_pdf_endpoints(client: TestClient):
     r1 = client.get("/api/v1/sessions/session_test/report", headers=AUTH_HEADER)
     assert r1.status_code == 501
     r2 = client.get("/api/v1/sessions/session_test/pdf", headers=AUTH_HEADER)
     assert r2.status_code == 501
+
+
+def test_session_summary_404_before_processing_then_200_after(
+    client: TestClient, valid_package_file: Path, test_repo: ServerRepository
+):
+    # Summary endpoint should 404 for a session that hasn't been processed yet.
+    with valid_package_file.open("rb") as f:
+        up_resp = client.post(
+            "/api/v1/sessions/upload",
+            headers=AUTH_HEADER,
+            files={"file": (valid_package_file.name, f, "application/zip")},
+        )
+    assert up_resp.status_code == 200
+    sid = up_resp.json()["session_id"]
+
+    pre = client.get(f"/api/v1/sessions/{sid}/summary", headers=AUTH_HEADER)
+    assert pre.status_code == 404
+
+    worker = ServerWorker(repo=test_repo)
+    assert worker.process_single_job() is True
+
+    post = client.get(f"/api/v1/sessions/{sid}/summary", headers=AUTH_HEADER)
+    assert post.status_code == 200
+    body = post.json()
+    assert body["session_id"] == sid
+    assert body["summary"]["map_name"] == "Border"
+    assert body["summary"]["rounds_count"] == 1
+
+
+def test_dashboard_pages_are_unauthenticated_static_html(client: TestClient):
+    # Phase 5 dashboard: served without auth (it's static markup — every
+    # actual data call it makes still goes through verify_api_token).
+    for path in ("/", "/dashboard"):
+        resp = client.get(path)
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+        assert "R6 Tactical Intelligence" in resp.text
+        assert "/api/v1/sessions" in resp.text

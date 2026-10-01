@@ -43,13 +43,14 @@ def test_settings_updates_and_validation():
     assert settings.MAX_UPLOAD_RETRIES == 10
     assert settings.CLIENT_NAME == "Test_USB"
 
-    # Revert to default for clean state
+    # Revert to default for clean state (settings is a real module-level
+    # singleton across the test session, not reset between tests/files).
     settings.set_many({
-        "analysis_mode": "local",
+        "analysis_mode": "automatic",
         "server_url": "",
         "api_key": "",
         "upload_voice": False,
         "upload_automatically": True,
         "fallback_to_local_analysis": True,
     })
-    assert settings.ANALYSIS_MODE == "local"
+    assert settings.ANALYSIS_MODE == "automatic"
