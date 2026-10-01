@@ -1,0 +1,24 @@
+# Allow-list: nothing goes into the image unless it is listed here.
+*
+!server/
+!app/
+!analysis/
+!database/
+!integration/*.py
+!models/
+!server_main.py
+!r6-dissect/
+!deploy/requirements-container.txt
+
+# ...and even inside the allowed folders, never these:
+**/__pycache__
+**/*.pyc
+**/*.db
+**/*.bak*
+app/server_credentials.py
+**/credentials.py
+r6-dissect/.git
+r6-dissect/.github
+r6-dissect/dissect/test
+r6-dissect/*.exe
+integration/bin

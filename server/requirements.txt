@@ -1,0 +1,18 @@
+# ============================================================
+# REMOTE SERVER dependencies only — for the always-on machine running
+# `python -m uvicorn server.main:app`, never for the USB client. These
+# must NOT be added to the top-level requirements.txt or setup.bat: the
+# client is packaged as a single isolated .exe (see R6Analyzer.spec) and
+# has no use for a web framework or ASGI server.
+#
+# Install with:
+#   pip install -r server/requirements.txt
+# ============================================================
+
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+# Comms timeline (2026-09-30): reading teammates' Opus voice chunks and
+# lining them up against the host's Discord track.
+numpy>=1.24
+soundfile>=0.12

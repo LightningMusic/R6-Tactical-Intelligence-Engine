@@ -1,0 +1,15 @@
+# Installed as %USERPROFILE%\.wslconfig by `r6ctl setup`.
+# Caps what the whole WSL VM can take from the PC. This is also a gaming PC,
+# so the VM gets a fixed slice instead of "whatever it wants".
+[wsl2]
+memory=18GB
+processors=10
+swap=4GB
+# Never shut the VM down on idle: the server runs unattended.
+vmIdleTimeout=-1
+
+[experimental]
+# Give memory back to Windows when the containers are idle, and let the
+# virtual disk shrink on its own.
+autoMemoryReclaim=gradual
+sparseVhd=true

@@ -1,0 +1,8 @@
+{
+  "default-address-pools": [
+    { "base": "10.77.0.0/16", "size": 24 }
+  ],
+  "dns": ["1.1.1.1", "9.9.9.9"],
+  "log-driver": "local",
+  "log-opts": { "max-size": "20m", "max-file": "5" }
+}

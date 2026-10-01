@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>R6 Tactical Intelligence — Remote Dashboard</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1d2025;
+    --panel-alt: #23272e;
+    --border: #2e333b;
+    --text: #e8e8e8;
+    --muted: #999;
+    --muted-dim: #666;
+    --accent: #4d9de0;
+    --green: #55e07a;
+    --red: #e05555;
+    --yellow: #e0c455;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 10;
+  }
+  header h1 {
+    font-size: 17px;
+    margin: 0;
+    font-weight: 600;
+  }
+  header .sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  #statusDot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--muted-dim);
+    display: inline-block;
+    margin-right: 6px;
+  }
+  #statusDot.ok { background: var(--green); }
+  #statusDot.bad { background: var(--red); }
+  main { padding: 16px; max-width: 760px; margin: 0 auto; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .card h2 { font-size: 14px; margin: 0 0 12px 0; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
+  input[type=text], input[type=password] {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 14px;
+  }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 10px 16px;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+    margin-top: 12px;
+  }
+  button.secondary {
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  button:active { opacity: 0.8; }
+  #configPanel { display: none; }
+  #dashboardPanel { display: none; }
+  .toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    gap: 8px;
+  }
+  .toolbar button { margin-top: 0; }
+  .session-row {
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+  }
+  .session-row:last-child { border-bottom: none; }
+  .session-row:active { background: var(--panel-alt); }
+  .session-main { min-width: 0; }
+  .session-id { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .badge {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 20px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .badge.completed { background: rgba(85,224,122,0.15); color: var(--green); }
+  .badge.failed { background: rgba(224,85,85,0.15); color: var(--red); }
+  .badge.queued, .badge.processing, .badge.uploaded, .badge.validated { background: rgba(224,196,85,0.15); color: var(--yellow); }
+  #empty { color: var(--muted); font-size: 13px; text-align: center; padding: 20px 0; }
+  #errorBanner {
+    display: none;
+    background: rgba(224,85,85,0.12);
+    border: 1px solid var(--red);
+    color: var(--red);
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+  #detailOverlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 20;
+    align-items: flex-end;
+  }
+  #detailSheet {
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    border-radius: 14px 14px 0 0;
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 18px;
+    max-height: 82vh;
+    overflow-y: auto;
+  }
+  .detail-row { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .detail-row:last-child { border-bottom: none; }
+  .detail-row .k { color: var(--muted); }
+  .detail-row .v { text-align: right; max-width: 60%; word-break: break-word; }
+  .close-btn { float: right; background: none; border: none; color: var(--muted); font-size: 20px; padding: 0; margin: 0; cursor: pointer; }
+  .link-btn { background: none; border: none; color: var(--accent); font-size: 12px; padding: 0; margin-top: 12px; cursor: pointer; text-decoration: underline; }
+  .footer-note { text-align: center; color: var(--muted-dim); font-size: 11px; margin-top: 20px; }
+
+  /* ── Comms timeline ─────────────────────────────── */
+  #detailSheet { max-width: 980px; }
+  .sec { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .sec-title { font-weight: 600; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .sec-title .sub { font-weight: 400; color: var(--muted); font-size: 12px; }
+  .spk-row { display: grid; grid-template-columns: 150px 1fr 170px; gap: 10px; align-items: center; font-size: 12px; margin: 4px 0; }
+  .spk-name { display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .bar { height: 8px; background: var(--panel-alt); border-radius: 4px; overflow: hidden; }
+  .bar > div { height: 100%; border-radius: 4px; }
+  .spk-stat { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .flag { padding: 8px 10px; border-radius: 6px; background: var(--panel-alt); margin-bottom: 6px; font-size: 12px; cursor: pointer; border-left: 3px solid var(--yellow); }
+  .flag.callout_then_death { border-left-color: var(--red); }
+  .flag.no_death_callout { border-left-color: #b07ce0; }
+  .flag.quiet_fight { border-left-color: var(--muted); }
+  .flag .fk { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .tab { padding: 5px 10px; border-radius: 14px; background: var(--panel-alt); border: 1px solid var(--border); font-size: 12px; cursor: pointer; color: var(--text); margin: 0; }
+  .tab.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .tab .n { color: var(--yellow); margin-left: 4px; }
+  .tab.on .n { color: #fff; }
+  .tl { max-height: 420px; overflow-y: auto; background: rgba(0,0,0,0.18); border-radius: 8px; padding: 6px 0; }
+  .tl-row { display: grid; grid-template-columns: 64px 130px 1fr; gap: 8px; padding: 3px 10px; font-size: 13px; line-height: 1.45; }
+  .tl-row .clk { color: var(--muted-dim); font-variant-numeric: tabular-nums; font-size: 11px; padding-top: 2px; }
+  .tl-row .who { font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-top: 1px; }
+  .tl-row.alert .txt { color: #fff; font-weight: 600; }
+  .tl-row.over { background: rgba(224,196,85,0.07); }
+  .tl-row .ov { color: var(--yellow); font-size: 11px; margin-left: 6px; }
+  .tl-row.ev { font-size: 12px; color: var(--muted); }
+  .tl-row.ev.good .txt { color: var(--green); }
+  .tl-row.ev.bad .txt { color: var(--red); }
+  .tl-row.hl { outline: 1px solid var(--yellow); }
+  .voice-note { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  @media (max-width: 640px) {
+    .spk-row { grid-template-columns: 110px 1fr; }
+    .spk-stat { grid-column: 1 / -1; text-align: left; }
+    .tl-row { grid-template-columns: 52px 1fr; }
+    .tl-row .who { grid-column: 2; }
+    .tl-row .txt { grid-column: 2; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1><span id="statusDot"></span>R6 Tactical Intelligence</h1>
+    <div class="sub" id="headerSub">Remote server dashboard</div>
+  </div>
+  <button class="secondary" id="settingsBtn" style="margin:0; padding:8px 12px; font-size:12px;">⚙</button>
+</header>
+
+<main>
+  <div id="errorBanner"></div>
+
+  <div id="configPanel" class="card">
+    <h2>Connect to Server</h2>
+    <label for="serverUrlInput">Server URL</label>
+    <input type="text" id="serverUrlInput" placeholder="http://100.x.x.x:8000">
+    <label for="tokenInput">API Token</label>
+    <input type="password" id="tokenInput" placeholder="Bearer token configured on the server">
+    <button id="connectBtn">Connect</button>
+  </div>
+
+  <div id="dashboardPanel">
+    <div class="toolbar">
+      <div class="sub" id="sessionCount" style="color: var(--muted); font-size: 12px;"></div>
+      <button class="secondary" id="refreshBtn" style="padding:8px 12px; font-size:12px;">↺ Refresh</button>
+    </div>
+    <div class="card" style="padding: 0;">
+      <div id="sessionList"></div>
+      <div id="empty" style="display:none;">No sessions uploaded yet.</div>
+    </div>
+    <div class="card">
+      <h2>Teammates' recorders</h2>
+      <div id="voiceList" style="font-size:12px; color:var(--muted);">Loading…</div>
+    </div>
+    <div class="card">
+      <h2>Browser recorder links</h2>
+      <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">
+        Send a teammate their link: they open it in a browser, press Start, and their mic is recorded for your sessions.
+        Each link is tied to one in-game name and can only upload that player's mic. Revoke it any time.
+      </div>
+      <div id="inviteNew" style="display:none; margin-bottom:12px; padding:10px; border-radius:8px; background:var(--bg-alt, rgba(128,128,128,0.08));">
+        <div style="font-size:12px; margin-bottom:6px;"><b id="inviteNewFor"></b> — copy this now, it is not shown again:</div>
+        <input type="text" id="inviteNewLink" readonly style="width:100%; font-size:12px;">
+        <button class="secondary" id="inviteCopyBtn" style="margin-top:6px; padding:6px 10px; font-size:12px;">Copy link</button>
+      </div>
+      <div id="inviteList" style="font-size:12px; color:var(--muted);">Loading…</div>
+      <div style="display:flex; gap:8px; margin-top:10px;">
+        <input type="text" id="inviteName" placeholder="In-game name, e.g. Teddy_Dance" style="flex:1; margin:0;">
+        <button id="inviteCreateBtn" style="margin:0; padding:8px 12px; font-size:12px;">Create link</button>
+      </div>
+    </div>
+    <div class="footer-note">Auto-refreshes every 15s · data stays on this server, nothing leaves your network</div>
+  </div>
+</main>
+
+<div id="detailOverlay">
+  <div id="detailSheet">
+    <button class="close-btn" id="closeDetailBtn">&times;</button>
+    <h2 style="margin-top:0;">Session Detail</h2>
+    <div id="detailBody"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const LS_URL = "r6_dashboard_server_url";
+  const LS_TOKEN = "r6_dashboard_api_token";
+
+  const $ = (id) => document.getElementById(id);
+  let refreshTimer = null;
+
+  function getServerUrl() {
+    return localStorage.getItem(LS_URL) || window.location.origin;
+  }
+  function getToken() {
+    return localStorage.getItem(LS_TOKEN) || "";
+  }
+  function saveConfig(url, token) {
+    localStorage.setItem(LS_URL, url);
+    localStorage.setItem(LS_TOKEN, token);
+  }
+  function clearConfig() {
+    localStorage.removeItem(LS_TOKEN);
+  }
+
+  function showError(msg) {
+    const el = $("errorBanner");
+    el.textContent = msg;
+    el.style.display = "block";
+  }
+  function hideError() {
+    $("errorBanner").style.display = "none";
+  }
+
+  async function apiFetch(path, opts) {
+    const url = getServerUrl().replace(/\/$/, "") + path;
+    const o = opts || {};
+    const res = await fetch(url, {
+      method: o.method || "GET",
+      headers: Object.assign({ "Authorization": "Bearer " + getToken() },
+        o.body ? { "Content-Type": "application/json" } : {}),
+      body: o.body ? JSON.stringify(o.body) : undefined,
+    });
+    if (res.status === 401) {
+      clearConfig();
+      showConfigPanel();
+      throw new Error("Authentication failed — check your API token.");
+    }
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { const j = await res.json(); detail = j.detail || detail; } catch (e) {}
+      throw new Error(`${res.status}: ${detail}`);
+    }
+    return res.json();
+  }
+
+  function showConfigPanel() {
+    $("configPanel").style.display = "block";
+    $("dashboardPanel").style.display = "none";
+    $("serverUrlInput").value = getServerUrl();
+    $("tokenInput").value = "";
+    $("statusDot").className = "";
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  }
+
+  function showDashboardPanel() {
+    $("configPanel").style.display = "none";
+    $("dashboardPanel").style.display = "block";
+  }
+
+  function badgeClass(status) {
+    return "badge " + (status || "").toLowerCase();
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "—";
+    try {
+      const d = new Date(iso);
+      return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    } catch (e) { return iso; }
+  }
+
+  async function loadSessions() {
+    try {
+      const data = await apiFetch("/api/v1/sessions?limit=50");
+      hideError();
+      $("statusDot").className = "ok";
+      renderSessions(data.sessions || []);
+      loadVoice();
+      loadInvites();
+    } catch (e) {
+      $("statusDot").className = "bad";
+      showError(e.message);
+    }
+  }
+
+  function renderSessions(sessions) {
+    const list = $("sessionList");
+    const empty = $("empty");
+    $("sessionCount").textContent = sessions.length + " session" + (sessions.length === 1 ? "" : "s");
+
+    if (sessions.length === 0) {
+      list.innerHTML = "";
+      empty.style.display = "block";
+      return;
+    }
+    empty.style.display = "none";
+
+    list.innerHTML = sessions.map((s) => {
+      const score = (s.score_us != null && s.score_them != null) ? `${s.score_us} – ${s.score_them}` : "";
+      return `
+        <div class="session-row" data-id="${escapeHtml(s.session_id)}">
+          <div class="session-main">
+            <div class="session-id">${escapeHtml(s.session_id)}</div>
+            <div class="session-meta">${escapeHtml(s.client_name || "unknown")} · ${escapeHtml(s.map_name || "—")} ${score ? "· " + score : ""} · ${fmtDate(s.created_at)}</div>
+          </div>
+          <span class="${badgeClass(s.status)}">${escapeHtml(s.status || "?")}</span>
+        </div>`;
+    }).join("");
+
+    list.querySelectorAll(".session-row").forEach((row) => {
+      row.addEventListener("click", () => openDetail(row.getAttribute("data-id")));
+    });
+  }
+
+  function escapeHtml(str) {
+    return String(str == null ? "" : str).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  async function openDetail(sessionId) {
+    $("detailOverlay").style.display = "flex";
+    $("detailBody").innerHTML = "<div class='sub' style='color:var(--muted)'>Loading…</div>";
+
+    let session = null, job = null, summary = null, summaryErr = null;
+    try {
+      const detail = await apiFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}`);
+      session = detail.session;
+      job = detail.job;
+    } catch (e) {
+      $("detailBody").innerHTML = `<div style="color:var(--red)">${escapeHtml(e.message)}</div>`;
+      return;
+    }
+    try {
+      const s = await apiFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/summary`);
+      summary = s.summary;
+    } catch (e) {
+      summaryErr = e.message;
+    }
+
+    let transcript = null, transcriptErr = null;
+    try {
+      const t = await apiFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/transcript`);
+      transcript = t.transcript;
+    } catch (e) {
+      transcriptErr = e.message;
+    }
+
+    let analysis = null, analysisErr = null;
+    try {
+      analysis = await apiFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/analysis`);
+    } catch (e) {
+      analysisErr = e.message;
+    }
+
+    const rows = [
+      ["Session ID", session.session_id],
+      ["Client", session.client_name],
+      ["Map", session.map_name],
+      ["Score", (session.score_us != null && session.score_them != null) ? `${session.score_us} – ${session.score_them}` : "—"],
+      ["Status", session.status],
+      ["Uploaded", fmtDate(session.created_at)],
+      ["Last Updated", fmtDate(session.updated_at)],
+    ];
+    if (job) {
+      rows.push(["Job Status", job.status]);
+      rows.push(["Attempts", job.attempts]);
+      if (job.error_message) rows.push(["Job Error", job.error_message]);
+    }
+    if (summary) {
+      rows.push(["Rounds Parsed", summary.rounds_count]);
+      rows.push(["Processed At", fmtDate(summary.created_at)]);
+    }
+
+    let html = rows.map(([k, v]) => `
+      <div class="detail-row"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(v)}</span></div>
+    `).join("");
+
+    if (!summary) {
+      html += `<div class="sub" style="color:var(--muted); margin-top:12px; font-size:12px;">
+        No analysis summary yet${summaryErr ? " (" + escapeHtml(summaryErr) + ")" : ""} — check back once processing completes.
+      </div>`;
+    }
+
+    let comms = null;
+    try {
+      comms = (await apiFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/comms`)).timeline;
+    } catch (e) { /* older sessions have none -- the transcript below stands in */ }
+    if (comms && comms.rounds && comms.rounds.length) {
+      html += renderComms(comms);
+    }
+
+    html += `<div style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
+      <div style="font-weight:600; margin-bottom:6px;">Transcript</div>`;
+    if (transcript && transcript.raw_text) {
+      html += `<div class="sub" style="color:var(--muted); font-size:12px; margin-bottom:6px;">
+        ${transcript.word_count} words — transcribed ${escapeHtml(fmtDate(transcript.created_at))}
+      </div>
+      <div style="max-height:220px; overflow-y:auto; font-size:13px; line-height:1.5; background:var(--bg-alt, rgba(128,128,128,0.08)); padding:10px; border-radius:6px; white-space:pre-wrap;">${escapeHtml(transcript.raw_text)}</div>`;
+    } else {
+      html += `<div class="sub" style="color:var(--muted); font-size:12px;">
+        No transcript yet${transcriptErr ? " (" + escapeHtml(transcriptErr) + ")" : ""}.
+      </div>`;
+    }
+    html += `</div>`;
+
+    html += `<div style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
+      <div style="font-weight:600; margin-bottom:6px;">AI Analysis</div>`;
+    if (analysisErr) {
+      html += `<div class="sub" style="color:var(--muted); font-size:12px;">
+        Could not load analysis (${escapeHtml(analysisErr)}).
+      </div>`;
+    } else if (analysis && analysis.status === "completed" && analysis.match_summary) {
+      html += `<div style="max-height:260px; overflow-y:auto; font-size:13px; line-height:1.5; background:var(--bg-alt, rgba(128,128,128,0.08)); padding:10px; border-radius:6px; white-space:pre-wrap; margin-bottom:10px;">${escapeHtml(analysis.match_summary)}</div>`;
+      const players = Object.entries(analysis.player_intel || {});
+      if (players.length) {
+        html += `<div style="font-weight:600; font-size:12px; margin-bottom:6px;">Per-Player Intel</div>`;
+        html += players.map(([name, text]) => `
+          <div style="margin-bottom:8px;">
+            <div style="font-size:12px; font-weight:600; color:var(--muted);">${escapeHtml(name)}</div>
+            <div style="font-size:13px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(text)}</div>
+          </div>
+        `).join("");
+      }
+    } else if (analysis && analysis.status === "failed") {
+      html += `<div class="sub" style="color:var(--muted); font-size:12px;">
+        Analysis failed${analysis.error ? ": " + escapeHtml(analysis.error) : ""}.
+        ${analysis.error && analysis.error.toLowerCase().includes("ollama") ? "Check that Ollama is set up on the server (see the console log)." : ""}
+      </div>`;
+    } else if (analysis && (analysis.status === "analyzing" || analysis.status === "pending")) {
+      html += `<div class="sub" style="color:var(--muted); font-size:12px;">
+        ${analysis.status === "analyzing" ? "Generating report now — check back shortly." : "Queued — waiting for processing to reach this session."}
+      </div>`;
+    } else {
+      html += `<div class="sub" style="color:var(--muted); font-size:12px;">No analysis yet.</div>`;
+    }
+    html += `</div>`;
+
+    $("detailBody").innerHTML = html;
+    if (comms && comms.rounds && comms.rounds.length) wireComms(comms);
+  }
+
+  // ── Comms timeline ──────────────────────────────────────
+  const PALETTE = ["#4d9de0", "#e0a24d", "#b07ce0", "#4dd0c4", "#e07a9d", "#9bd04d", "#e0d24d"];
+  const UNASSIGNED = "Team (unassigned)";
+  let speakerColor = {};
+
+  const FLAG_TITLES = {
+    callout_then_death: "Callout, then a teammate died",
+    no_death_callout: "Died without a callout",
+    talk_over: "Talked over each other",
+    quiet_fight: "Fight with no comms",
+  };
+
+  function colorFor(name) {
+    if (name === UNASSIGNED || name === "Comms (mixed)") return "#777";
+    if (!speakerColor[name]) speakerColor[name] = PALETTE[Object.keys(speakerColor).length % PALETTE.length];
+    return speakerColor[name];
+  }
+
+  function renderComms(tl) {
+    speakerColor = {};
+    const speakers = tl.speakers || [];
+    let h = `<div class="sec"><div class="sec-title">Comms <span class="sub">${
+      (tl.sources || []).includes("self") ? "your mic and Discord recorded separately" : "one mixed track -- speakers unknown"
+    }${(tl.voice || []).filter(v => v.status === "aligned").length ? " + teammates' own mics" : ""}</span></div>`;
+
+    if (speakers.length) {
+      const maxShare = Math.max(...speakers.map(s => s.share || 0), 0.01);
+      h += speakers.map(s => `
+        <div class="spk-row">
+          <div class="spk-name"><span class="dot" style="background:${colorFor(s.speaker)}"></span>${escapeHtml(s.speaker)}</div>
+          <div class="bar"><div style="width:${(100 * (s.share || 0) / maxShare).toFixed(0)}%; background:${colorFor(s.speaker)}"></div></div>
+          <div class="spk-stat">${Math.round((s.share || 0) * 100)}% · ${s.words} words · ${s.alerts} info calls</div>
+        </div>`).join("");
+    }
+    const voice = tl.voice || [];
+    if (voice.length) {
+      h += `<div class="voice-note">Teammate mics: ${voice.map(v => `${escapeHtml(v.username)} -- ${escapeHtml(v.status || "?")}${
+        v.status === "aligned" ? ` (${v.offset_sec >= 0 ? "+" : ""}${v.offset_sec}s)` : ""}`).join(" · ")}</div>`;
+    }
+    if (tl.audio && tl.audio.mic_hears_discord) {
+      h += `<div class="voice-note" style="color:var(--yellow)">Your mic track also has Discord on it (${tl.audio.echoes_removed} repeated lines removed) -- use a headset, or check OBS isn't adding Desktop Audio to tracks 1-2. Your lines may show as Team until then.</div>`;
+    }
+    if (tl.audio && tl.audio.clip_start_estimated) {
+      h += `<div class="voice-note">Timing estimated (older upload) -- lines may be a few seconds off the kill feed.</div>`;
+    }
+
+    const flags = tl.flags || [];
+    h += `<div class="sec-title" style="margin-top:14px;">Moments to review <span class="sub">${flags.length}</span></div>`;
+    if (flags.length) {
+      h += `<div style="max-height:220px; overflow-y:auto;">` + flags.map((f, i) => `
+        <div class="flag ${escapeHtml(f.kind)}" data-flag="${i}">
+          <div class="fk">R${f.round} · ${escapeHtml(f.clock)} · ${escapeHtml(FLAG_TITLES[f.kind] || f.kind)}</div>
+          ${escapeHtml(f.text)}
+        </div>`).join("") + `</div>`;
+    } else {
+      h += `<div class="sub" style="color:var(--muted); font-size:12px;">Nothing flagged.</div>`;
+    }
+
+    h += `<div class="sec-title" style="margin-top:14px;">Round by round</div><div class="tabs" id="roundTabs">` +
+      tl.rounds.map((r, i) => `<button class="tab${i === 0 ? " on" : ""}" data-r="${i}">R${r.round_number}${
+        r.flag_count ? `<span class="n">${r.flag_count}</span>` : ""}</button>`).join("") +
+      `</div><div class="tl" id="roundTimeline"></div></div>`;
+    return h;
+  }
+
+  function renderRound(r, highlightT) {
+    const rows = r.items.map(it => {
+      if (it.kind === "speech") {
+        const over = (it.over || []).length;
+        const hl = highlightT != null && Math.abs(it.t - highlightT) < 0.05 ? " hl" : "";
+        return `<div class="tl-row${it.alert ? " alert" : ""}${over ? " over" : ""}${hl}" data-t="${it.t}">
+          <span class="clk">${escapeHtml(it.clock)}</span>
+          <span class="who" style="color:${colorFor(it.speaker)}">${escapeHtml(it.speaker)}</span>
+          <span class="txt">${escapeHtml(it.text)}${over ? `<span class="ov">⇆ ${escapeHtml(it.over.join(", "))}</span>` : ""}</span>
+        </div>`;
+      }
+      let txt = "", cls = "";
+      if (it.kind === "Kill") {
+        txt = `✖ ${it.killer} killed ${it.victim}${it.headshot ? " (HS)" : ""}`;
+        cls = it.victim_ours ? "bad" : (it.killer_ours ? "good" : "");
+      } else if (it.kind === "Death") {
+        txt = `✖ ${it.victim} died`;
+        cls = it.victim_ours ? "bad" : "good";
+      } else if (it.kind === "DefuserPlantComplete") {
+        txt = `● defuser planted${it.player ? " by " + it.player : ""}`;
+      } else if (it.kind === "DefuserDisableComplete") {
+        txt = `● defuser disabled${it.player ? " by " + it.player : ""}`;
+      } else {
+        txt = `· ${it.kind}${it.player ? " -- " + it.player : ""}`;
+      }
+      const hl = highlightT != null && Math.abs(it.t - highlightT) < 0.05 ? " hl" : "";
+      return `<div class="tl-row ev ${cls}${hl}" data-t="${it.t}"><span class="clk">${escapeHtml(it.clock)}</span>
+        <span class="who"></span><span class="txt">${escapeHtml(txt)}</span></div>`;
+    });
+    $("roundTimeline").innerHTML = rows.join("") ||
+      `<div class="sub" style="color:var(--muted); padding:10px; font-size:12px;">Nothing recorded for this round.</div>`;
+    const target = $("roundTimeline").querySelector(".hl");
+    if (target) target.scrollIntoView({ block: "center" });
+  }
+
+  function wireComms(tl) {
+    const select = (i, t) => {
+      document.querySelectorAll("#roundTabs .tab").forEach(b => b.classList.toggle("on", +b.dataset.r === i));
+      renderRound(tl.rounds[i], t);
+    };
+    document.querySelectorAll("#roundTabs .tab").forEach(b => b.addEventListener("click", () => select(+b.dataset.r)));
+    document.querySelectorAll(".flag").forEach(el => el.addEventListener("click", () => {
+      const f = (tl.flags || [])[+el.dataset.flag];
+      const i = tl.rounds.findIndex(r => r.round_number === f.round);
+      if (i >= 0) select(i, f.t);
+    }));
+    select(0);
+  }
+
+  function companionLine(c) {
+    const s = c.status || {};
+    const browser = s.kind === "browser";
+    let state;
+    if (c.seconds_since_seen > 30) state = `<span style="color:var(--muted)">offline (seen ${Math.round(c.seconds_since_seen / 60)} min ago)</span>`;
+    else if (s.recording) state = `<span style="color:var(--red)">● recording ${Math.floor((Date.now() / 1000 - (s.since || 0)) / 60)} min</span>`;
+    else if (s.exporting || s.uploads_waiting) state = `uploading (${s.uploads_waiting || 0} waiting)`;
+    else if (browser && s.paused) state = "mic paused";
+    else if (browser && s.started === false) state = "page open, mic not started";
+    else if (browser) state = "ready, waiting for you to start";
+    else state = `idle · ${escapeHtml(s.obs || "")}`;
+    if (browser && s.started && s.mic_ok === false) state += ` <span style="color:var(--red)">· mic silent</span>`;
+    return `<div class="detail-row"><span class="k">${escapeHtml(c.username)} <span style="color:var(--muted-dim)">${browser ? "browser" : "companion"}</span></span><span class="v">${state}${
+      s.free_gb != null ? ` · ${s.free_gb} GB free` : ""}</span></div>`;
+  }
+
+  // ── Browser recorder invite links ───────────────────────
+  function fmtAgo(epoch) {
+    if (!epoch) return "never opened";
+    const s = Date.now() / 1000 - epoch;
+    return s < 90 ? "online now" : s < 5400 ? `seen ${Math.round(s / 60)} min ago` : s < 129600 ? `seen ${Math.round(s / 3600)} h ago` : `seen ${Math.round(s / 86400)} d ago`;
+  }
+  function showNewInvite(res) {
+    const link = res.join_url || (getServerUrl().replace(/\/$/, "") + res.join_path);
+    $("inviteNewFor").textContent = res.username;
+    $("inviteNewLink").value = link;
+    $("inviteNew").style.display = "block";
+    $("inviteNewLink").select();
+  }
+  async function loadInvites() {
+    let list;
+    try { list = (await apiFetch("/api/v1/invites")).invites || []; }
+    catch (e) { $("inviteList").textContent = "Could not load (" + e.message + ")."; return; }
+    $("inviteList").innerHTML = list.length ? list.map(i => {
+      const dead = i.revoked ? "revoked" : i.expired ? "expired" : "";
+      return `<div class="detail-row"><span class="k">${escapeHtml(i.username)}${i.label ? ` <span style="color:var(--muted-dim)">${escapeHtml(i.label)}</span>` : ""}</span>
+        <span class="v">${dead ? `<span style="color:var(--red)">${dead}</span>` : escapeHtml(fmtAgo(i.last_seen))}
+        · <a href="#" data-regen="${escapeHtml(i.invite_id)}">${dead ? "reissue" : "new link"}</a>
+        ${dead ? "" : ` · <a href="#" data-revoke="${escapeHtml(i.invite_id)}">revoke</a>`}</span></div>`;
+    }).join("") : "No links yet. Add a teammate below.";
+    $("inviteList").querySelectorAll("[data-regen]").forEach(a => a.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      if (!confirm("Make a new link? The old one stops working.")) return;
+      try { showNewInvite(await apiFetch(`/api/v1/invites/${a.dataset.regen}/regenerate`, { method: "POST", body: {} })); loadInvites(); }
+      catch (e) { showError(e.message); }
+    }));
+    $("inviteList").querySelectorAll("[data-revoke]").forEach(a => a.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      if (!confirm("Revoke this link? Their browser stops recording immediately.")) return;
+      try { await apiFetch(`/api/v1/invites/${a.dataset.revoke}`, { method: "DELETE" }); loadInvites(); }
+      catch (e) { showError(e.message); }
+    }));
+  }
+
+  async function loadVoice() {
+    let companions = "";
+    try {
+      const st = await apiFetch("/api/v1/companion/status");
+      companions = (st.companions || []).map(companionLine).join("");
+      if (st.control) {
+        companions = `<div class="sub" style="color:var(--muted); font-size:12px; margin-bottom:6px;">Team state: ${
+          st.control.recording ? "<b style='color:var(--red)'>recording</b>" : "stopped"}</div>` + companions;
+      }
+    } catch (e) { /* older server */ }
+    try {
+      const data = await apiFetch("/api/v1/voice/recordings?limit=20");
+      const recs = data.recordings || [];
+      $("voiceList").innerHTML = companions + (recs.length ? recs.map(r => {
+        const start = new Date(r.start_epoch * 1000);
+        const mins = Math.round((r.seconds || 0) / 60);
+        return `<div class="detail-row"><span class="k">${escapeHtml(r.username)}</span><span class="v">${
+          start.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+        } · ${mins} min · ${r.chunks} chunk${r.chunks === 1 ? "" : "s"}${r.finished ? "" : " · still recording"}</span></div>`;
+      }).join("") : "No recordings yet. Teammates' R6 Companion / R6 Voice recordings show up here as they arrive.");
+    } catch (e) {
+      $("voiceList").textContent = "Could not load (" + e.message + ").";
+    }
+  }
+
+  function startAutoRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(loadSessions, 15000);
+  }
+
+  // ── Wiring ──────────────────────────────────────────────
+  $("connectBtn").addEventListener("click", () => {
+    const url = $("serverUrlInput").value.trim();
+    const token = $("tokenInput").value.trim();
+    if (!url || !token) {
+      showError("Server URL and API token are both required.");
+      return;
+    }
+    saveConfig(url, token);
+    showDashboardPanel();
+    loadSessions();
+    startAutoRefresh();
+  });
+
+  $("inviteCreateBtn").addEventListener("click", async () => {
+    const name = $("inviteName").value.trim();
+    if (!name) { showError("Type the player's in-game name first."); return; }
+    hideError();
+    try {
+      showNewInvite(await apiFetch("/api/v1/invites", { method: "POST", body: { username: name, label: name } }));
+      $("inviteName").value = "";
+      loadInvites();
+    } catch (e) { showError(e.message); }
+  });
+  $("inviteCopyBtn").addEventListener("click", async () => {
+    const box = $("inviteNewLink");
+    box.select();
+    try { await navigator.clipboard.writeText(box.value); $("inviteCopyBtn").textContent = "Copied"; }
+    catch (e) { document.execCommand("copy"); $("inviteCopyBtn").textContent = "Copied"; }
+    setTimeout(() => { $("inviteCopyBtn").textContent = "Copy link"; }, 1500);
+  });
+
+  $("settingsBtn").addEventListener("click", showConfigPanel);
+  $("refreshBtn").addEventListener("click", loadSessions);
+  $("closeDetailBtn").addEventListener("click", () => { $("detailOverlay").style.display = "none"; });
+  $("detailOverlay").addEventListener("click", (e) => {
+    if (e.target.id === "detailOverlay") $("detailOverlay").style.display = "none";
+  });
+
+  // ── Boot ────────────────────────────────────────────────
+  if (getToken()) {
+    showDashboardPanel();
+    loadSessions();
+    startAutoRefresh();
+  } else {
+    showConfigPanel();
+  }
+})();
+</script>
+
+</body>
+</html>

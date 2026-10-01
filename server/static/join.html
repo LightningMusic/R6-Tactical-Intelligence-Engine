@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>R6 Team Recorder</title>
+<style>
+  :root {
+    --bg: #0e1116; --card: #171c24; --line: #262d38; --text: #e8ecf1; --dim: #8b95a5;
+    --accent: #4aa3ff; --ok: #3ecf8e; --warn: #f5b942; --bad: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; }
+  .sub { color: var(--dim); margin: 0 0 20px; font-size: .9rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; margin-bottom: 14px; }
+  .state { display: flex; align-items: center; gap: 12px; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 0 4px rgba(62,207,142,.18); }
+  .dot.rec { background: var(--bad); animation: pulse 1.2s infinite; }
+  .dot.warn { background: var(--warn); }
+  .dot.bad { background: var(--bad); }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(255,107,107,.18); } }
+  .headline { font-size: 1.1rem; font-weight: 600; }
+  .detail { color: var(--dim); font-size: .9rem; margin-top: 2px; }
+  button { font: inherit; border: 0; border-radius: 10px; padding: 12px 18px; cursor: pointer;
+    background: var(--accent); color: #04121f; font-weight: 600; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 500; }
+  button:disabled { opacity: .45; cursor: default; }
+  select { flex: 1; min-width: 0; padding: 10px; border-radius: 10px; background: #0b0e13; color: var(--text);
+    border: 1px solid var(--line); font: inherit; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  .meter { height: 10px; background: #0b0e13; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); margin-top: 12px; }
+  .meter > div { height: 100%; width: 0%; background: var(--ok); transition: width .08s linear; }
+  .meter.hot > div { background: var(--warn); }
+  .banner { border-radius: 10px; padding: 10px 12px; margin-top: 12px; font-size: .92rem; display: none; }
+  .banner.show { display: block; }
+  .banner.warn { background: rgba(245,185,66,.12); border: 1px solid rgba(245,185,66,.4); }
+  .banner.bad { background: rgba(255,107,107,.12); border: 1px solid rgba(255,107,107,.4); }
+  ol { margin: 8px 0 0 20px; padding: 0; color: var(--dim); font-size: .92rem; }
+  ol li { margin: 4px 0; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; margin-top: 12px; font-size: .88rem; color: var(--dim); }
+  .stats b { color: var(--text); font-weight: 600; }
+  label.check { display: flex; gap: 8px; align-items: center; margin-top: 14px; color: var(--dim); font-size: .9rem; }
+  .hidden { display: none !important; }
+  .small { font-size: .82rem; color: var(--dim); }
+</style>
+</head>
+<body>
+<main>
+  <h1>R6 Team Recorder</h1>
+  <p class="sub" id="who">Checking your invite...</p>
+
+  <section class="card" id="stateCard">
+    <div class="state">
+      <div class="dot" id="dot"></div>
+      <div>
+        <div class="headline" id="headline">Loading...</div>
+        <div class="detail" id="detail"></div>
+      </div>
+    </div>
+    <div class="meter" id="meter"><div id="meterFill"></div></div>
+    <div class="banner warn" id="bannerWarn"></div>
+    <div class="banner bad" id="bannerBad"></div>
+  </section>
+
+  <section class="card hidden" id="setupCard">
+    <div class="headline" style="font-size:1rem">Before practice</div>
+    <ol>
+      <li>Pick your headset mic below, then press <b>Start</b>. Your browser asks for the microphone once.</li>
+      <li>Leave this tab open and the computer awake while you play. Minimize it, don't close it.</li>
+      <li>That's it. It records when the host starts a match and stops when they stop.</li>
+    </ol>
+    <div class="row"><select id="device" aria-label="Microphone"></select></div>
+    <label class="check"><input type="checkbox" id="always"> Record continuously (ignore the host's start/stop)</label>
+    <div class="row"><button id="startBtn">Start</button></div>
+  </section>
+
+  <section class="card hidden" id="runCard">
+    <div class="row" style="margin-top:0">
+      <button class="ghost" id="pauseBtn">Pause my mic</button>
+      <button class="ghost" id="stopBtn">Stop</button>
+    </div>
+    <div class="stats">
+      <div>Recorded <b id="sRec">0:00</b></div>
+      <div>Uploaded <b id="sUp">0</b> chunks</div>
+      <div>Waiting <b id="sQueue">0</b> chunks</div>
+      <div>Clock offset <b id="sClock">-</b></div>
+    </div>
+    <p class="small">Only your own microphone is recorded, and only while the host's session is running. Nothing is recorded while this page says "Waiting".</p>
+  </section>
+</main>
+
+<script>
+"use strict";
+(() => {
+  // ───────── constants ─────────
+  const API = "/api/v1";
+  const SR = 16000;                          // what the server wants (Whisper's rate)
+  const CHUNK_SEC = 20;                      // one upload every 20 s of audio
+  const CHUNK_SAMPLES = SR * CHUNK_SEC;
+  const HEARTBEAT_MS = 3000;
+  const CLOCK_RESYNC_MS = 10 * 60 * 1000;
+  const DB_NAME = "r6rec", STORE = "chunks";
+  const LS_TOKEN = "r6rec.token", LS_DEVICE = "r6rec.device", LS_MIC = "r6rec.mic";
+  const ALIVE_PEAK = 0.003;                  // below this the mic is effectively digital silence (muted / dead)
+  const SILENT_WARN_MS = 30 * 1000;
+  const MAX_QUEUE_BYTES = 300 * 1024 * 1024;
+  const AC = window.AudioContext || window.webkitAudioContext;
+
+  const $ = (id) => document.getElementById(id);
+  const ls = {
+    get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+    del(k) { try { localStorage.removeItem(k); } catch (e) {} },
+  };
+  const hex = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => b.toString(16).padStart(2, "0")).join("");
+
+  // ───────── state ─────────
+  const S = {
+    token: null, username: null, deviceId: ls.get(LS_DEVICE) || null,
+    clockOffset: 0, clockRtt: Infinity, clockAt: 0,      // offset = server_time - this PC's time (seconds)
+    hostWantsRecording: false, always: false,
+    started: false, paused: false, recording: false,
+    ctx: null, stream: null, node: null, source: null, sink: null,
+    recordingId: null, chunkIndex: 0, cycleStartEpoch: 0, cycleSamples: 0,
+    buf: [], bufSamples: 0, haveT0: false, totalSamples: 0,
+    uploaded: 0, queued: 0,
+    level: 0, lastAliveAt: 0, micNote: "", fatal: "",
+    wakeLock: null, db: null, flushing: false, authFailed: false, online: true,
+  };
+  if (!S.deviceId) { S.deviceId = hex(8); ls.set(LS_DEVICE, S.deviceId); }
+
+  // ───────── ui ─────────
+  function setState(kind, headline, detail) {
+    $("dot").className = "dot " + kind;
+    $("headline").textContent = headline;
+    $("detail").textContent = detail || "";
+  }
+  function banner(id, text) {
+    const el = $(id);
+    if (el.textContent !== (text || "")) el.textContent = text || "";
+    el.classList.toggle("show", !!text);
+  }
+  const fmt = (s) => { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+
+  // ───────── server ─────────
+  async function api(path, opts = {}) {
+    const r = await fetch(API + path, {
+      ...opts, cache: "no-store",
+      headers: { ...(opts.headers || {}), Authorization: "Bearer " + S.token },
+    });
+    if (r.status === 401) S.authFailed = true;
+    return r;
+  }
+  const wallNow = () => Date.now() / 1000;
+  const serverNow = () => wallNow() + S.clockOffset;
+
+  // Min-RTT clock sync: this PC's clock may be minutes off (school PCs, dead CMOS batteries); the audio is
+  // placed on the SERVER's clock, which is also what the host's own recording uses.
+  async function syncClock(rounds, fresh) {
+    if (fresh) S.clockRtt = Infinity;
+    for (let i = 0; i < rounds; i++) {
+      const t0 = wallNow();
+      let r;
+      try { r = await api("/join/whoami"); } catch (e) { continue; }
+      const t1 = wallNow();
+      if (!r.ok) continue;
+      const j = await r.json(), rtt = t1 - t0;
+      if (rtt < S.clockRtt) { S.clockRtt = rtt; S.clockOffset = j.server_time - (t0 + rtt / 2); S.clockAt = t1; }
+    }
+    $("sClock").textContent = (S.clockOffset >= 0 ? "+" : "") + S.clockOffset.toFixed(1) + " s";
+  }
+
+  // ───────── IndexedDB upload queue (survives a refresh, a crash, dropped wifi) ─────────
+  function openDb() {
+    return new Promise((resolve) => {
+      let req;
+      try { req = indexedDB.open(DB_NAME, 1); } catch (e) { return resolve(null); }
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: "key" });
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+      req.onblocked = () => resolve(null);
+    });
+  }
+  const mem = new Map();                              // fallback when IndexedDB is unavailable (private window)
+  const tx = (mode, fn) => new Promise((resolve, reject) => {
+    const t = S.db.transaction(STORE, mode);
+    const req = fn(t.objectStore(STORE));
+    t.oncomplete = () => resolve(req ? req.result : undefined);
+    t.onerror = t.onabort = () => reject(t.error);
+  });
+  const qPut = (item) => S.db ? tx("readwrite", (st) => st.put(item)) : Promise.resolve(void mem.set(item.key, item));
+  const qDel = (key) => S.db ? tx("readwrite", (st) => st.delete(key)) : Promise.resolve(void mem.delete(key));
+  const qAll = () => S.db ? tx("readonly", (st) => st.getAll()) : Promise.resolve([...mem.values()]);
+
+  // ───────── WAV ─────────
+  function wavBlob(int16) {
+    const n = int16.length, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, SR, true); v.setUint32(28, SR * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    w(36, "data"); v.setUint32(40, n * 2, true);
+    new Int16Array(buf, 44, n).set(int16);
+    return new Blob([buf], { type: "audio/wav" });
+  }
+
+  // ───────── capture ─────────
+  // The worklet runs on the audio thread and only forwards raw blocks together with the audio clock's reading
+  // for each. Main-thread timers are throttled in a background tab, but these messages are events, not timers,
+  // and the audio clock rides along, so a minimized tab can't smear the timestamps.
+  const WORKLET = `
+    class Tap extends AudioWorkletProcessor {
+      process(inputs) {
+        const ch = inputs[0] && inputs[0][0];
+        if (ch && ch.length) this.port.postMessage({ t: currentTime, d: ch.slice(0) });
+        return true;
+      }
+    }
+    registerProcessor("tap", Tap);`;
+
+  // Only used when the browser won't give a 16 kHz context: box-average then linear-interpolate to 16 kHz,
+  // carrying phase and tail across blocks so there are no seams.
+  let rsPos = 0, rsPrev = 0, rsHavePrev = false, maTail = new Float32Array(0);
+  function resetResampler() { rsPos = 0; rsPrev = 0; rsHavePrev = false; maTail = new Float32Array(0); }
+  const clip16 = (x) => (x > 1 ? 1 : x < -1 ? -1 : x) * 32767;
+  function toPcm16(input, inRate) {
+    if (inRate === SR) return Int16Array.from(input, clip16);
+    const step = inRate / SR, w = Math.max(1, Math.round(step));
+    let x = input;
+    if (w > 1) {
+      const ext = new Float32Array(maTail.length + input.length);
+      ext.set(maTail); ext.set(input, maTail.length);
+      x = new Float32Array(input.length);
+      let acc = 0;
+      for (let i = 0; i < ext.length; i++) {
+        acc += ext[i];
+        if (i >= w) acc -= ext[i - w];
+        const o = i - maTail.length;
+        if (o >= 0) x[o] = acc / w;
+      }
+      maTail = ext.slice(ext.length - (w - 1));
+    }
+    const out = [];
+    for (;;) {
+      const i0 = Math.floor(rsPos), frac = rsPos - i0;
+      if (i0 + 1 >= x.length) break;
+      const a = i0 < 0 ? (rsHavePrev ? rsPrev : x[0]) : x[i0], b = x[i0 + 1];
+      out.push(clip16(a + (b - a) * frac));
+      rsPos += step;
+    }
+    rsPrev = x[x.length - 1]; rsHavePrev = true; rsPos -= x.length;
+    return Int16Array.from(out);
+  }
+
+  // The audio clock's time -> seconds on the server's clock. getOutputTimestamp pairs one audio-clock reading
+  // with one performance.now() reading; everything else is offset arithmetic from there.
+  function audioToServerEpoch(audioT, fallbackBlockLen) {
+    try {
+      const ts = S.ctx.getOutputTimestamp();
+      if (ts && ts.contextTime > 0 && ts.performanceTime > 0) {
+        const perfMs = ts.performanceTime + (audioT - ts.contextTime) * 1000;
+        const epoch = wallNow() - (performance.now() - perfMs) / 1000 + S.clockOffset;
+        if (Math.abs(epoch - serverNow()) < 10) return epoch;
+      }
+    } catch (e) {}
+    return serverNow() - fallbackBlockLen / S.ctx.sampleRate;
+  }
+
+  function onBlock(msg) {
+    if (!S.started) return;
+    const frames = msg.d;
+    let peak = 0;
+    for (let i = 0; i < frames.length; i++) { const a = frames[i] < 0 ? -frames[i] : frames[i]; if (a > peak) peak = a; }
+    S.level = Math.max(peak, S.level * 0.92);
+    if (peak > ALIVE_PEAK) S.lastAliveAt = performance.now();
+    if (!S.recording || S.paused) return;
+    if (!S.haveT0) {
+      S.cycleStartEpoch = audioToServerEpoch(msg.t, frames.length);
+      S.haveT0 = true; S.cycleSamples = 0;
+    }
+    const pcm = toPcm16(frames, S.ctx.sampleRate);
+    S.buf.push(pcm); S.bufSamples += pcm.length;
+    while (S.bufSamples >= CHUNK_SAMPLES) cut(CHUNK_SAMPLES, false);
+  }
+
+  function takeSamples(n) {
+    const out = new Int16Array(n);
+    let filled = 0;
+    while (filled < n && S.buf.length) {
+      const head = S.buf[0], need = n - filled;
+      if (head.length <= need) { out.set(head, filled); filled += head.length; S.buf.shift(); }
+      else { out.set(head.subarray(0, need), filled); S.buf[0] = head.subarray(need); filled += need; }
+    }
+    S.bufSamples -= filled;
+    return out.subarray(0, filled);
+  }
+
+  // Chunks tile exactly: start = cycle start + samples already cut / 16000. Wall-clock jitter never enters it.
+  function cut(n, isFinal) {
+    const pcm = takeSamples(Math.min(n, S.bufSamples));
+    if (!pcm.length) return;
+    const item = {
+      key: S.recordingId + ":" + String(S.chunkIndex).padStart(4, "0"),
+      recording_id: S.recordingId, chunk_index: S.chunkIndex,
+      start_epoch: S.cycleStartEpoch + S.cycleSamples / SR,
+      duration_sec: pcm.length / SR, is_final: !!isFinal,
+      wav: wavBlob(pcm), size: pcm.length * 2 + 44,
+    };
+    S.cycleSamples += pcm.length; S.chunkIndex++; S.totalSamples += pcm.length;
+    qPut(item).then(flushQueue, () => { S.micNote = "Couldn't keep audio in the browser's storage - is the disk full?"; });
+  }
+
+  // ───────── upload ─────────
+  async function flushQueue() {
+    if (S.flushing || S.authFailed) return;
+    S.flushing = true;
+    try {
+      for (;;) {
+        const items = await qAll();
+        S.queued = items.length;
+        if (!items.length) break;
+        items.sort((a, b) => a.start_epoch - b.start_epoch);
+        let total = items.reduce((s, i) => s + i.size, 0);
+        while (total > MAX_QUEUE_BYTES && items.length > 1) { const d = items.shift(); total -= d.size; await qDel(d.key); }
+        const it = items[0];
+        const fd = new FormData();
+        fd.append("file", it.wav, "chunk.wav");
+        fd.append("recording_id", it.recording_id);
+        fd.append("chunk_index", String(it.chunk_index));
+        fd.append("username", S.username);
+        fd.append("start_epoch", it.start_epoch.toFixed(3));
+        fd.append("duration_sec", it.duration_sec.toFixed(3));
+        fd.append("sample_rate", String(SR));
+        fd.append("is_final", it.is_final ? "true" : "false");
+        let r;
+        try { r = await api("/voice/chunks", { method: "POST", body: fd }); S.online = true; }
+        catch (e) { S.online = false; break; }
+        if (r.ok) { await qDel(it.key); S.uploaded++; continue; }
+        if (r.status === 401 || r.status === 403) break;
+        if (r.status === 400 || r.status === 413 || r.status === 422) { await qDel(it.key); continue; }   // will never be accepted
+        break;                                                                                         // 5xx, 429, proxy hiccup: retry later
+      }
+    } finally { S.flushing = false; try { S.queued = (await qAll()).length; } catch (e) {} render(); }
+  }
+
+  // ───────── recording cycles (follow the host) ─────────
+  function startCycle() {
+    S.recording = true; S.recordingId = hex(16); S.chunkIndex = 0;
+    S.haveT0 = false; S.cycleSamples = 0; S.buf = []; S.bufSamples = 0; S.totalSamples = 0;
+    resetResampler();
+  }
+  function endCycle() {
+    if (!S.recording) return;
+    S.recording = false;
+    if (S.bufSamples > 0) cut(S.bufSamples, true);        // whatever is still buffered is this recording's last chunk
+  }
+  const shouldRecord = () => S.started && !S.paused && (S.always || S.hostWantsRecording);
+  function reconcile() {
+    if (shouldRecord() && !S.recording) startCycle();
+    else if (!shouldRecord() && S.recording) endCycle();
+    render();
+  }
+
+  // ───────── heartbeat ─────────
+  async function heartbeat() {
+    if (S.authFailed) return;
+    if (S.ctx && S.started && S.ctx.state !== "running") { try { await S.ctx.resume(); } catch (e) {} }
+    const status = {
+      started: S.started, recording: S.recording, paused: S.paused, mode: S.always ? "always" : "follow",
+      since: (S.recording && S.haveT0) ? Math.round(S.cycleStartEpoch) : null,
+      uploads_waiting: S.queued, uploaded: S.uploaded, level: +S.level.toFixed(3),
+      mic_ok: S.started ? (performance.now() - S.lastAliveAt < SILENT_WARN_MS) : null,
+      clock: +S.clockOffset.toFixed(2),
+    };
+    try {
+      const r = await api("/companion/heartbeat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_id: S.deviceId, username: S.username, status }),
+      });
+      if (r.ok) { const j = await r.json(); S.hostWantsRecording = !!(j.control && j.control.recording); S.online = true; }
+    } catch (e) { S.online = false; }
+    reconcile();
+    if (S.queued) flushQueue();
+  }
+
+  // ───────── mic ─────────
+  async function listMics() {
+    try {
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audioinput");
+      const sel = $("device"), want = (S.stream && S.stream.getAudioTracks()[0] && S.stream.getAudioTracks()[0].getSettings().deviceId) || ls.get(LS_MIC);
+      sel.innerHTML = "";
+      devs.forEach((d, i) => {
+        const o = document.createElement("option");
+        o.value = d.deviceId; o.textContent = d.label || ("Microphone " + (i + 1));
+        if (want && d.deviceId === want) o.selected = true;
+        sel.appendChild(o);
+      });
+    } catch (e) {}
+  }
+
+  async function buildGraph() {
+    if (S.ctx && S.node) return;
+    // A 16 kHz context makes the browser do the (properly filtered) resampling itself; fall back to the
+    // device's own rate and resample here if the browser refuses.
+    for (const rate of [SR, 0]) {
+      let ctx = null;
+      try {
+        ctx = rate ? new AC({ sampleRate: rate, latencyHint: "interactive" }) : new AC({ latencyHint: "interactive" });
+        const src = ctx.createMediaStreamSource(S.stream);
+        await ctx.resume();
+        const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
+        try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+        const node = new AudioWorkletNode(ctx, "tap", { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
+        node.port.onmessage = (e) => onBlock(e.data);
+        const sink = ctx.createGain(); sink.gain.value = 0;          // the graph must reach the speakers to be pulled; keep it silent
+        src.connect(node); node.connect(sink); sink.connect(ctx.destination);
+        ctx.onstatechange = () => { if (S.started && ctx.state !== "running") ctx.resume().catch(() => {}); };
+        S.ctx = ctx; S.node = node; S.sink = sink; S.source = src;
+        return;
+      } catch (e) { try { ctx && await ctx.close(); } catch (_) {} }
+    }
+    throw new Error("This browser couldn't set up audio capture.");
+  }
+
+  async function openMic() {
+    const id = $("device").value;
+    // Raw like R6Voice: echo cancellation / noise suppression / auto-gain mangle speech for Whisper, and
+    // echo cancellation would also duck the headset's own playback.
+    const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
+    if (id) audio.deviceId = { exact: id };
+    if (S.stream) S.stream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+    S.stream = await navigator.mediaDevices.getUserMedia({ audio });
+    S.stream.getAudioTracks()[0].onended = () => reacquireMic("The microphone was disconnected.");
+    const cur = S.stream.getAudioTracks()[0].getSettings().deviceId;
+    if (cur) ls.set(LS_MIC, cur);
+    if (!S.node) await buildGraph();
+    else {
+      try { S.source && S.source.disconnect(); } catch (e) {}
+      S.source = S.ctx.createMediaStreamSource(S.stream);
+      S.source.connect(S.node);
+    }
+    S.lastAliveAt = performance.now();
+  }
+
+  let reacquiring = false;
+  async function reacquireMic(why) {
+    if (!S.started || reacquiring) return;
+    reacquiring = true;
+    S.micNote = why + " Trying to reconnect...";
+    try {
+      for (let i = 0; i < 60 && S.started; i++) {
+        try { await openMic(); S.micNote = ""; return; }
+        catch (e) { await new Promise((r) => setTimeout(r, 2000)); }
+      }
+      if (S.started) S.fatal = "Couldn't get the microphone back. Check the headset, then press Stop and Start.";
+    } finally { reacquiring = false; render(); }
+  }
+
+  async function takeWakeLock() {
+    try {
+      if ("wakeLock" in navigator && !S.wakeLock && document.visibilityState === "visible") {
+        S.wakeLock = await navigator.wakeLock.request("screen");
+        S.wakeLock.addEventListener("release", () => { S.wakeLock = null; });
+      }
+    } catch (e) {}
+  }
+
+  // ───────── buttons ─────────
+  async function start() {
+    $("startBtn").disabled = true; S.fatal = ""; S.micNote = "";
+    try {
+      S.always = $("always").checked;
+      await openMic();
+      await listMics();
+      S.started = true; S.paused = false;
+      $("pauseBtn").textContent = "Pause my mic";
+      takeWakeLock();
+      $("setupCard").classList.add("hidden"); $("runCard").classList.remove("hidden");
+      heartbeat();
+    } catch (e) {
+      $("startBtn").disabled = false;
+      const name = e && e.name;
+      S.fatal = name === "NotAllowedError"
+        ? "The browser blocked the microphone. Click the lock icon in the address bar, allow the microphone, then press Start again."
+        : name === "NotFoundError" || name === "OverconstrainedError" ? "That microphone wasn't found. Plug in your headset (or pick another one) and press Start again."
+        : "Couldn't start the microphone: " + ((e && e.message) || e);
+    }
+    render();
+  }
+  function stop() {
+    S.started = false;
+    endCycle();
+    try { S.stream && S.stream.getTracks().forEach((t) => { t.onended = null; t.stop(); }); } catch (e) {}
+    try { S.source && S.source.disconnect(); } catch (e) {}
+    S.source = null; S.stream = null; S.micNote = ""; S.fatal = "";
+    $("runCard").classList.add("hidden"); $("setupCard").classList.remove("hidden");
+    $("startBtn").disabled = false;
+    heartbeat();
+    flushQueue();
+  }
+  function togglePause() {
+    S.paused = !S.paused;
+    $("pauseBtn").textContent = S.paused ? "Resume my mic" : "Pause my mic";
+    reconcile();
+    heartbeat();
+  }
+
+  // ───────── render ─────────
+  function render() {
+    $("sRec").textContent = fmt((S.totalSamples + S.bufSamples) / SR);
+    $("sUp").textContent = S.uploaded; $("sQueue").textContent = S.queued;
+    $("meterFill").style.width = Math.min(100, Math.round(S.level * 140)) + "%";
+    $("meter").classList.toggle("hot", S.level > 0.9);
+
+    const silent = S.started && !S.paused && S.recording && performance.now() - S.lastAliveAt > SILENT_WARN_MS;
+    banner("bannerBad", S.fatal);
+    banner("bannerWarn", S.micNote
+      || (silent ? "Your mic has been silent for a while. Check it isn't muted and that the right headset is selected." : "")
+      || (!S.online ? "Can't reach the server - your audio is being kept safely and uploads when it's back." : ""));
+
+    if (S.authFailed) return setState("bad", "This link doesn't work any more", "Ask the host for a new invite link.");
+    if (!S.started) return setState("", "Ready", S.queued ? S.queued + " recorded chunks are still to upload - press Start to continue." : "Press Start when you're at your computer.");
+    if (S.paused) return setState("warn", "Mic paused", "Nothing is recorded until you resume.");
+    if (S.recording) return setState("rec", "Recording", S.always ? "Recording continuously." : "The host's session is running.");
+    setState("ok", "Waiting for the host to start a match", "Nothing is recorded yet. Keep this tab open.");
+  }
+
+  // ───────── boot ─────────
+  async function boot() {
+    const fromHash = decodeURIComponent((location.hash || "").replace(/^#/, "")).trim();
+    if (fromHash.startsWith("inv_")) {
+      ls.set(LS_TOKEN, fromHash);
+      // After this the token lives only in this browser's storage - not in the address bar, history or screenshots.
+      try { history.replaceState(null, "", location.pathname); } catch (e) {}
+    }
+    S.token = ls.get(LS_TOKEN);
+    if (!S.token) {
+      $("who").textContent = "No invite found on this device.";
+      return setState("warn", "Open your invite link", "Use the link the host sent you - it has your name built in.");
+    }
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && AC && window.AudioWorkletNode)) {
+      $("who").textContent = "";
+      return setState("bad", "This browser can't record", "Use a current Chrome, Edge or Firefox.");
+    }
+    S.db = await openDb();
+    let r;
+    try { r = await api("/join/whoami"); }
+    catch (e) { return setState("warn", "Can't reach the server", "Check your internet connection and reload."); }
+    if (!r.ok) { S.authFailed = true; ls.del(LS_TOKEN); $("who").textContent = "Invite not valid."; return render(); }
+    const j = await r.json();
+    if (j.kind !== "invite" || !j.username) { S.authFailed = true; ls.del(LS_TOKEN); $("who").textContent = "That isn't an invite link."; return render(); }
+    S.username = j.username;
+    $("who").textContent = "Recording as " + S.username;
+    S.clockOffset = j.server_time - wallNow();
+    syncClock(4, true);
+    $("setupCard").classList.remove("hidden");
+    await listMics();
+    if (navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener("devicechange", listMics);
+    $("startBtn").onclick = start; $("stopBtn").onclick = stop; $("pauseBtn").onclick = togglePause;
+    setInterval(heartbeat, HEARTBEAT_MS);
+    setInterval(render, 500);
+    setInterval(() => { if (S.started) takeWakeLock(); }, 30000);
+    setInterval(() => { if (S.started) syncClock(3, true); }, CLOCK_RESYNC_MS);
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.started) takeWakeLock(); });
+    window.addEventListener("online", () => { S.online = true; flushQueue(); });
+    window.addEventListener("beforeunload", (e) => { if (S.started && S.recording) { e.preventDefault(); e.returnValue = ""; } });
+    flushQueue();                                       // anything left over from a closed tab goes up first
+    heartbeat();
+  }
+  boot();
+
+  // Read-only view of the recorder's counters for automated testing.
+  window.__r6rec = { get: () => ({ started: S.started, recording: S.recording, uploaded: S.uploaded, queued: S.queued,
+    username: S.username, rate: S.ctx && S.ctx.sampleRate, clockOffset: S.clockOffset, fatal: S.fatal, auth: S.authFailed }) };
+})();
+</script>
+</body>
+</html>

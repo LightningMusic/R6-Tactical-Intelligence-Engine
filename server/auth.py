@@ -1,9 +1,11 @@
 import hmac
 import hashlib
+from dataclasses import dataclass
 from typing import Optional
 from fastapi import Request, HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
+from server import invites
 from server.config import server_settings
 
 security_scheme = HTTPBearer(auto_error=False)
@@ -40,3 +42,39 @@ def verify_api_token(credentials: Optional[HTTPAuthorizationCredentials] = Secur
         )
 
     return "authenticated_client"
+
+
+@dataclass(frozen=True)
+class VoicePrincipal:
+    """Who is calling a voice endpoint. `username` is set only for a browser
+    invite, which is tied to exactly one in-game name."""
+    kind: str                      # "voice" | "main" | "invite"
+    username: Optional[str] = None
+    invite_id: Optional[str] = None
+
+
+def verify_voice_token(credentials: Optional[HTTPAuthorizationCredentials] = Security(security_scheme)) -> VoicePrincipal:
+    """For the voice-upload endpoints only: accepts the narrow voice token
+    that teammates' R6Voice/R6Companion carry, a browser invite token, or the
+    main API token."""
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = credentials.credentials.strip()
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest().lower()
+    if server_settings.VOICE_TOKEN_HASH and hmac.compare_digest(token_hash, server_settings.VOICE_TOKEN_HASH):
+        return VoicePrincipal("voice")
+    if server_settings.API_TOKEN_HASH and hmac.compare_digest(token_hash, server_settings.API_TOKEN_HASH):
+        return VoicePrincipal("main")
+    if token.startswith(invites.TOKEN_PREFIX):
+        invite = invites.authenticate(token)
+        if invite is not None:
+            return VoicePrincipal("invite", invite["username"], invite["invite_id"])
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired API token.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )

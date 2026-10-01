@@ -1,0 +1,25 @@
+# Server runtime inside the container (CPU only). Versions are the ones the
+# working Windows build venv uses. torch is installed separately in the
+# Dockerfile (CPU wheel index); openai-whisper and Resemblyzer with --no-deps.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+python-multipart==0.0.32
+requests==2.34.2
+psutil==7.2.2
+
+# transcription (openai-whisper's own dependencies, minus triton)
+numpy==2.5.2
+numba==0.67.0
+tiktoken==0.14.0
+more-itertools==11.1.0
+tqdm==4.70.0
+regex==2026.7.19
+
+# audio: reading/encoding Opus chunks, aligning tracks
+soundfile==0.14.0
+scipy==1.18.1
+
+# speaker clustering (Resemblyzer's dependencies, minus the "typing" backport)
+librosa==1.0.0
+webrtcvad==2.0.10
+scikit-learn==1.9.0

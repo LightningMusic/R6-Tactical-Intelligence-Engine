@@ -1,0 +1,132 @@
+# R6 server stack. Run it with deploy\r6ctl.bat (it drives this inside WSL).
+#
+#   internet --(Tailscale Funnel | Cloudflare Tunnel)--> server --> ollama
+#
+# Nothing here listens on your LAN. The only published port is on this PC's
+# own loopback, for the USB app when it runs on this same machine.
+
+name: r6
+
+x-common: &common
+  restart: unless-stopped
+  init: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging:
+    driver: local
+    options: { max-size: "20m", max-file: "5" }
+
+services:
+  server:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: r6server:local
+    read_only: true
+    tmpfs:
+      - /tmp:size=3g,mode=1777
+    volumes:
+      - data:/data
+    ports:
+      - "127.0.0.1:${R6_LOCAL_PORT:-8000}:8000"
+    environment:
+      R6_SERVER_PUBLIC_URL: ${R6_SERVER_PUBLIC_URL:-}
+      R6_SERVER_OLLAMA_URL: http://ollama:11434
+      R6_SERVER_OLLAMA_MODEL: ${R6_OLLAMA_MODEL:-llama3.1:8b}
+      R6_SERVER_OLLAMA_NUM_THREAD: ${R6_THREADS:-6}
+      R6_SERVER_OLLAMA_NUM_GPU: "0"
+      OMP_NUM_THREADS: ${R6_THREADS:-6}
+      MKL_NUM_THREADS: ${R6_THREADS:-6}
+    cpus: ${R6_SERVER_CPUS:-6}
+    mem_limit: ${R6_SERVER_MEM:-8g}
+    pids_limit: 512
+    networks: [backend, egress]
+
+  ollama:
+    <<: *common
+    image: ollama/ollama:${OLLAMA_TAG:-latest}
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: 10m
+    cpus: ${R6_OLLAMA_CPUS:-6}
+    mem_limit: ${R6_OLLAMA_MEM:-10g}
+    pids_limit: 512
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    # No internet and no published port: only the server can reach it.
+    networks: [backend]
+
+  # Public address, option 1 (free): Tailscale Funnel from a SECOND Tailscale
+  # account, in userspace mode (no TUN device, no extra privileges).
+  tailscale:
+    <<: *common
+    image: tailscale/tailscale:${TAILSCALE_TAG:-stable}
+    hostname: ${TS_HOSTNAME:-r6-server}
+    volumes:
+      - ts_state:/var/lib/tailscale
+      - ./tailscale:/config:ro
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_HOSTNAME: ${TS_HOSTNAME:-r6-server}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+      TS_ACCEPT_DNS: "false"
+      TS_SERVE_CONFIG: /config/serve.json
+    cpus: 1
+    mem_limit: 512m
+    pids_limit: 256
+    networks: [backend, egress]
+
+  # Public address, option 2 (needs a domain; see deploy/README.md):
+  #   docker compose --profile cloudflare up -d
+  cloudflared:
+    <<: *common
+    profiles: [cloudflare]
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    cpus: 1
+    mem_limit: 256m
+    pids_limit: 128
+    networks: [backend, egress]
+
+  # One-off: downloads the model into the ollama volume (needs internet, which
+  # the normal ollama container deliberately doesn't have).
+  #   docker compose --profile setup run --rm ollama-pull
+  ollama-pull:
+    profiles: [setup]
+    image: ollama/ollama:${OLLAMA_TAG:-latest}
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      MODEL: ${R6_OLLAMA_MODEL:-llama3.1:8b}
+      OLLAMA_HOST: 127.0.0.1:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve >/tmp/serve.log 2>&1 &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull "$$MODEL"
+        ollama list
+    networks: [egress]
+
+networks:
+  backend:
+    internal: true
+  egress: {}
+
+# Docker names these r6_data, r6_ollama_models and r6_ts_state (project "r6").
+volumes:
+  data:
+  ollama_models:
+  ts_state:

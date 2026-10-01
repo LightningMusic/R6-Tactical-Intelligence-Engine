@@ -6,6 +6,9 @@ from typing import Optional
 from server.config import server_settings
 from server.repositories import ServerRepository
 from server.services.session_processing import SessionProcessingService
+from server.services.comms_service import CommsService
+
+COMMS_CHECK_INTERVAL = 30.0
 
 
 class ServerWorker:
@@ -45,13 +48,20 @@ class ServerWorker:
             if not archive_path.exists():
                 raise FileNotFoundError(f"Package archive not found at {archive_path}")
 
-            SessionProcessingService.process_session_job(
+            summary = SessionProcessingService.process_session_job(
                 job_id=job_id,
                 archive_path=archive_path,
                 session_id=session_id,
             )
 
             self.repo.update_job_status(job_id=job_id, status="completed", error_message=None)
+            self.repo.update_session_result(
+                session_id=session_id,
+                status="completed",
+                map_name=summary.get("map_name"),
+                score_us=summary.get("score_us"),
+                score_them=summary.get("score_them"),
+            )
             print(f"[ServerWorker] Job {job_id} completed successfully.")
             return True
 
@@ -59,6 +69,7 @@ class ServerWorker:
             error_msg = f"Job processing error: {e}"
             print(f"[ServerWorker] Job {job_id} failed: {error_msg}")
             self.repo.update_job_status(job_id=job_id, status="failed", error_message=error_msg)
+            self.repo.update_session_result(session_id=session_id, status="failed")
             return True
 
     def start_in_background(self) -> None:
@@ -67,9 +78,39 @@ class ServerWorker:
         self._running = True
 
         def _worker_loop() -> None:
+            # Tracked only so the pause/resume transitions get logged once
+            # each instead of on every poll.
+            was_paused = False
+            last_comms_check = 0.0
             while self._running:
                 try:
+                    # Checked before claim_next_queued_job(), not inside
+                    # process_single_job(): claiming first would leave the
+                    # job marked 'processing' with nothing working on it,
+                    # recoverable only by the startup sweep.
+                    if server_settings.analysis_paused():
+                        if not was_paused:
+                            print(
+                                "[ServerWorker] Analysis PAUSED — uploads are still "
+                                "accepted and queued; jobs will run on resume."
+                            )
+                            was_paused = True
+                        time.sleep(server_settings.WORKER_POLL_INTERVAL)
+                        continue
+
+                    if was_paused:
+                        print("[ServerWorker] Analysis RESUMED — working through the queue.")
+                        was_paused = False
+
                     processed = self.process_single_job()
+                    if not processed and time.time() - last_comms_check >= COMMS_CHECK_INTERVAL:
+                        # Idle: fold in teammates' recordings that arrived
+                        # after their matches were processed.
+                        last_comms_check = time.time()
+                        try:
+                            processed = CommsService.process_pending()
+                        except Exception as e:
+                            print(f"[ServerWorker] Comms rebuild error: {e}")
                     if not processed:
                         time.sleep(server_settings.WORKER_POLL_INTERVAL)
                 except Exception as e:
