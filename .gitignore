@@ -27,7 +27,6 @@ data/recordings/
 # PyInstaller & Build folders
 build/
 dist/
-*.spec
 
 # Python environment
 .venv/
@@ -42,3 +41,21 @@ data/models/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# 2026-09-10: real secrets that live at the project root as plain files --
+# neither was ever actually excluded before, despite both holding a live,
+# working credential (found while investigating a client/server API-token
+# mismatch; see claude/milestone5-internet-reachability.md section 6).
+# server_data/server_config.json holds the server's self-provisioned API
+# token in plaintext. laptop_smb_credentials.json (new, see
+# setup_laptop_smb_account.ps1 and remote_deploy.bat) holds a real working
+# Windows account password for the laptop's SMB share.
+server_data/
+laptop_smb_credentials.json
+# Docker deployment (deploy/): private settings, never commit.
+deploy/.env
+
+# Local scratch / runtime output
+server_pid.txt
+Claude outputs/
+data/reports/

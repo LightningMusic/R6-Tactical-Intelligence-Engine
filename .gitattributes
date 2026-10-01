@@ -1,0 +1,7 @@
+# Shell scripts and compose files run on Linux; the .bat runs on Windows.
+deploy/**/*.sh text eol=lf
+deploy/**/*.yml text eol=lf
+deploy/**/*.json text eol=lf
+
+# cmd.exe mangles LF-only batch files (labels, multi-line blocks), so every .bat is CRLF.
+*.bat text eol=crlf
