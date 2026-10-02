@@ -511,17 +511,88 @@ class IntelEngine:
 
     # ── Public analysis methods ───────────────────────────────
 
+    def _resolve_ours(self, repo, match_id: int, match, explicit) -> Optional[set]:
+        """Which players are on our team: given outright (the server reads it
+        from the replay), remembered from an earlier pass, or flagged as team
+        members. None means unknown, and the old everyone-in-the-match
+        behaviour applies."""
+        from analysis import team_facts
+
+        names = team_facts.ours_set(explicit)
+        try:
+            if names:
+                self._store_metric(repo, match_id, "our_players", json.dumps(sorted(names)))
+                return names
+            with repo.db.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT metric_text FROM derived_metrics WHERE match_id = ? AND metric_name = 'our_players'",
+                    (match_id,),
+                ).fetchone()
+            if row and row[0]:
+                return team_facts.ours_set(json.loads(row[0]))
+            flagged = {team_facts.norm(s.player.name) for r in match.rounds for s in r.player_stats
+                       if getattr(s.player, "is_team_member", False)}
+            if len(flagged) >= 3:
+                return flagged
+        except Exception as e:
+            print(f"[AI] Could not work out which players are ours ({e}); using everyone.")
+        return None
+
+    def _player_baselines(self, repo, match_id: int, names: set) -> dict[str, dict]:
+        """Each named player's results over every OTHER stored match, so a
+        night can be judged against that player's own normal."""
+        if not names:
+            return {}
+        marks = ",".join("?" for _ in names)
+        try:
+            with repo.db.get_connection() as conn:
+                rows = conn.execute(
+                    f"""SELECT lower(p.name) AS n, COUNT(DISTINCT r.match_id) AS matches, COUNT(*) AS rounds,
+                               SUM(s.kills) AS k, SUM(s.deaths) AS d,
+                               SUM(CASE WHEN s.deaths = 0 THEN 1 ELSE 0 END) AS surv,
+                               SUM(s.engagements_won) AS ew, SUM(s.engagements_taken) AS et
+                        FROM player_round_stats s
+                        JOIN rounds r ON r.round_id = s.round_id
+                        JOIN players p ON p.player_id = s.player_id
+                        WHERE r.match_id != ? AND lower(p.name) IN ({marks})
+                        GROUP BY p.player_id""",
+                    (match_id, *sorted(names)),
+                ).fetchall()
+        except Exception as e:
+            print(f"[AI] Could not load player history ({e}).")
+            return {}
+        out: dict[str, dict] = {}
+        for r in rows:
+            k, d, rounds = int(r["k"] or 0), int(r["d"] or 0), int(r["rounds"] or 0)
+            et = int(r["et"] or 0)
+            out[r["n"]] = {
+                "matches": int(r["matches"]), "rounds": rounds,
+                "kd": (k / d) if d else float(k),
+                "survival": (int(r["surv"] or 0) / rounds) if rounds else 0.0,
+                "ewr": (int(r["ew"] or 0) / et) if et else None,
+            }
+        return out
+
     def analyze_match(
         self,
         match_id: int,
         progress_callback: Optional[Callable[..., Any]] = None,
+        our_players: Optional[Any] = None,
+        display_names: Optional[dict] = None,
     ) -> dict[str, Any]:
+        from analysis import team_facts
         from analysis.metrics_engine import MetricsEngine
 
         repo  = self._make_repo()
         match = repo.get_match_full(match_id)
         if match is None:
             return {"error": f"Match {match_id} not found."}
+
+        ours    = self._resolve_ours(repo, match_id, match, our_players)
+        display = {str(k).lower(): v for k, v in (display_names or {}).items()}
+        facts   = team_facts.build_match_facts(match, ours, self._get_round_events(match_id), display) if ours else None
+        if facts:
+            facts["comms_counts"] = self._comms_counts(repo, match_id)
 
         engine  = MetricsEngine(match)
         summary = engine.player_summary()
@@ -538,12 +609,16 @@ class IntelEngine:
         }
 
         transcript = self._get_transcript_summary(match_id)
-        prompt     = self._build_match_prompt(match, metrics, summary, tps, transcript)
+        prompt     = self._build_match_prompt(match, metrics, summary, tps, transcript, facts=facts, display=display)
 
         if progress_callback:
             progress_callback(0, 1, "Generating match summary...")
 
         text = self.generate(prompt, max_tokens=1100, progress_callback=progress_callback)
+        if facts and not text.startswith(_AI_FAILURE_MARKERS):
+            # The model summarises well and counts badly: patterns and focus points are worked out in code.
+            text = team_facts.replace_section(text, "ROUND PATTERNS", facts["round_patterns"])
+            text = team_facts.replace_section(text, "WHAT TO FOCUS ON NEXT", team_facts.focus_points(match, facts))
         self._store_metric(repo, match_id, "ai_match_summary", text)
         return {"ai_match_summary": text}
 
@@ -551,13 +626,19 @@ class IntelEngine:
         self,
         match_id: int,
         progress_callback: Optional[Callable[..., Any]] = None,
+        our_players: Optional[Any] = None,
+        display_names: Optional[dict] = None,
     ) -> dict[str, Any]:
+        from analysis import team_facts
         from analysis.metrics_engine import MetricsEngine
 
         repo  = self._make_repo()
         match = repo.get_match_full(match_id)
         if match is None:
             return {}
+
+        ours    = self._resolve_ours(repo, match_id, match, our_players)
+        display = {str(k).lower(): v for k, v in (display_names or {}).items()}
 
         engine  = MetricsEngine(match)
         summary = engine.player_summary()
@@ -566,11 +647,24 @@ class IntelEngine:
         seen: dict[int, Any] = {}
         for r in match.rounds:
             for stat in r.player_stats:
+                if ours is not None and team_facts.norm(stat.player.name) not in ours:
+                    continue            # opponents are not analysed
                 seen.setdefault(stat.player_id, stat)
 
         players = list(seen.values())
         if not players:
             return {}
+
+        context = None
+        if ours is not None:
+            events    = self._get_round_events(match_id)
+            table     = team_facts.player_table(match, ours)
+            context = {
+                "table":     table,
+                "team":      team_facts.team_totals(table),
+                "baselines": self._player_baselines(repo, match_id, ours),
+                "opening":   team_facts.opening_counts(events),
+            }
 
         results: dict[str, Any] = {}
         for i, stat in enumerate(players):
@@ -582,12 +676,38 @@ class IntelEngine:
                     i + 1, len(players),
                     f"Analyzing {name} ({i+1}/{len(players)})..."
                 )
+            if context is not None and name in context["table"]:
+                # Strength, weakness and drill are all chosen in code from checked facts: the model
+                # labelled "in line with usual" as a weakness and gave generic or backwards drills.
+                facts = team_facts.player_facts(
+                    context["table"][name], context["team"], context["baselines"].get(team_facts.norm(name)),
+                    context["opening"].get(team_facts.norm(name)),
+                )
+                strength, weakness = team_facts.pick_lines(facts)
+                none = "Nothing clearly stands out tonight."
+                drill = (team_facts.drill_for(weakness) if weakness
+                         else "Keep the current routine; nothing needs fixing tonight.")
+                results[name] = f"STRENGTH: {strength or none}\nFOCUS: {weakness or none}\nDRILL: {drill}"
+                continue
             comms_lines = self._get_player_transcript_lines(match_id, name)
-            prompt = self._build_player_prompt(
-                stat, pdata, float(tps.get(pid, 0.0)), comms_lines,
-            )
+            prompt = self._build_player_prompt(stat, pdata, float(tps.get(pid, 0.0)), comms_lines)
             results[name] = self.generate(prompt, max_tokens=400)
         return results
+
+    def _comms_counts(self, repo, match_id: int) -> dict[str, int]:
+        """How many flagged moments of each kind the comms timeline found."""
+        counts: dict[str, int] = {}
+        try:
+            with repo.db.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT metric_text FROM derived_metrics WHERE match_id = ? AND metric_name = 'comms_timeline'",
+                    (match_id,),
+                ).fetchone()
+            for f in (json.loads(row[0]).get("flags") or []) if row and row[0] else []:
+                counts[f["kind"]] = counts.get(f["kind"], 0) + 1
+        except Exception:
+            pass
+        return counts
 
     def _get_round_events(self, match_id: int) -> dict[int, dict]:
         """
@@ -762,7 +882,9 @@ class IntelEngine:
         return section
     # ── Prompt builders ───────────────────────────────────────
 
-    def _build_match_prompt(self, match, metrics, summary, tps, transcript) -> str:
+    def _build_match_prompt(self, match, metrics, summary, tps, transcript, facts=None, display=None) -> str:
+        display = display or {}
+        opponent = match.opponent_name if match.opponent_name not in ("", None, "Imported") else "the opposing team"
         wins   = sum(1 for r in match.rounds if r.outcome == "win")
         losses = sum(1 for r in match.rounds if r.outcome == "loss")
         total  = len(match.rounds)
@@ -784,6 +906,8 @@ class IntelEngine:
             k = sum(p.kills  for p in r.player_stats)
             d = sum(p.deaths for p in r.player_stats)
             a = sum(p.assists for p in r.player_stats)
+            if facts and r.round_number in facts["round_kda"]:
+                k, d, a = facts["round_kda"][r.round_number]       # our team only
             # Only show K/D/A if stats were actually recorded
             if r.player_stats:
                 kda = f"{k}K/{d}D/{a}A"
@@ -803,6 +927,11 @@ class IntelEngine:
             pid: data for pid, data in summary.items()
             if data.get("rounds_played", 0) > 0
         }
+        if facts and facts["ours"] is not None:
+            players_with_stats = {
+                pid: data for pid, data in players_with_stats.items()
+                if str(data["player"].name).lower() in facts["ours"]
+            }
 
         player_lines = []
         sorted_players = sorted(
@@ -820,6 +949,7 @@ class IntelEngine:
             a     = int(data.get("assists", 0))
             rp    = int(data.get("rounds_played", 1))
             name  = str(data["player"].name)
+            name  = display.get(name.lower(), name)
             player_lines.append(
                 f"  {name:<16} "
                 f"K/D/A: {k}/{d_}/{a}  "
@@ -842,6 +972,32 @@ class IntelEngine:
         # implementation so the named-speaker fix only had to be made once.)
         comms_section = self._build_comms_section(transcript)
 
+        # ── Team metrics ──────────────────────────────────────────
+        # With a known team, the numbers are ours only, and "man advantage" and
+        # "clutch" come from the kill feed (the old versions counted every
+        # player in the match, so they read 0% for everyone).
+        if facts:
+            tm = facts["team"]
+            ewr_txt = f"{tm['ewr']:.0%}" if tm["ewr"] is not None else "n/a"
+            team_metrics_text = (
+                f"  Overall win rate          : {metrics['win_rate']:.0%}\n"
+                f"  Attack rounds win rate    : {metrics['attack_win_rate']:.0%}\n"
+                f"  Defense rounds win rate   : {metrics['defense_win_rate']:.0%}\n"
+                f"  Our gunfights won         : {ewr_txt}  (our players only)\n"
+                f"  Our team K/D              : {tm['kd']:.2f}  ({tm['k']} kills, {tm['d']} deaths)\n"
+            )
+            for line in facts["opening_lines"]:
+                team_metrics_text += f"  {line}\n"
+            if facts["clutches"]:
+                team_metrics_text += "  Clutches: " + "; ".join(facts["clutches"]) + "\n"
+        else:
+            team_metrics_text = (
+                f"  Overall win rate          : {metrics['win_rate']:.0%}\n"
+                f"  Attack rounds win rate    : {metrics['attack_win_rate']:.0%}\n"
+                f"  Defense rounds win rate   : {metrics['defense_win_rate']:.0%}\n"
+                f"  Engagement win rate       : {metrics['engagement_win_rate']:.0%}  (gunfight win%)\n"
+            )
+
         # ── Build the full prompt ─────────────────────────────────
         prompt = f"""You are a Rainbow Six Siege post-match analyst. Your job is to write a clear, honest debrief based ONLY on the data provided below.
 
@@ -859,25 +1015,19 @@ STRICT RULES — violating these makes the analysis worthless:
 - If player stats show 0 kills and 0 deaths across the board, state "manual stats were not entered for this match" and skip player-specific analysis.
 - If you are uncertain about what happened in a round, say so — do not guess.
 - Base observations only on patterns visible in multiple rounds, not single-round anomalies.
-- The opponent name is "{match.opponent_name}" — use it.
+- The opponent is "{opponent}" — use that wording. The player table lists OUR team only.
 - The map is "{match.map}".
 
 ════════════════════════════════════════════════════════════════
 MATCH DATA  (this is everything the system knows — nothing more)
 ════════════════════════════════════════════════════════════════
 
-MATCH: vs {match.opponent_name} on {match.map}
+MATCH: vs {opponent} on {match.map}
 RESULT: {wins}–{losses} {'WIN' if match.result == 'win' else 'LOSS' if match.result == 'loss' else '(result not set)'}
 TOTAL ROUNDS: {total}
 {no_stats_note}
 TEAM METRICS (calculated from recorded stats):
-  Overall win rate          : {metrics['win_rate']:.0%}
-  Attack rounds win rate    : {metrics['attack_win_rate']:.0%}
-  Defense rounds win rate   : {metrics['defense_win_rate']:.0%}
-  Engagement win rate       : {metrics['engagement_win_rate']:.0%}  (gunfight win%)
-  Man-advantage conversion  : {metrics['man_advantage']:.0%}  (when up in players, % converted to round win)
-  Clutch rate               : {metrics['clutch_rate']:.0%}
-
+{team_metrics_text}
 ROUND BY ROUND:
 {chr(10).join(round_lines)}
 
@@ -937,12 +1087,12 @@ Summarise comms data if present. When talk share and flagged moments are listed,
                 f"per tagged transcript segments):\n{quoted}\n"
             )
 
-        # Replays don't carry ability/gadget charges, so for imported matches
-        # these totals are 0 and "Utility Efficiency 0%" just means "unknown".
-        # Showing it anyway had the model telling nearly every player to
-        # practise using their gadgets.
+        # Replays record when an ability was available (ability_start) but not
+        # when it was used (ability_used is 0 in every stored match), so
+        # "Utility Efficiency 0%" means "unknown", not "never used". Showing it
+        # had the model telling nearly every player to practise their gadgets.
         utility_line = ""
-        if int(pdata.get("ability_total", 0)) + int(pdata.get("gadget_total", 0)) > 0:
+        if int(pdata.get("ability_used", 0)) + int(pdata.get("gadget_used", 0)) > 0:
             utility_line = (
                 f"Utility Efficiency  : {float(pdata.get('utility_efficiency', 0)):.0%}  "
                 f"(ability + gadget usage rate)\n"

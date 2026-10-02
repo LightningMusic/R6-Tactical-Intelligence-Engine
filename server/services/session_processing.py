@@ -253,7 +253,11 @@ class SessionProcessingService:
                 ollama_url=server_settings.OLLAMA_URL or None,
             )
 
-            match_analysis = intel.analyze_match(match_id)
+            from server.services.comms_service import CommsService as _Comms
+            ours = _Comms.our_players_from_rounds(getattr(result, "timeline_rounds", None) or [])
+            _, display = _Comms.team_context(match_id)
+
+            match_analysis = intel.analyze_match(match_id, our_players=ours or None, display_names=display)
             if "error" in match_analysis:
                 repo_job.update_analysis_status(session_id, "failed", match_id=match_id, error=match_analysis["error"])
                 return
@@ -263,7 +267,11 @@ class SessionProcessingService:
                 repo_job.update_analysis_status(session_id, "failed", match_id=match_id, error=summary_text.splitlines()[0])
                 return
 
-            player_intel = intel.get_player_intel(match_id)
+            player_intel = intel.get_player_intel(match_id, our_players=ours or None, display_names=display)
+            with match_repo.db.get_connection() as conn:
+                conn.execute("DELETE FROM derived_metrics WHERE match_id = ? AND metric_name LIKE 'ai_player_intel::%'",
+                             (match_id,))
+                conn.commit()
             for player_name, text in player_intel.items():
                 intel.store_ai_text(match_repo, match_id, f"ai_player_intel::{player_name}", text)
 

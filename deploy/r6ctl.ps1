@@ -379,6 +379,17 @@ function Cmd-RetireOldAddress {
     Say 'Old Tailscale Funnel turned off: the old address no longer reaches anything.' 'Gray'
 }
 
+function Cmd-CopyKey {
+    Ensure-Docker
+    $py = "import json; print(json.load(open('/data/server_config.json'))['api_token'])"
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($py))
+    $out = @(Wsl --cd "$Src/deploy" --exec sh -c "echo $b64 | base64 -d | docker compose exec -T server python -")
+    $key = $out | Where-Object { $_ -match '^[A-Za-z0-9_\-]{30,}$' } | Select-Object -First 1
+    if (-not $key) { Fail 'Could not read the API key from the server volume (is the stack up?  r6ctl status).' }
+    Set-Clipboard -Value $key
+    Say 'The main API key is on your clipboard (it is not printed). Paste it into the dashboard''s API Token box.' 'Green'
+}
+
 function Cmd-RotateTokens {
     # r6ctl rotate-tokens [api|voice|both] [--yes]
     Ensure-Docker
@@ -480,6 +491,7 @@ r6ctl -- the R6 server, running in Docker inside an isolated WSL environment
                    working as a bridge   [--yes] [--retire-old-address]
     retire-old-address   turn off the old Funnel (after every client has the new address)
     rotate-tokens  new api/voice keys   [api|voice|both] [--yes]  (then: done, to drop the rollback copy)
+    copy-key       put the main API key on the clipboard (never printed), to sign in to the dashboard
     autostart     start the stack automatically at Windows logon   [off]
 
   every day
@@ -509,6 +521,7 @@ switch ($Command.ToLowerInvariant()) {
     'cutover'   { Cmd-Cutover }
     'retire-old-address' { Cmd-RetireOldAddress }
     'rotate-tokens' { Cmd-RotateTokens }
+    'copy-key'  { Cmd-CopyKey }
     'keepalive' { Cmd-Keepalive }
     'autostart' { Cmd-Autostart }
     default     { Cmd-Help }

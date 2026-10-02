@@ -27,10 +27,9 @@ def _print_startup_banner() -> None:
         lines.append("  WARNING: no API token is configured (see the warning above).")
         lines.append("  Every request will be rejected with HTTP 500 until this is fixed.")
     elif server_settings.API_TOKEN_PLAINTEXT and "server_config.json" in server_settings.TOKEN_SOURCE:
-        lines.append(f"  API Token ({server_settings.TOKEN_SOURCE}):")
-        lines.append(f"    {server_settings.API_TOKEN_PLAINTEXT}")
-        lines.append("  Paste this into the R6Analyzer client's Settings -> Remote Sync")
-        lines.append("  -> API Key field to connect it to this server.")
+        # Never printed: container logs are readable by anyone who can run `docker logs`.
+        lines.append(f"  API Token: stored in {server_settings.TOKEN_SOURCE} (not shown).")
+        lines.append("  Docker setup: run  deploy\\r6ctl.bat copy-key  to put it on the clipboard.")
     else:
         lines.append(f"  API Token: configured via {server_settings.TOKEN_SOURCE} (not shown)")
     lines.append(f"  Data directory: {server_settings.DATA_DIR}")

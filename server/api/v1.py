@@ -427,6 +427,37 @@ def create_invite(body: dict, _client: str = Depends(verify_api_token)) -> dict:
     return _invite_links(created)
 
 
+@router.get("/roster")
+def get_roster(_client: str = Depends(verify_api_token)) -> dict:
+    from server import roster
+    return {"roster": roster.get_all()}
+
+
+@router.put("/roster")
+def put_roster(body: dict, _client: str = Depends(verify_api_token)) -> dict:
+    """{"roster": [{"username": "<in-game name>", "label": "<nickname>"}, ...]} replaces the saved list."""
+    from server import roster
+    try:
+        return {"roster": roster.replace_all(body.get("roster") or [])}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/voices")
+def list_voices(_client: str = Depends(verify_api_token)) -> dict:
+    """Whose voice the server has learned (from teammates' recordings) and how much it has to go on."""
+    from server import voice_id
+    return {"enabled": voice_id.enabled(), "profiles": voice_id.list_profiles()}
+
+
+@router.delete("/voices/{username}")
+def forget_voice(username: str, _client: str = Depends(verify_api_token)) -> dict:
+    from server import voice_id
+    if not voice_id.delete_profile(username):
+        raise HTTPException(status_code=404, detail="No learned voice for that name.")
+    return {"status": "forgotten", "username": username}
+
+
 @router.post("/invites/{invite_id}/regenerate")
 def regenerate_invite(invite_id: str, _client: str = Depends(verify_api_token)) -> dict:
     created = invites.regenerate(invite_id)

@@ -75,10 +75,11 @@ class _FakeIntelEngine:
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
 
-    def analyze_match(self, match_id):
+    def analyze_match(self, match_id, **kwargs):
+        self.kwargs_seen = kwargs
         return {"ai_match_summary": "Solid attack rounds, weak defense."}
 
-    def get_player_intel(self, match_id):
+    def get_player_intel(self, match_id, **kwargs):
         return {"TeamPlayer1": "STRENGTH: aim\nFOCUS: positioning\nDRILL: wallbang drills"}
 
     def store_ai_text(self, repo, match_id, name, text):

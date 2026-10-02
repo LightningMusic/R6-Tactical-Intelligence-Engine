@@ -149,6 +149,24 @@ class ServerDatabase:
                     last_seen REAL
                 );
 
+                -- The host's saved team list (server/roster.py): in-game names
+                -- offered as a pick-list when making invite links.
+                CREATE TABLE IF NOT EXISTS team_roster (
+                    username TEXT PRIMARY KEY,
+                    label TEXT NOT NULL DEFAULT '',
+                    position INTEGER NOT NULL DEFAULT 0
+                );
+
+                -- Learned voices (server/voice_id.py): a running-mean voice
+                -- embedding per in-game name, built from the Discord track.
+                CREATE TABLE IF NOT EXISTS voice_profiles (
+                    username TEXT PRIMARY KEY,
+                    embedding_json TEXT NOT NULL,
+                    n_samples INTEGER NOT NULL DEFAULT 0,
+                    seconds REAL NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT ''
+                );
+
                 CREATE TABLE IF NOT EXISTS server_transcripts (
                     session_id TEXT PRIMARY KEY,
                     raw_text TEXT NOT NULL DEFAULT '',

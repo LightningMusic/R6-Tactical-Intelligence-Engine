@@ -84,6 +84,15 @@ class ClipClock:
             acc += dur
         return t
 
+    def offset(self, epoch: float) -> float:
+        """Seconds into the clip at a given epoch (the inverse of epoch())."""
+        acc = 0.0
+        for start, dur in self.pieces:
+            if epoch <= start + dur or (start, dur) == self.pieces[-1]:
+                return acc + (epoch - start)
+            acc += dur
+        return epoch
+
     @property
     def start(self) -> float:
         return self.pieces[0][0]
@@ -338,6 +347,12 @@ class CommsService:
         on_discord = [s for s in segments
                       if heard_on_ref(ref, sig, SR, float(s["start"]), float(s["end"]), a) >= HEARD_MIN_CORR]
         info["dropped_off_discord"] = len(segments) - len(on_discord)
+        try:
+            # These stretches of the Discord track are this person's voice: learn it.
+            from server import voice_id
+            info["voice_learned"] = voice_id.enroll_from_alignment(ref, a.to_ref, on_discord, username)
+        except Exception as e:
+            print(f"[VoiceID] learning skipped for {username}: {e}")
         return _utterances(on_discord, clock, "voice", speaker, username, time_map=a.to_ref), info
 
     # ── 4. Build ──────────────────────────────────────────────────────
@@ -367,6 +382,26 @@ class CommsService:
             # track alone rather than invent talk-overs between two copies.
             own = []
         team = drop_team_duplicates(team_all, voice)
+        voice_id_stats = None
+        try:
+            # Name Discord lines nobody recorded, when a learned voice clearly matches.
+            from analysis.comms_timeline import UNKNOWN_TEAM_SPEAKER
+            from server import voice_id
+            comms_dir = server_settings.COMMS_DIR / session_id
+            clip = next(iter(sorted(comms_dir.glob("team.*"))), None)
+            if team and clip is not None and voice_id.enabled() and voice_id.load_profiles():
+                aligned = {r["username"] for r in voice_rows
+                           if json.loads(r["alignment_json"] or "{}").get("status") == "aligned"}
+                display = {str(k).lower(): v for k, v in (meta.get("roster") or {}).items()}
+                display.update(cls.team_context(row["match_id"])[1])
+                team, voice_id_stats = voice_id.label_team_lines(
+                    team, _load_audio(clip), ClipClock(meta.get("pieces") or [[0.0, 0.0]]).offset,
+                    UNKNOWN_TEAM_SPEAKER, aligned, display, cache_path=comms_dir / "voice_embeddings.json")
+                if voice_id_stats["labelled"]:
+                    print(f"[VoiceID] {session_id[:16]}: named {voice_id_stats['labelled']} of "
+                          f"{voice_id_stats['considered']} unassigned Discord lines.")
+        except Exception as e:
+            print(f"[VoiceID] skipped for {session_id[:16]}: {e}")
         speech = own + [u for u in host if u["source"] not in ("self", "team")] + team + voice
 
         roster = dict(meta.get("roster") or {})
@@ -375,6 +410,8 @@ class CommsService:
         timeline = build_timeline(rounds, speech, float(meta.get("utc_offset_sec", _local_utc_offset())),
                                   names=roster, tracked_usernames=tracked)
         timeline["voice"] = [json.loads(r["alignment_json"] or "{}") for r in voice_rows]
+        if voice_id_stats:
+            timeline["voice_id"] = voice_id_stats
         timeline["audio"] = {"tracks": meta.get("tracks", []),
                              "clip_start_estimated": bool(meta.get("clip_start_estimated")),
                              "echoes_removed": echoes,
@@ -446,21 +483,68 @@ class CommsService:
         return False
 
     @staticmethod
-    def _refresh_ai(match_id: Optional[int]) -> None:
+    def our_players_from_rounds(rounds: list[dict]) -> list[str]:
+        """Usernames on the recording player's team, from the replay's rounds."""
+        seen: dict[str, str] = {}
+        for rnd in rounds or []:
+            for u in rnd.get("ours") or []:
+                seen.setdefault(str(u).lower(), str(u))
+        return list(seen.values())
+
+    @classmethod
+    def team_context(cls, match_id: Optional[int]) -> tuple[list[str], dict[str, str]]:
+        """(our players' in-game names, {in-game name (lowercase): nickname}) for a match.
+        Nicknames come from the package's roster, overridden by the host's saved team list."""
+        if match_id is None:
+            return [], {}
+        with server_db.get_connection() as conn:
+            row = conn.execute("SELECT rounds_json, audio_meta_json FROM session_comms WHERE match_id = ?",
+                               (match_id,)).fetchone()
+        if not row:
+            return [], {}
+        ours = cls.our_players_from_rounds(json.loads(row["rounds_json"] or "[]"))
+        display = {str(k).lower(): v for k, v in
+                   (json.loads(row["audio_meta_json"] or "{}").get("roster") or {}).items()}
+        try:
+            from server import roster
+            for r in roster.get_all():
+                if r["label"]:
+                    display[r["username"].lower()] = r["label"]
+        except Exception:
+            pass
+        return ours, display
+
+    @classmethod
+    def _make_intel(cls):
+        from analysis.intel_engine import IntelEngine
+        return IntelEngine(
+            ollama_exe=server_settings.OLLAMA_EXE,
+            ollama_models=server_settings.OLLAMA_MODELS_DIR,
+            default_model=server_settings.OLLAMA_MODEL,
+            db_path=server_settings.MATCHES_DB_PATH,
+            schema_path=server_settings.MATCHES_SCHEMA_PATH,
+            ollama_options=server_settings.OLLAMA_OPTIONS,
+            ollama_url=server_settings.OLLAMA_URL or None,
+        )
+
+    @classmethod
+    def _refresh_ai(cls, match_id: Optional[int], refresh_players: bool = False) -> None:
         if match_id is None:
             return
         try:
-            from analysis.intel_engine import IntelEngine
-            intel = IntelEngine(
-                ollama_exe=server_settings.OLLAMA_EXE,
-                ollama_models=server_settings.OLLAMA_MODELS_DIR,
-                default_model=server_settings.OLLAMA_MODEL,
-                db_path=server_settings.MATCHES_DB_PATH,
-                schema_path=server_settings.MATCHES_SCHEMA_PATH,
-                ollama_options=server_settings.OLLAMA_OPTIONS,
-                ollama_url=server_settings.OLLAMA_URL or None,
-            )
-            intel.analyze_match(match_id)
+            from server.match_db import get_match_repo
+            intel = cls._make_intel()
+            ours, display = cls.team_context(match_id)
+            intel.analyze_match(match_id, our_players=ours or None, display_names=display)
+            if refresh_players:
+                results = intel.get_player_intel(match_id, our_players=ours or None, display_names=display)
+                repo = get_match_repo()
+                with repo.db.get_connection() as conn:
+                    conn.execute("DELETE FROM derived_metrics WHERE match_id = ? AND metric_name LIKE 'ai_player_intel::%'",
+                                 (match_id,))
+                    conn.commit()
+                for name, text in results.items():
+                    intel.store_ai_text(repo, match_id, f"ai_player_intel::{name}", text)
             print(f"[Comms] match {match_id}: AI debrief refreshed with teammate comms.")
         except Exception as e:
             print(f"[Comms] match {match_id}: AI refresh failed: {e}")

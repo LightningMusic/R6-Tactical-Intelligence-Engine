@@ -253,8 +253,14 @@
         <button class="secondary" id="inviteCopyBtn" style="margin-top:6px; padding:6px 10px; font-size:12px;">Copy link</button>
       </div>
       <div id="inviteList" style="font-size:12px; color:var(--muted);">Loading…</div>
+      <div style="margin-top:10px; font-size:12px;"><a href="#" id="rosterEditLink">Edit team list</a></div>
+      <div id="rosterEdit" style="display:none; margin-top:8px;">
+        <textarea id="rosterText" rows="7" style="width:100%; font-size:12px;" placeholder="One per line: InGameName, or InGameName = Nickname"></textarea>
+        <button class="secondary" id="rosterSaveBtn" style="margin-top:6px; padding:6px 10px; font-size:12px;">Save list</button>
+      </div>
       <div style="display:flex; gap:8px; margin-top:10px;">
-        <input type="text" id="inviteName" placeholder="In-game name, e.g. Teddy_Dance" style="flex:1; margin:0;">
+        <select id="inviteSelect" style="flex:1; margin:0;"></select>
+        <input type="text" id="inviteName" placeholder="In-game name" style="flex:1; margin:0; display:none;">
         <button id="inviteCreateBtn" style="margin:0; padding:8px 12px; font-size:12px;">Create link</button>
       </div>
     </div>
@@ -359,6 +365,7 @@
       renderSessions(data.sessions || []);
       loadVoice();
       loadInvites();
+      if (!roster.length) loadRoster();
     } catch (e) {
       $("statusDot").className = "bad";
       showError(e.message);
@@ -665,10 +672,30 @@
     $("inviteNew").style.display = "block";
     $("inviteNewLink").select();
   }
+  let roster = [], lastInvites = [], selectSig = "";
+  const OTHER = "__other__";
+  function fillInviteSelect() {
+    const live = new Set(lastInvites.filter(i => !i.revoked && !i.expired).map(i => i.username.toLowerCase()));
+    const opts = [["", "Pick a teammate…"]].concat(roster.map(r => [r.username,
+      (r.label ? r.label + " — " : "") + r.username + (live.has(r.username.toLowerCase()) ? "  (has a link)" : "")]),
+      [[OTHER, "Someone else…"]]);
+    const sig = JSON.stringify(opts);
+    if (sig === selectSig) return;
+    selectSig = sig;
+    const sel = $("inviteSelect"), keep = sel.value;
+    sel.innerHTML = opts.map(o => `<option value="${escapeHtml(o[0])}">${escapeHtml(o[1])}</option>`).join("");
+    if (opts.some(o => o[0] === keep)) sel.value = keep;
+  }
+  async function loadRoster() {
+    try { roster = (await apiFetch("/api/v1/roster")).roster || []; } catch (e) { roster = []; }
+    fillInviteSelect();
+  }
   async function loadInvites() {
     let list;
     try { list = (await apiFetch("/api/v1/invites")).invites || []; }
     catch (e) { $("inviteList").textContent = "Could not load (" + e.message + ")."; return; }
+    lastInvites = list;
+    fillInviteSelect();
     $("inviteList").innerHTML = list.length ? list.map(i => {
       const dead = i.revoked ? "revoked" : i.expired ? "expired" : "";
       return `<div class="detail-row"><span class="k">${escapeHtml(i.username)}${i.label ? ` <span style="color:var(--muted-dim)">${escapeHtml(i.label)}</span>` : ""}</span>
@@ -735,13 +762,40 @@
   });
 
   $("inviteCreateBtn").addEventListener("click", async () => {
-    const name = $("inviteName").value.trim();
-    if (!name) { showError("Type the player's in-game name first."); return; }
+    const picked = $("inviteSelect").value;
+    const name = (picked === OTHER ? $("inviteName").value : picked).trim();
+    if (!name) { showError("Pick a teammate (or choose Someone else and type the in-game name)."); return; }
+    const entry = roster.find(r => r.username === name);
     hideError();
     try {
-      showNewInvite(await apiFetch("/api/v1/invites", { method: "POST", body: { username: name, label: name } }));
+      showNewInvite(await apiFetch("/api/v1/invites", { method: "POST", body: { username: name, label: (entry && entry.label) || name } }));
       $("inviteName").value = "";
+      $("inviteSelect").value = "";
+      $("inviteName").style.display = "none";
       loadInvites();
+    } catch (e) { showError(e.message); }
+  });
+  $("inviteSelect").addEventListener("change", () => {
+    $("inviteName").style.display = $("inviteSelect").value === OTHER ? "block" : "none";
+  });
+  $("rosterEditLink").addEventListener("click", (ev) => {
+    ev.preventDefault();
+    const box = $("rosterEdit");
+    if (box.style.display === "none") {
+      $("rosterText").value = roster.map(r => r.label ? `${r.username} = ${r.label}` : r.username).join("\n");
+      box.style.display = "block";
+    } else box.style.display = "none";
+  });
+  $("rosterSaveBtn").addEventListener("click", async () => {
+    const entries = $("rosterText").value.split("\n").map(l => l.trim()).filter(Boolean).map(l => {
+      const i = l.indexOf("=");
+      return i < 0 ? { username: l, label: "" } : { username: l.slice(0, i).trim(), label: l.slice(i + 1).trim() };
+    });
+    hideError();
+    try {
+      roster = (await apiFetch("/api/v1/roster", { method: "PUT", body: { roster: entries } })).roster || [];
+      fillInviteSelect();
+      $("rosterEdit").style.display = "none";
     } catch (e) { showError(e.message); }
   });
   $("inviteCopyBtn").addEventListener("click", async () => {
