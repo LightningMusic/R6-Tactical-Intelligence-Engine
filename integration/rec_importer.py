@@ -86,6 +86,7 @@ class RecImporter:
             try:
                 round_obj, meta = self._parse_round(raw)
                 parsed_rounds.append(round_obj)
+                self._attach_gadget_usage(rec_file, round_obj)
                 try:
                     timeline_rounds.append(self.timeline_round(raw, round_obj.round_number))
                 except Exception as tl_err:
@@ -184,6 +185,25 @@ class RecImporter:
             round_timestamps=round_timestamps,
             timeline_rounds=timeline_rounds,
         )
+
+    def _attach_gadget_usage(self, rec_file: Path, round_obj: Round) -> None:
+        """Adds each player's operator-gadget charges and uses, which r6-dissect
+        doesn't read, from the replay's own state stream. Nothing is added when
+        the replay can't be read (so 'not measured' never looks like 'not used')."""
+        try:
+            from integration.replay_utility import analyze_rec
+            usage = analyze_rec(rec_file, [p["username"] for p in round_obj.raw_player_stats if p.get("username")])
+        except Exception as e:                                       # noqa: BLE001 - optional enrichment
+            self._log(f"  (gadget usage unavailable for {rec_file.name}: {e})")
+            return
+        if not usage:
+            return
+        for p in round_obj.raw_player_stats:
+            u = usage.get(p.get("username"))
+            p["gadget_start"] = u.start if u else 0      # 0: this operator has no countable gadget
+            p["gadget_used"] = u.used if u else 0
+        if round_obj.round_events is not None:
+            round_obj.round_events.utility_tracked = True
 
     @classmethod
     def timeline_round(cls, data: dict, round_number: int) -> dict:

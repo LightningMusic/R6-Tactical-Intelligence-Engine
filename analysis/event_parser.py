@@ -21,6 +21,9 @@ from models.round_events import (
 # A kill within this many seconds of the killer dying is a trade
 TRADE_WINDOW_SEC = 4.0
 
+# A defuse completing sooner than this after the plant is not a real defuse
+MIN_DEFUSE_GAP_SEC = 5.0
+
 
 def _parse_time(time_str: str) -> float:
     """
@@ -48,8 +51,9 @@ class EventParser:
         events = parser.parse(round_data["matchFeedback"], player_team_map)
     """
 
-    def __init__(self, our_team_index: int) -> None:
+    def __init__(self, our_team_index: int, our_role: Optional[str] = None) -> None:
         self.our_team_index = our_team_index
+        self.our_role = our_role           # "attack" | "defense" | None
 
     def parse(
         self,
@@ -119,6 +123,7 @@ class EventParser:
                     username=username,
                     event_type=event_type,
                     team_index=p_team,
+                    elapsed=float(item.get("elapsedSeconds") or 0.0),
                 ))
 
         # Sort kills chronologically
@@ -172,6 +177,24 @@ class EventParser:
         self, events: RoundEvents, player_team_map: dict[str, int]
     ) -> None:
         """Derive plant_attempted, plant_completed, defuse_attempted, defuse_completed."""
+        # r6-dissect often credits the wrong player on these events, so the
+        # team-level facts come from our side instead: attackers plant,
+        # defenders defuse. A "disable complete" within MIN_DEFUSE_GAP_SEC of
+        # the plant is a false positive (a real defuse takes longer), as seen
+        # on a round that was then won by the planting team.
+        events.our_role = self.our_role
+        completes = [pe for pe in events.plant_events if pe.event_type == "DefuserPlantComplete"]
+        if completes:
+            events.bomb_planted = True
+            events.plant_clock = completes[0].time_str
+            if self.our_role in ("attack", "defense"):
+                events.planted_by_us = (self.our_role == "attack")
+            plant_at = completes[0].elapsed
+            events.bomb_defused = any(
+                pe.event_type == "DefuserDisableComplete"
+                and (not plant_at or not pe.elapsed or pe.elapsed - plant_at >= MIN_DEFUSE_GAP_SEC)
+                for pe in events.plant_events
+            )
         for pe in events.plant_events:
             is_our_team = (pe.team_index == self.our_team_index)
             et = pe.event_type
@@ -192,6 +215,18 @@ class EventParser:
                 if is_our_team:
                     events.defuse_completed = True
                     events.defuser_username = pe.username
+
+        if self.our_role in ("attack", "defense"):
+            # Side beats the (unreliable) usernames: we planted if we attacked, we defused if we defended.
+            we_attack = self.our_role == "attack"
+            starts = {pe.event_type for pe in events.plant_events}
+            events.plant_completed = bool(events.bomb_planted and we_attack)
+            events.plant_attempted = events.plant_completed or (we_attack and "DefuserPlantStart" in starts)
+            events.defuse_completed = bool(events.bomb_defused and not we_attack)
+            events.defuse_attempted = events.defuse_completed or (
+                not we_attack and bool({"DefuserDisableStart", "DefuserDisableComplete"} & starts))
+            events.planter_username = None
+            events.defuser_username = None
 
     def _compute_clutch(
         self,
@@ -317,7 +352,13 @@ def parse_round_events(
         if username:
             player_team_map[username] = team_idx
 
-    parser = EventParser(our_team_index=our_team_index)
+    our_role = None
+    teams = round_data.get("teams") or []
+    if 0 <= our_team_index < len(teams):
+        role = str((teams[our_team_index] or {}).get("role") or "").lower()
+        our_role = role if role in ("attack", "defense") else None
+
+    parser = EventParser(our_team_index=our_team_index, our_role=our_role)
     return parser.parse(feedback, player_team_map, round_outcome)
 
 

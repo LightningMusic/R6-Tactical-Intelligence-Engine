@@ -55,6 +55,7 @@ class PlantEvent:
     username:  str
     event_type: str   # "DefuserPlantStart"|"DefuserPlantComplete"|"DefuserDisableStart"|...
     team_index: int
+    elapsed:   float = 0.0   # seconds since prep began (r6-dissect's elapsedSeconds); 0 if absent
 
 
 @dataclass
@@ -84,6 +85,15 @@ class RoundEvents:
     planter_username:  Optional[str] = None
     defuser_username:  Optional[str] = None
 
+    # Objective facts that do not depend on r6-dissect naming the right player
+    # (it often credits the wrong one): worked out from which side we were on.
+    our_role:         Optional[str]  = None    # "attack" | "defense"
+    bomb_planted:     bool           = False   # a plant was completed, by anyone
+    planted_by_us:    Optional[bool] = None
+    bomb_defused:     bool           = False   # a real defuse: >= MIN_DEFUSE_GAP_SEC after the plant
+    plant_clock:      Optional[str]  = None    # round clock when the plant completed
+    utility_tracked:  bool           = False   # gadget usage was read from the replay for this round
+
     # Clutch detection
     # A clutch = one player from our team alive, ≥1 enemy alive, round won
     clutch_player:     Optional[str]  = None
@@ -102,6 +112,12 @@ class RoundEvents:
             "defuse_completed":    self.defuse_completed,
             "planter":             self.planter_username,
             "defuser":             self.defuser_username,
+            "our_role":            self.our_role,
+            "bomb_planted":        self.bomb_planted,
+            "planted_by_us":       self.planted_by_us,
+            "bomb_defused":        self.bomb_defused,
+            "plant_clock":         self.plant_clock,
+            "utility_tracked":     self.utility_tracked,
             "clutch_player":       self.clutch_player,
             "clutch_kills":        self.clutch_kill_count,
             "kills": [

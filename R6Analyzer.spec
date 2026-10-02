@@ -140,6 +140,8 @@ hiddenimports = [
     "whisper.transcribe",
     "whisper.utils",
     "whisper.decoding",
+    "zstandard",
+    "zstandard.backend_c",
     "llama_cpp",
     "llama_cpp.llama",
     "llama_cpp.llama_cpp",

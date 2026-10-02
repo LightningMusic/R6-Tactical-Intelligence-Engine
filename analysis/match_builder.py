@@ -248,8 +248,11 @@ def save_raw_player_stats(
             # AI report then read as "0% engagement win rate" for everyone.
             engagements_taken=kills + deaths,
             engagements_won=kills,
-            ability_start=operator.ability_max_count,
-            ability_used=0,
+            # Measured from the replay when it could be read (gadget_start/used
+            # are then set for everyone in the round, 0 for operators with no
+            # countable gadget); otherwise the catalog's count and "unknown".
+            ability_start=int(raw["gadget_start"]) if "gadget_start" in raw else operator.ability_max_count,
+            ability_used=int(raw.get("gadget_used", 0) or 0),
             secondary_gadget=None,
             secondary_start=0,
             secondary_used=0,

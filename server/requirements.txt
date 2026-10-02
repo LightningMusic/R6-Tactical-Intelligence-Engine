@@ -16,3 +16,4 @@ python-multipart>=0.0.9
 # lining them up against the host's Discord track.
 numpy>=1.24
 soundfile>=0.12
+zstandard>=0.22

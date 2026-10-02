@@ -17,6 +17,7 @@ regex==2026.7.19
 
 # audio: reading/encoding Opus chunks, aligning tracks
 soundfile==0.14.0
+zstandard==0.25.0
 scipy==1.18.1
 
 # speaker clustering (Resemblyzer's dependencies, minus the "typing" backport)
