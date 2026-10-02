@@ -57,6 +57,9 @@ def main() -> None:
     window = MainWindow()
     window.show()
 
+    from app.stall_watchdog import start_stall_watchdog
+    start_stall_watchdog(window)
+
     # Shut down Ollama server cleanly when app exits
     from analysis.intel_engine import IntelEngine
     _intel = IntelEngine()

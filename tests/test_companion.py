@@ -175,6 +175,22 @@ def test_follows_the_team_and_keeps_recording_through_a_network_drop(comp, monke
     assert not comp.recording and comp.obs.stops == 1
 
 
+def test_the_last_file_is_shipped_right_after_the_host_stops(comp, monkeypatch):
+    import core
+    queued, passes = [], []
+    monkeypatch.setattr(comp, "_in_background", queued.append)
+    monkeypatch.setattr(comp, "export_all", lambda: passes.append(1))
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    server_says(monkeypatch, comp, recording=True)
+    comp.tick()
+    assert not queued                                   # nothing extra while recording
+    server_says(monkeypatch, comp, recording=False, changed_at=2.0)
+    comp.tick()
+    assert len(queued) == 1                             # the hand-off is scheduled the moment OBS stops
+    queued[0]()
+    assert len(passes) == 2                             # two tries, in case OBS is slow to close the file
+
+
 def test_restarts_obs_recording_if_it_stops_on_its_own(comp, monkeypatch):
     server_says(monkeypatch, comp, recording=True)
     comp.tick()
@@ -312,6 +328,34 @@ def test_export_chunks_a_finished_recording(tmp_path):
 
 
 # ── Host app's view ──────────────────────────────────────────────────────
+
+def test_saved_settings_and_state_leave_no_temp_files(comp, tmp_path):
+    import json
+    comp._save_state({"a.mkv": {"done": True}})
+    comp.save_settings(username="Someone_Else")
+    assert comp._load_state() == {"a.mkv": {"done": True}}
+    assert json.loads(comp.settings_path.read_text(encoding="utf-8"))["username"] == "Someone_Else"
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_a_power_cut_mid_save_keeps_the_old_name_and_state(comp, monkeypatch):
+    import json
+    import core
+    comp._save_state({"a.mkv": {"done": True}})
+    name_before = json.loads(comp.settings_path.read_text(encoding="utf-8"))["username"]
+
+    def power_cut(src, dst):
+        raise OSError("power cut between writing and renaming")
+
+    with monkeypatch.context() as m:
+        m.setattr(core.os, "replace", power_cut)
+        with pytest.raises(OSError):
+            comp.save_settings(username="Someone_Else")
+        with pytest.raises(OSError):
+            comp._save_state({"a.mkv": {"done": True}, "b.mkv": {"done": True}})
+    assert json.loads(comp.settings_path.read_text(encoding="utf-8"))["username"] == name_before
+    assert comp._load_state() == {"a.mkv": {"done": True}}
+
 
 def test_host_log_lines_only_when_something_changes():
     from app.companion_link import CompanionLink

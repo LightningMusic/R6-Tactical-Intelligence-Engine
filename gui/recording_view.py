@@ -101,6 +101,7 @@ class RecordingView(QWidget):
     navigate_to_analysis         = Signal(int)
     navigate_to_match_input      = Signal()
     navigate_to_match_input_partial = Signal(object)
+    _obs_started                 = Signal(bool)
 
     def __init__(
         self,
@@ -118,6 +119,8 @@ class RecordingView(QWidget):
         self._recording_path: str | None     = None
         self._game_recording_active = False
         self._streaming_active      = False
+        self._starting              = False
+        self._obs_started.connect(self._finish_start_session)
         self._build_ui()
 
     def _shutdown_and_eject(self) -> None:
@@ -518,10 +521,31 @@ class RecordingView(QWidget):
     # =====================================================
 
     def _start_session(self) -> None:
-        if not self._replay_folder:
+        if not self._replay_folder or self._starting:
             return
 
-        if not self.obs.start_recording():
+        # OBS can be slow to answer and each call may wait up to a minute, so
+        # it is driven from a worker thread; the window stays responsive.
+        self._starting = True
+        self._start_btn.setEnabled(False)
+        self._set_status("⏳ Starting OBS recording...", "#e0a830")
+        self._log_message("Starting OBS recording (can take a few seconds)...")
+        import threading
+        threading.Thread(target=self._obs_start_worker, daemon=True, name="ObsStart").start()
+
+    def _obs_start_worker(self) -> None:
+        try:
+            ok = bool(self.obs.start_recording())
+        except Exception as e:
+            print(f"[OBS] Start failed: {e}")
+            ok = False
+        self._obs_started.emit(ok)
+
+    def _finish_start_session(self, started: bool) -> None:
+        self._starting = False
+        if not started:
+            self._update_start_button()
+            self._set_status("❌ OBS did not start recording.", "#e05555")
             QMessageBox.critical(
                 self, "OBS Error",
                 "Failed to start recording.\n"
@@ -534,6 +558,7 @@ class RecordingView(QWidget):
         except FileNotFoundError as e:
             QMessageBox.critical(self, "Error", str(e))
             self.obs.stop_recording()
+            self._update_start_button()
             return
 
         self._session_manager = SessionManager(

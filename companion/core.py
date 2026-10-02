@@ -23,6 +23,7 @@ end:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import threading
@@ -63,6 +64,16 @@ def in_use(path: Path) -> bool:
         return ctypes.get_last_error() == 32
     k.CloseHandle(h)
     return False
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write then rename: a power cut leaves the old file or the new one, never half of one."""
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 class Companion:
@@ -113,12 +124,12 @@ class Companion:
             if key not in s:
                 s[key], changed = default, True
         if changed:
-            self.settings_path.write_text(json.dumps(s, indent=2), encoding="utf-8")
+            _atomic_write(self.settings_path, json.dumps(s, indent=2))
         return s
 
     def save_settings(self, **updates) -> None:
         self.settings.update(updates)
-        self.settings_path.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+        _atomic_write(self.settings_path, json.dumps(self.settings, indent=2))
         if "mic_device" in updates:
             self.obs.mic_device = updates["mic_device"]
             self.obs.set_up = False           # re-applied before the next recording
@@ -190,6 +201,7 @@ class Companion:
                 rec = False
                 self._note_stop(time.time())
                 self.log(f"Recording stopped{f': {out.name}' if out else ''}.")
+                self._export_soon()
             self.recording = rec
             self.obs_status = "ok"
         except Exception as e:
@@ -200,6 +212,15 @@ class Companion:
 
     def _in_background(self, fn) -> None:
         threading.Thread(target=fn, daemon=True).start()
+
+    def _export_soon(self) -> None:
+        """Ship the last file right after OBS closes it instead of waiting for
+        the 15 s loop: teammates often switch the PC off the moment practice ends."""
+        def later() -> None:
+            for delay in (3.0, 6.0):
+                time.sleep(delay)
+                self.export_all()
+        self._in_background(later)
 
     def _load_state(self) -> dict:
         try:
@@ -216,7 +237,7 @@ class Companion:
             self._save_state(state)
 
     def _save_state(self, state: dict) -> None:
-        self.state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
+        _atomic_write(self.state_path, json.dumps(state, indent=1))
 
     def _chain(self, state: dict, f: Path, name_start: float, duration: float) -> tuple[float, str, int]:
         """

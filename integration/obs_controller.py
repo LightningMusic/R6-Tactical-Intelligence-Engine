@@ -74,9 +74,12 @@ def track_layout_for(recording_start_epoch: float, path=None) -> Optional[dict]:
     return best.get("layout")
 
 def _obs_is_running() -> bool:
-    for proc in psutil.process_iter(["name"]):
+    for proc in psutil.process_iter(["name", "exe"]):
         try:
             if proc.info["name"] and "obs64" in proc.info["name"].lower():
+                # The R6Companion stick carries its own OBS; it is not the one this app drives.
+                if "r6companion" in (proc.info.get("exe") or "").lower():
+                    continue
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass

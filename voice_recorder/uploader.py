@@ -9,6 +9,7 @@ audio; whatever is still waiting goes up next time the app runs.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -51,7 +52,13 @@ class Uploader:
             "duration_sec": duration_sec, "sample_rate": SAMPLE_RATE,
             "is_final": is_final, "file": path.name,
         }
-        path.with_suffix(".json").write_text(json.dumps(meta), encoding="utf-8")
+        meta_path = path.with_suffix(".json")
+        tmp = meta_path.with_name(meta_path.name + ".tmp")      # not *.json, so the queue never sees it half-written
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(json.dumps(meta))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, meta_path)
         self._wake.set()
         self.on_change()
 
@@ -90,8 +97,16 @@ class Uploader:
             self.on_change()
 
     def _send(self, meta_path: Path, cfg: dict) -> bool:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        audio = meta_path.with_name(meta["file"])
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            audio = meta_path.with_name(meta["file"])
+        except (ValueError, KeyError, TypeError):
+            # A half-written entry (power cut mid-write) would otherwise sit at the head of the queue forever.
+            bad = self.pending_dir / "rejected"
+            bad.mkdir(exist_ok=True)
+            meta_path.replace(bad / meta_path.name)
+            self.last_error = "Set aside an unreadable queue entry."
+            return True
         if not audio.exists():
             meta_path.unlink(missing_ok=True)
             return True

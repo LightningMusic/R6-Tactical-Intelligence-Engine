@@ -122,6 +122,37 @@ def test_a_chunk_the_server_refuses_is_set_aside_not_retried_forever(tmp_path, m
     up.stop()
 
 
+def test_a_half_written_queue_entry_cannot_block_the_queue(tmp_path, monkeypatch):
+    sent = []
+
+    def fake_post(url, headers, files, data, timeout):
+        sent.append(data["chunk_index"])
+        return FakeResponse(200, {"status": "stored"})
+
+    monkeypatch.setattr(up_mod.requests, "post", fake_post)
+    # What a power cut mid-write leaves behind; sorts first, so it would be tried forever.
+    (tmp_path / "!half.json").write_text('{"recording_id": "abc", "chunk_in', encoding="utf-8")
+    up = up_mod.Uploader(tmp_path, lambda: {"server_url": "https://srv", "voice_token": "vk"})
+    up.enqueue(make_chunk(tmp_path, 1), "test_player")
+    assert wait_for(lambda: up.waiting() == 0, timeout=15)
+    assert sent == ["1"]
+    assert (tmp_path / "rejected" / "!half.json").exists()
+    up.stop()
+
+
+def test_queue_entries_are_written_whole_or_not_at_all(tmp_path, monkeypatch):
+    def offline(*a, **k):
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(up_mod.requests, "post", offline)
+    up = up_mod.Uploader(tmp_path, lambda: {"server_url": "https://srv", "voice_token": "vk"})
+    up.enqueue(make_chunk(tmp_path, 0), "test_player")
+    assert wait_for(lambda: up.connected is False)
+    assert not list(tmp_path.glob("*.tmp"))
+    assert json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))["username"] == "test_player"
+    up.stop()
+
+
 def test_ping_reports_clock_offset(tmp_path, monkeypatch):
     monkeypatch.setattr(up_mod.requests, "get",
                         lambda *a, **k: FakeResponse(200, {"server_time": time.time() + 95.0}))
