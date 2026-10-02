@@ -106,9 +106,10 @@ def _utterances(segments: list[dict], clock: ClipClock, source: str, speaker: st
                 username: str = "", time_map=None) -> list[dict]:
     """Whisper segments -> utterances in epoch time. Word timestamps give
     tighter edges than the segment's own (which include leading silence)."""
+    from analysis.operator_vocab import correct as fix_operator_names
     out = []
     for s in segments:
-        text = (s.get("text") or "").strip()
+        text = fix_operator_names((s.get("text") or "").strip())
         if not text:
             continue
         words = [w for w in (s.get("words") or []) if isinstance(w, dict)]
@@ -514,6 +515,15 @@ class CommsService:
             pass
         return ours, display
 
+    @staticmethod
+    def roster_usernames() -> list[str]:
+        """The host's saved team list: the only players who get a personal write-up."""
+        try:
+            from server import roster
+            return [r["username"] for r in roster.get_all()]
+        except Exception:
+            return []
+
     @classmethod
     def _make_intel(cls):
         from analysis.intel_engine import IntelEngine
@@ -535,9 +545,11 @@ class CommsService:
             from server.match_db import get_match_repo
             intel = cls._make_intel()
             ours, display = cls.team_context(match_id)
-            intel.analyze_match(match_id, our_players=ours or None, display_names=display)
+            report = cls.roster_usernames() or None
+            intel.analyze_match(match_id, our_players=ours or None, display_names=display, report_players=report)
             if refresh_players:
-                results = intel.get_player_intel(match_id, our_players=ours or None, display_names=display)
+                results = intel.get_player_intel(match_id, our_players=ours or None, display_names=display,
+                                                 report_players=report)
                 repo = get_match_repo()
                 with repo.db.get_connection() as conn:
                     conn.execute("DELETE FROM derived_metrics WHERE match_id = ? AND metric_name LIKE 'ai_player_intel::%'",

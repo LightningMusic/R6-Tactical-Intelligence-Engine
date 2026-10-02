@@ -9,9 +9,10 @@ from analysis import team_facts as tf
 from analysis.intel_engine import IntelEngine
 
 
-def stat(name, k, d, a=0, ew=0, et=0, pid=None):
+def stat(name, k, d, a=0, ew=0, et=0, pid=None, op="", start=0, used=0):
     return NS(player=NS(name=name, is_team_member=False), player_id=pid or abs(hash(name)) % 10_000,
-              kills=k, deaths=d, assists=a, engagements_won=ew, engagements_taken=et)
+              kills=k, deaths=d, assists=a, engagements_won=ew, engagements_taken=et,
+              operator=NS(name=op), ability_start=start, ability_used=used)
 
 
 def rnd(n, side, outcome, stats):

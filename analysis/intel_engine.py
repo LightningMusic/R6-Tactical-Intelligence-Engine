@@ -579,6 +579,7 @@ class IntelEngine:
         progress_callback: Optional[Callable[..., Any]] = None,
         our_players: Optional[Any] = None,
         display_names: Optional[dict] = None,
+        report_players: Optional[Any] = None,
     ) -> dict[str, Any]:
         from analysis import team_facts
         from analysis.metrics_engine import MetricsEngine
@@ -590,7 +591,9 @@ class IntelEngine:
 
         ours    = self._resolve_ours(repo, match_id, match, our_players)
         display = {str(k).lower(): v for k, v in (display_names or {}).items()}
-        facts   = team_facts.build_match_facts(match, ours, self._get_round_events(match_id), display) if ours else None
+        facts   = (team_facts.build_match_facts(match, ours, self._get_round_events(match_id), display,
+                                                report_players=team_facts.ours_set(report_players))
+                   if ours else None)
         if facts:
             facts["comms_counts"] = self._comms_counts(repo, match_id)
 
@@ -616,9 +619,9 @@ class IntelEngine:
 
         text = self.generate(prompt, max_tokens=1100, progress_callback=progress_callback)
         if facts and not text.startswith(_AI_FAILURE_MARKERS):
-            # The model summarises well and counts badly: patterns and focus points are worked out in code.
-            text = team_facts.replace_section(text, "ROUND PATTERNS", facts["round_patterns"])
-            text = team_facts.replace_section(text, "WHAT TO FOCUS ON NEXT", team_facts.focus_points(match, facts))
+            # The model writes the summary and the comms paragraph; everything counted or judged
+            # (patterns, objective play, utility, operators, focus points) is assembled in code.
+            text = team_facts.assemble_report(text, facts, team_facts.focus_points(match, facts))
         self._store_metric(repo, match_id, "ai_match_summary", text)
         return {"ai_match_summary": text}
 
@@ -628,6 +631,7 @@ class IntelEngine:
         progress_callback: Optional[Callable[..., Any]] = None,
         our_players: Optional[Any] = None,
         display_names: Optional[dict] = None,
+        report_players: Optional[Any] = None,
     ) -> dict[str, Any]:
         from analysis import team_facts
         from analysis.metrics_engine import MetricsEngine
@@ -644,11 +648,15 @@ class IntelEngine:
         summary = engine.player_summary()
         tps     = engine.tactical_performance_score()
 
+        named = team_facts.ours_set(report_players)      # the saved team list: only these get a write-up
         seen: dict[int, Any] = {}
         for r in match.rounds:
             for stat in r.player_stats:
-                if ours is not None and team_facts.norm(stat.player.name) not in ours:
+                pn = team_facts.norm(stat.player.name)
+                if ours is not None and pn not in ours:
                     continue            # opponents are not analysed
+                if named is not None and pn not in named:
+                    continue            # neither is a random who was only on our team this match
                 seen.setdefault(stat.player_id, stat)
 
         players = list(seen.values())
@@ -664,6 +672,7 @@ class IntelEngine:
                 "team":      team_facts.team_totals(table),
                 "baselines": self._player_baselines(repo, match_id, ours),
                 "opening":   team_facts.opening_counts(events),
+                "measured":  team_facts.utility_measured(match, ours, events),
             }
 
         results: dict[str, Any] = {}
@@ -679,15 +688,26 @@ class IntelEngine:
             if context is not None and name in context["table"]:
                 # Strength, weakness and drill are all chosen in code from checked facts: the model
                 # labelled "in line with usual" as a weakness and gave generic or backwards drills.
+                row = context["table"][name]
+                pu = team_facts.player_utility(row) if context["measured"] else None
                 facts = team_facts.player_facts(
-                    context["table"][name], context["team"], context["baselines"].get(team_facts.norm(name)),
-                    context["opening"].get(team_facts.norm(name)),
+                    row, context["team"], context["baselines"].get(team_facts.norm(name)),
+                    context["opening"].get(team_facts.norm(name)), utility=pu,
                 )
                 strength, weakness = team_facts.pick_lines(facts)
                 none = "Nothing clearly stands out tonight."
                 drill = (team_facts.drill_for(weakness) if weakness
                          else "Keep the current routine; nothing needs fixing tonight.")
-                results[name] = f"STRENGTH: {strength or none}\nFOCUS: {weakness or none}\nDRILL: {drill}"
+                lines = [f"STRENGTH: {strength or none}", f"FOCUS: {weakness or none}", f"DRILL: {drill}"]
+                if context["measured"]:
+                    lines.append("UTILITY: " + (
+                        f"gadget used in {pu['used_rounds']} of {pu['rounds']} rounds that had one; "
+                        f"charges used {pu['charges_used']} of {pu['charges_total']}."
+                        if pu else "no countable operator gadget this match."))
+                ops = team_facts.operator_text(row)
+                if ops:
+                    lines.append(f"OPERATORS: {ops}")
+                results[name] = "\n".join(lines)
                 continue
             comms_lines = self._get_player_transcript_lines(match_id, name)
             prompt = self._build_player_prompt(stat, pdata, float(tps.get(pid, 0.0)), comms_lines)
@@ -988,6 +1008,11 @@ class IntelEngine:
             )
             for line in facts["opening_lines"]:
                 team_metrics_text += f"  {line}\n"
+            for line in facts.get("objective_lines", [])[:2]:
+                team_metrics_text += f"  {line.lstrip('- ')}\n"
+            u = facts.get("utility") or {}
+            if u.get("measured") and u.get("total"):
+                team_metrics_text += f"  Operator gadgets used in {u['used']} of {u['total']} operator-rounds.\n"
             if facts["clutches"]:
                 team_metrics_text += "  Clutches: " + "; ".join(facts["clutches"]) + "\n"
         else:
@@ -1043,7 +1068,7 @@ DEBRIEF FORMAT — follow exactly, use only the data above
 ════════════════════════════════════════════════════════════════
 
 ## MATCH SUMMARY
-Two sentences maximum. State the scoreline, result, and one headline observation supported by a metric above. Do not reference operators or strategies not in the data.
+Two sentences maximum. State the scoreline, result, and one headline observation supported by a metric above, preferring objective play (plants, defuses) and gadget use over kills. Do not reference operators or strategies not in the data.
 
 ## ROUND PATTERNS
 List what the data actually shows across multiple rounds. Reference specific round numbers and sides. For each observation, cite the supporting data point (e.g. "R02, R04, R05 were all attack wins — attack win rate {metrics['attack_win_rate']:.0%}"). If a pattern is only visible in one round, say so and do not over-generalise.

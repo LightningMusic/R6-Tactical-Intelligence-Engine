@@ -443,6 +443,23 @@ def put_roster(body: dict, _client: str = Depends(verify_api_token)) -> dict:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@router.post("/sessions/{session_id}/reread-replays", status_code=202)
+def reread_replays(session_id: str, _client: str = Depends(verify_api_token)) -> dict:
+    """Re-read this session's stored replays for gadget usage and objective facts (no
+    transcription), then regenerate its AI text. Runs in the background."""
+    import threading
+
+    def run() -> None:
+        from server.services.comms_service import CommsService
+        from server.services.utility_backfill import backfill_session
+        result = backfill_session(session_id)
+        if "match_id" in result:
+            CommsService._refresh_ai(result["match_id"], refresh_players=True)
+
+    threading.Thread(target=run, daemon=True, name="RereadReplays").start()
+    return {"status": "started", "session_id": session_id}
+
+
 @router.get("/voices")
 def list_voices(_client: str = Depends(verify_api_token)) -> dict:
     """Whose voice the server has learned (from teammates' recordings) and how much it has to go on."""

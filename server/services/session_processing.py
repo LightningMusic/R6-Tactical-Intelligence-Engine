@@ -257,7 +257,9 @@ class SessionProcessingService:
             ours = _Comms.our_players_from_rounds(getattr(result, "timeline_rounds", None) or [])
             _, display = _Comms.team_context(match_id)
 
-            match_analysis = intel.analyze_match(match_id, our_players=ours or None, display_names=display)
+            report = _Comms.roster_usernames() or None
+            match_analysis = intel.analyze_match(match_id, our_players=ours or None, display_names=display,
+                                                 report_players=report)
             if "error" in match_analysis:
                 repo_job.update_analysis_status(session_id, "failed", match_id=match_id, error=match_analysis["error"])
                 return
@@ -267,7 +269,8 @@ class SessionProcessingService:
                 repo_job.update_analysis_status(session_id, "failed", match_id=match_id, error=summary_text.splitlines()[0])
                 return
 
-            player_intel = intel.get_player_intel(match_id, our_players=ours or None, display_names=display)
+            player_intel = intel.get_player_intel(match_id, our_players=ours or None, display_names=display,
+                                                  report_players=report)
             with match_repo.db.get_connection() as conn:
                 conn.execute("DELETE FROM derived_metrics WHERE match_id = ? AND metric_name LIKE 'ai_player_intel::%'",
                              (match_id,))

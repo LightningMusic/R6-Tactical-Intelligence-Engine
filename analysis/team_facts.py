@@ -73,13 +73,19 @@ def player_table(match: Any, ours: Optional[set[str]]) -> dict[str, dict[str, An
             if ours is not None and norm(name) not in ours:
                 continue
             row = table.setdefault(name, {"name": name, "k": 0, "d": 0, "a": 0, "rounds": 0,
-                                          "survived": 0, "ew": 0, "et": 0})
+                                          "survived": 0, "ew": 0, "et": 0, "detail": []})
             row["k"] += int(s.kills)
             row["d"] += int(s.deaths)
             row["a"] += int(s.assists)
             row["ew"] += int(s.engagements_won)
             row["et"] += int(s.engagements_taken)
             row["rounds"] += 1
+            row["detail"].append({
+                "round": int(r.round_number), "side": r.side,
+                "op": str(getattr(getattr(s, "operator", None), "name", "") or ""),
+                "start": int(getattr(s, "ability_start", 0) or 0),
+                "used": int(getattr(s, "ability_used", 0) or 0),
+            })
             if int(s.deaths) == 0:
                 row["survived"] += 1
     for row in table.values():
@@ -202,12 +208,177 @@ def opening_counts(events: dict[int, dict]) -> dict[str, dict[str, int]]:
     return out
 
 
+# ── objective play, utility and operators ─────────────────────────────────
+
+HARD_BREACH = {"thermite", "hibana", "ace", "maverick"}
+
+# Operators whose signature gadget is a passive ability, a shield or a tool rather than a limited
+# stock of charges. Their counter (when there is one) says nothing about "used" or "unused".
+NON_CONSUMABLE = {"sledge", "montagne", "blitz", "clash", "blackbeard", "warden", "caveira", "nøkk", "nokk",
+                  "vigil", "jackal", "iq", "oryx"}
+DEFENSE_FIRST_USE = 0.8          # a gadget used in this share of rounds is "used reliably"
+LOW_USE = 1 / 3                  # ...and in this share or less, "left unused"
+
+
+def utility_measured(match: Any, ours: Optional[set[str]], events: dict[int, dict]) -> bool:
+    """True when gadget usage was actually read from the replays (not merely absent)."""
+    if any(e.get("utility_tracked") for e in events.values()):
+        return True
+    return any(int(getattr(s, "ability_used", 0) or 0) > 0
+               for r in match.rounds for s in r.player_stats
+               if ours is None or norm(s.player.name) in ours)
+
+
+def player_utility(row: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """One player's gadget use over the match, or None if no round gave them a countable gadget."""
+    det = [d for d in row["detail"] if d["start"] > 0 and norm(d["op"]) not in NON_CONSUMABLE]
+    if not det:
+        return None
+    out: dict[str, Any] = {"rounds": len(det), "used_rounds": sum(1 for d in det if d["used"] > 0),
+                           "charges_total": sum(d["start"] for d in det),
+                           "charges_used": sum(min(d["used"], d["start"]) for d in det)}
+    for side in ("attack", "defense"):
+        rs = [d for d in det if d["side"] == side]
+        ops: dict[str, int] = {}
+        for d in rs:
+            ops[d["op"] or "?"] = ops.get(d["op"] or "?", 0) + 1
+        out[side] = {"rounds": len(rs), "used_rounds": sum(1 for d in rs if d["used"] > 0),
+                     "ops": [o for o, _ in sorted(ops.items(), key=lambda kv: -kv[1])]}
+    return out
+
+
+def operator_text(row: dict[str, Any]) -> str:
+    counts: dict[tuple[str, str], int] = {}
+    for d in row["detail"]:
+        if d["op"]:
+            counts[(d["op"], d["side"])] = counts.get((d["op"], d["side"]), 0) + 1
+    return ", ".join(f"{op} x{n} ({'att' if side == 'attack' else 'def'})"
+                     for (op, side), n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0][0])))
+
+
+def objective_summary(match: Any, events: dict[int, dict]) -> dict[str, Any]:
+    """Plants and defuses at team level. Who did them is not reported: r6-dissect often credits the wrong player."""
+    ev = lambda r: events.get(int(r.round_number), {})
+    atk = [r for r in match.rounds if r.side == "attack"]
+    dfn = [r for r in match.rounds if r.side == "defense"]
+    planted = [r for r in atk if ev(r).get("bomb_planted")]
+    enemy = [r for r in dfn if ev(r).get("bomb_planted")]
+    return {
+        "tracked": any("bomb_planted" in e for e in events.values()),
+        "attack_rounds": len(atk), "planted": len(planted),
+        "planted_won": sum(1 for r in planted if r.outcome == "win"),
+        "planted_defused": sum(1 for r in planted if ev(r).get("bomb_defused")),
+        "unplanted_won": sum(1 for r in atk if r not in planted and r.outcome == "win"),
+        "defense_rounds": len(dfn), "enemy_planted": len(enemy),
+        "enemy_planted_won": sum(1 for r in enemy if r.outcome == "win"),
+        "we_defused": sum(1 for r in enemy if ev(r).get("bomb_defused")),
+        "unplanted_defense_won": sum(1 for r in dfn if r not in enemy and r.outcome == "win"),
+        "unplanted_defense": sum(1 for r in dfn if r not in enemy),
+    }
+
+
+def objective_lines(o: dict[str, Any]) -> list[str]:
+    if not o["tracked"]:
+        return []
+    out = []
+    if o["attack_rounds"]:
+        line = f"- Attack: we planted in {o['planted']} of {o['attack_rounds']} rounds"
+        if o["planted"]:
+            line += f" and won {o['planted_won']} of those"
+            if o["planted_defused"]:
+                line += f" (the defuser was disabled in {o['planted_defused']})"
+        rest = o["attack_rounds"] - o["planted"]
+        if rest:
+            line += f"; in the {rest} round{'s' if rest != 1 else ''} without a plant we won {o['unplanted_won']}"
+        out.append(line + ".")
+    if o["defense_rounds"]:
+        line = f"- Defense: they planted in {o['enemy_planted']} of {o['defense_rounds']} rounds"
+        if o["enemy_planted"]:
+            line += f"; we disabled the defuser in {o['we_defused']} and won {o['enemy_planted_won']} of those rounds"
+        if o["unplanted_defense"]:
+            line += f"; we won {o['unplanted_defense_won']} of the {o['unplanted_defense']} where they never planted"
+        out.append(line + ".")
+    out.append("- Who planted or defused is not listed: the replay reader often credits the wrong player. "
+               "Failed plant or defuse attempts are not recorded either.")
+    return out
+
+
+def composition_lines(match: Any, ours: Optional[set[str]]) -> list[str]:
+    """Which operators we picked, and whether attack had a hard breacher."""
+    atk: dict[str, int] = {}
+    dfn: dict[str, int] = {}
+    breach_rounds = 0
+    atk_rounds = 0
+    for r in sorted(match.rounds, key=lambda x: x.round_number):
+        ops = [str(getattr(getattr(s, "operator", None), "name", "") or "")
+               for s in r.player_stats if ours is None or norm(s.player.name) in ours]
+        ops = [o for o in ops if o]
+        if not ops:
+            continue
+        target = atk if r.side == "attack" else dfn
+        for o in ops:
+            target[o] = target.get(o, 0) + 1
+        if r.side == "attack":
+            atk_rounds += 1
+            breach_rounds += any(norm(o) in HARD_BREACH for o in ops)
+    out = []
+    top = lambda d: ", ".join(f"{o} x{n}" if n > 1 else o for o, n in sorted(d.items(), key=lambda kv: (-kv[1], kv[0]))[:8])
+    if atk:
+        line = f"- Attack operators: {top(atk)}."
+        if atk_rounds:
+            line += f" A hard breacher (Thermite, Hibana, Ace or Maverick) was on the team in {breach_rounds} of {atk_rounds} attack rounds."
+        out.append(line)
+    if dfn:
+        out.append(f"- Defense operators: {top(dfn)}.")
+    return out
+
+
+def utility_team_lines(table: dict[str, dict[str, Any]], display: dict[str, str]) -> list[str]:
+    util = {n: player_utility(r) for n, r in table.items()}
+    util = {n: u for n, u in util.items() if u}
+    if not util:
+        return []
+    ua = sum(u["attack"]["used_rounds"] for u in util.values())
+    na = sum(u["attack"]["rounds"] for u in util.values())
+    ud = sum(u["defense"]["used_rounds"] for u in util.values())
+    nd = sum(u["defense"]["rounds"] for u in util.values())
+    tot_u, tot_n = ua + ud, na + nd
+    out = [f"- Operator gadgets were used in {tot_u} of {tot_n} operator-rounds that had a countable gadget "
+           f"({tot_u / tot_n:.0%}): attack {ua}/{na}, defense {ud}/{nd}."]
+    for name, u in sorted(util.items(), key=lambda kv: kv[0].lower()):
+        who = display.get(norm(name), name)
+        bits = []
+        for side, lab in (("defense", "defense"), ("attack", "attack")):
+            s = u[side]
+            if s["rounds"]:
+                bits.append(f"{lab} {s['used_rounds']}/{s['rounds']} ({', '.join(s['ops'][:3])})")
+        out.append(f"- {who}: gadget used in " + "; ".join(bits)
+                   + f". Charges used {u['charges_used']} of {u['charges_total']}.")
+    return out
+
+
 # ── one player's standing ────────────────────────────────────────────────
 
 def player_facts(row: dict[str, Any], team: dict[str, Any], baseline: Optional[dict[str, Any]],
-                 opening: Optional[dict[str, int]] = None) -> list[tuple[str, str]]:
+                 opening: Optional[dict[str, int]] = None, utility: Optional[dict[str, Any]] = None,
+                 ) -> list[tuple[str, str]]:
     """[(mark, sentence)] where mark is '+' (a strength), '-' (a weakness) or '='."""
     facts: list[tuple[str, str]] = []
+
+    if utility:
+        # Objective play comes first: using the operator's gadget is what the pick is for.
+        for side in ("defense", "attack"):
+            s = utility[side]
+            if s["rounds"] < 2:
+                continue
+            rate = s["used_rounds"] / s["rounds"]
+            ops = ", ".join(s["ops"][:3])
+            if rate >= DEFENSE_FIRST_USE:
+                facts.append(("+", f"Used their gadget in {s['used_rounds']} of {s['rounds']} {side} rounds ({ops})"))
+            elif rate <= LOW_USE:
+                facts.append(("-", f"Used their gadget in only {s['used_rounds']} of {s['rounds']} {side} rounds ({ops})"))
+            else:
+                facts.append(("=", f"Used their gadget in {s['used_rounds']} of {s['rounds']} {side} rounds ({ops})"))
 
     if team["players"] > 1 and team["kd"] > 0:
         b = band_ratio(row["kd"], team["kd"])
@@ -240,10 +411,16 @@ def player_facts(row: dict[str, Any], team: dict[str, Any], baseline: Optional[d
 
 
 def _weight(mark: str, text: str) -> float:
+    if mark == "=":
+        return 0.0
+    if text.startswith("Used their gadget"):
+        return 4.0 if " only " in text else 3.0       # objective play outranks frags
     w = 2.0 if "WELL " in text else 1.0
     if "their usual" in text:
         w += 0.5            # a player's own history says more than tonight's team average
-    return w if mark != "=" else 0.0
+    if text.startswith("K/D"):
+        w *= 0.5            # kills are supporting evidence, not the headline
+    return w
 
 
 def pick_lines(facts: list[tuple[str, str]]) -> tuple[Optional[str], Optional[str]]:
@@ -260,6 +437,9 @@ def drill_for(weakness: str) -> str:
     """A fixed, sensible drill for the kind of weakness found (the model's drills were generic
     and sometimes backwards, e.g. 'take riskier plays' for a support player)."""
     w = weakness.lower()
+    if w.startswith("used their gadget"):
+        return ("Before each round decide where every charge goes (on defense, in prep; on attack, before the "
+                "first push), and check in the replay when it stayed unused.")
     if w.startswith("survival"):
         return ("Replay the two rounds where you died earliest and ask whether you could have fallen back "
                 "or held the angle longer instead of pushing out.")
@@ -275,8 +455,29 @@ def drill_for(weakness: str) -> str:
 
 
 def focus_points(match: Any, facts: dict[str, Any]) -> str:
-    """The 'what to focus on next' list, from measured numbers only."""
+    """The 'what to focus on next' list, from measured numbers only. Objective play and
+    utility come first; kills and duels are supporting evidence, not the headline."""
     pts: list[str] = []
+
+    o = facts.get("objective")
+    if o and o.get("tracked"):
+        if o["attack_rounds"] >= 3 and o["planted"] / o["attack_rounds"] < 0.5:
+            pts.append(f"Plants: we planted in only {o['planted']} of {o['attack_rounds']} attack rounds.")
+        elif o["planted"] and o["planted_defused"] >= 2:
+            pts.append(f"Post-plant: the defuser was disabled in {o['planted_defused']} of {o['planted']} rounds we planted.")
+        if o["enemy_planted"] >= 2 and o["enemy_planted_won"] / o["enemy_planted"] <= 1 / 3:
+            pts.append(f"Defense after a plant: they planted in {o['enemy_planted']} rounds and we won only "
+                       f"{o['enemy_planted_won']} (defuser disabled in {o['we_defused']}).")
+
+    u = facts.get("utility")
+    if u and u.get("measured") and u["total"] >= 6:
+        if u["used"] / u["total"] < 0.6:
+            pts.append(f"Utility: operator gadgets were used in only {u['used']} of {u['total']} operator-rounds "
+                       f"({u['used'] / u['total']:.0%}).")
+        if u["gaps"]:
+            worst = ", ".join(f"{n} on {side} ({used}/{n_r})" for n, side, used, n_r in u["gaps"][:3])
+            pts.append(f"Gadgets left unused: {worst}.")
+
     rs = list(match.rounds)
     rec = {}
     for side in ("attack", "defense"):
@@ -309,16 +510,37 @@ def focus_points(match: Any, facts: dict[str, Any]) -> str:
 
     if not pts:
         return "1. No clear weakness stands out in the numbers; keep doing what is working."
-    return "\n".join(f"{i}. {p}" for i, p in enumerate(pts[:3], 1))
+    return "\n".join(f"{i}. {p}" for i, p in enumerate(pts[:4], 1))
 
 
 # ── bundle for the match prompt ───────────────────────────────────────────
 
 def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, dict],
-                      display: dict[str, str]) -> dict[str, Any]:
+                      display: dict[str, str], report_players: Optional[set[str]] = None) -> dict[str, Any]:
+    """`ours`: our whole team (team numbers). `report_players`: who is listed by name (the saved team list)."""
     table = player_table(match, ours)
     team = team_totals(table)
     opening = opening_summary(match, events)
+    objective = objective_summary(match, events)
+    measured = utility_measured(match, ours, events)
+    named = {n: r for n, r in table.items() if report_players is None or norm(n) in report_players}
+
+    util_used = util_total = 0
+    gaps: list[tuple[str, str, int, int]] = []
+    for name, r in table.items():
+        if report_players is not None and norm(name) not in report_players:
+            continue            # one set of players everywhere: the utility totals match the lines under them
+        pu = player_utility(r)
+        if not pu:
+            continue
+        util_used += pu["attack"]["used_rounds"] + pu["defense"]["used_rounds"]
+        util_total += pu["attack"]["rounds"] + pu["defense"]["rounds"]
+        for side in ("attack", "defense"):
+            s = pu[side]
+            if s["rounds"] >= 2 and s["used_rounds"] / s["rounds"] <= LOW_USE:
+                gaps.append((display.get(norm(name), name), side, s["used_rounds"], s["rounds"]))
+    gaps.sort(key=lambda g: (g[2] / g[3], -g[3]))
+
     return {
         "ours": ours,
         "table": table,
@@ -328,7 +550,38 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
         "opening": opening,
         "opening_lines": opening_lines(opening),
         "clutches": clutch_lines(events, ours, display),
+        "objective": objective,
+        "objective_lines": objective_lines(objective),
+        "composition_lines": composition_lines(match, ours),
+        "utility": {"measured": measured, "used": util_used, "total": util_total, "gaps": gaps},
+        "utility_lines": utility_team_lines(named, display) if measured else [],
     }
+
+
+def section_body(text: str, header: str) -> str:
+    m = re.search(rf"^##\s*{re.escape(header)}\s*$(.*?)(?=^##\s|\Z)", text or "", re.S | re.M | re.I)
+    return m.group(1).strip() if m else ""
+
+
+def assemble_report(model_text: str, facts: dict[str, Any], focus: str) -> str:
+    """The final debrief: the model writes the summary and the comms paragraph; everything that
+    is counted or judged comes from code, in a fixed order."""
+    objective = "\n".join(facts.get("objective_lines") or [])
+    utility = []
+    if facts.get("utility", {}).get("measured"):
+        utility += facts.get("utility_lines") or []
+    else:
+        utility.append("- Gadget use could not be read from this match's replays, so it is not judged here.")
+    utility += facts.get("composition_lines") or []
+    sections = [
+        ("MATCH SUMMARY", section_body(model_text, "MATCH SUMMARY")),
+        ("ROUND PATTERNS", facts["round_patterns"]),
+        ("OBJECTIVE PLAY", objective),
+        ("UTILITY & OPERATORS", "\n".join(utility)),
+        ("WHAT TO FOCUS ON NEXT", focus),
+        ("COMMUNICATION", section_body(model_text, "COMMUNICATION") or "No comms data recorded."),
+    ]
+    return "\n\n".join(f"## {h}\n{b}" for h, b in sections if b).strip() + "\n"
 
 
 def replace_section(text: str, header: str, body: str) -> str:
