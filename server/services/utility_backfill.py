@@ -49,15 +49,28 @@ def apply_round_updates(conn, match_id: int, rounds: list[Any]) -> dict[str, int
     return {"stats": stats_updated, "events": events_updated}
 
 
+def stored_match_id(session_id: str, comms_row: Any = None) -> Optional[int]:
+    """The match a session was stored as. Sessions processed since the comms timeline existed have it in
+    session_comms; older ones (before 2026-09-28) only in server_parsed_matches. Asking the comms table
+    alone made every re-read of an older session fail silently."""
+    if comms_row and comms_row["match_id"] is not None:
+        return int(comms_row["match_id"])
+    with server_db.get_connection() as conn:
+        r = conn.execute("SELECT match_id FROM server_parsed_matches WHERE session_id = ?", (session_id,)).fetchone()
+    return int(r["match_id"]) if r and r["match_id"] is not None else None
+
+
 def backfill_session(session_id: str, log=print) -> dict[str, Any]:
     from integration.rec_importer import RecImporter
     from server.match_db import get_match_repo
     from server.services.comms_service import CommsService
 
     row = CommsService._get(session_id)
-    match_id = int(row["match_id"]) if row and row["match_id"] is not None else None
+    match_id = stored_match_id(session_id, row)
     path = package_path(session_id)
     if match_id is None or path is None or not path.exists():
+        why = ("no stored match for that session" if match_id is None else "its package is no longer on the server")
+        log(f"[Backfill] {session_id[:16]}: skipped, {why}.")
         return {"error": "No stored match or package for that session."}
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -70,6 +83,7 @@ def backfill_session(session_id: str, log=print) -> dict[str, Any]:
         result = RecImporter(dissect_path=server_settings.R6_DISSECT_PATH, log_callback=log).import_match_folder(replays)
 
     if not result.rounds:
+        log(f"[Backfill] match {match_id}: no rounds could be read from the stored replays.")
         return {"error": result.error_message or "No rounds could be read from the stored replays."}
     repo = get_match_repo()
     with repo.db.get_connection() as conn:
@@ -80,7 +94,7 @@ def backfill_session(session_id: str, log=print) -> dict[str, Any]:
     # of the comms timeline. When the session already has a transcript, refresh its saved rounds from
     # this read and rebuild the timeline, so teammates' lines and callouts are placed against the right rounds.
     try:
-        if json.loads(row["host_utterances_json"] or "[]") and getattr(result, "timeline_rounds", None):
+        if row and json.loads(row["host_utterances_json"] or "[]") and getattr(result, "timeline_rounds", None):
             CommsService.save_rounds(session_id, result.timeline_rounds, match_id)
             if CommsService.build(session_id) is not None:
                 done["timeline_rebuilt"] = True

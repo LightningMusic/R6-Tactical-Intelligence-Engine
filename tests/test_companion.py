@@ -357,6 +357,63 @@ def test_a_power_cut_mid_save_keeps_the_old_name_and_state(comp, monkeypatch):
     assert comp._load_state() == {"a.mkv": {"done": True}}
 
 
+class _Resp:
+    def __init__(self, code):
+        self.status_code = code
+
+
+class _Put:
+    """Stands in for requests: answers PUT with a chosen status or exception."""
+    def __init__(self, code=200, error=None):
+        self.code, self.error, self.calls = code, error, []
+
+    def put(self, url, headers=None, json=None, timeout=None):
+        self.calls.append((url, json))
+        if self.error:
+            raise self.error
+        return _Resp(self.code)
+
+
+@pytest.fixture
+def _server_settings():
+    """Server URL and key for the host-link tests, put back afterwards (settings is one shared object)."""
+    from app.config import settings
+    saved = {k: settings.get(k) for k in ("server_url", "api_key")}
+    settings.set_many({"server_url": "http://srv:8000", "api_key": "k"})
+    yield
+    settings.set_many(saved)
+
+
+def _link(http):
+    from app.companion_link import CompanionLink
+    return CompanionLink(http=http)
+
+
+def test_telling_recorders_to_start_works_and_leaves_no_error(_server_settings):
+    link = _link(_Put(200))
+    assert link.set_recording(True) is True and link.last_error == ""
+
+
+def test_a_refused_key_is_reported_in_words_not_swallowed(_server_settings):
+    # 2026-10-05: every start/stop signal got 401 and nothing on the host's screen said so, so teammates'
+    # browser recorders (which follow the host) never recorded.
+    link = _link(_Put(401))
+    assert link.set_recording(True) is False
+    assert "refused" in link.last_error and "API key" in link.last_error
+    link = _link(_Put(500))
+    assert link.set_recording(True) is False and "HTTP 500" in link.last_error
+    link = _link(_Put(error=ConnectionError("down")))
+    assert link.set_recording(False) is False and "could not be reached" in link.last_error
+
+
+def test_a_later_success_clears_the_error(_server_settings):
+    http = _Put(401)
+    link = _link(http)
+    link.set_recording(True)
+    http.code = 200
+    assert link.set_recording(True) is True and link.last_error == ""
+
+
 def test_host_log_lines_only_when_something_changes():
     from app.companion_link import CompanionLink
     now = time.time()

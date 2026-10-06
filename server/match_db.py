@@ -33,6 +33,7 @@ def ensure_match_database() -> DatabaseManager:
     db = DatabaseManager(
         db_path=server_settings.MATCHES_DB_PATH,
         schema_path=server_settings.MATCHES_SCHEMA_PATH,
+        wal=True,
     )
     run_migrations(db)
 

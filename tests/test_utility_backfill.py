@@ -90,6 +90,47 @@ def _run_backfill(monkeypatch, tmp_path, host_utterances, timeline_rounds):
     return ub.backfill_session("session_x", log=lambda m: None), calls
 
 
+def _fake_server_db(match_id):
+    import contextlib
+
+    class Row(dict):
+        pass
+
+    class Conn:
+        def execute(self, sql, params=()):
+            class Cur:
+                @staticmethod
+                def fetchone():
+                    return Row(match_id=match_id) if match_id is not None else None
+            return Cur()
+
+    class Db:
+        @staticmethod
+        @contextlib.contextmanager
+        def get_connection():
+            yield Conn()
+    return Db
+
+
+def test_an_older_session_is_found_through_its_parsed_match_when_it_has_no_comms_row(monkeypatch):
+    import server.services.utility_backfill as ub
+    monkeypatch.setattr(ub, "server_db", _fake_server_db(17))
+    assert ub.stored_match_id("session_old", None) == 17                    # the case that failed silently on 18 sessions
+    assert ub.stored_match_id("session_old", {"match_id": 22}) == 22        # the comms row still wins when there is one
+    monkeypatch.setattr(ub, "server_db", _fake_server_db(None))
+    assert ub.stored_match_id("session_unknown", None) is None
+
+
+def test_a_session_nobody_knows_is_reported_not_swallowed(monkeypatch, tmp_path):
+    import server.services.comms_service as comms
+    import server.services.utility_backfill as ub
+    monkeypatch.setattr(ub, "server_db", _fake_server_db(None))
+    monkeypatch.setattr(comms, "CommsService", type("C", (), {"_get": staticmethod(lambda sid: None)}))
+    lines = []
+    assert "error" in ub.backfill_session("session_unknown_1234567", log=lines.append)
+    assert lines and "skipped, no stored match" in lines[0]
+
+
 def test_a_session_with_a_transcript_gets_its_rounds_and_timeline_refreshed(monkeypatch, tmp_path):
     rounds = [{"round": 1, "ours": ["Me"]}]
     result, calls = _run_backfill(monkeypatch, tmp_path, [{"text": "hi"}], rounds)

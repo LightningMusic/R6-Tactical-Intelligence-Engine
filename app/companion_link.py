@@ -23,6 +23,7 @@ class CompanionLink:
     def __init__(self, http=None) -> None:
         self.http = http or requests
         self._last_lines: dict[str, str] = {}
+        self.last_error = ""            # why the last set_recording() failed, in plain words ("" when it worked)
 
     def _base(self) -> Optional[tuple[str, dict]]:
         from app.uploader import resolve_api_key
@@ -33,15 +34,27 @@ class CompanionLink:
         return url, {"Authorization": f"Bearer {key}"}
 
     def set_recording(self, on: bool) -> bool:
+        """Tells the server this session is (not) recording, which is the only thing that makes teammates'
+        recorders in "follow the host" mode start and stop. The reason for a failure is kept in
+        `last_error`: this used to fail silently, and a refused key meant nobody's recorder ever started
+        (2026-10-05) without a word on the host's screen."""
+        self.last_error = ""
         base = self._base()
         if base is None:
+            self.last_error = "no server address or API key is set up in this app"
             return False
         try:
             r = self.http.put(f"{base[0]}/api/v1/companion/control", headers=base[1],
                               json={"recording": bool(on)}, timeout=10)
-            return r.status_code == 200
         except Exception:
+            self.last_error = "the server could not be reached"
             return False
+        code = getattr(r, "status_code", None)
+        if code == 200:
+            return True
+        self.last_error = ("the server refused this app's API key" if code in (401, 403)
+                           else f"the server answered HTTP {code}")
+        return False
 
     def status(self) -> Optional[dict]:
         base = self._base()

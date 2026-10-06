@@ -91,8 +91,18 @@ class _CompanionSync(QObject):
 
     def _push(self, recording: bool) -> None:
         ok = self.link.set_recording(recording)
+        was_ok = getattr(self, "_signal_ok", None)
+        self._signal_ok = ok
         if not ok:
+            # Loud, once: until this works, teammates' companions and browser recorders (which follow
+            # the host) are never told to start, and record nothing.
+            if was_ok is not False:
+                self.line.emit(f"⚠ Couldn't tell teammates' recorders to {'start' if recording else 'stop'}: "
+                               f"{self.link.last_error}. Anyone recording in 'follow the host' mode will NOT record "
+                               f"until this is fixed (they can tick 'Record continuously' meanwhile).")
             return
+        if was_ok is False:
+            self.line.emit("👥 Teammates' recorders can be told to start and stop again.")
         for line in self.link.changed_lines(self.names):
             self.line.emit("👥 " + line)
 

@@ -569,7 +569,9 @@
     setInterval(() => { if (S.started) syncClock(3, true); }, CLOCK_RESYNC_MS);
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.started) takeWakeLock(); });
     window.addEventListener("online", () => { S.online = true; flushQueue(); });
-    window.addEventListener("beforeunload", (e) => { if (S.started && S.recording) { e.preventDefault(); e.returnValue = ""; } });
+    // Also while recorded audio is still waiting to upload (it stays safe in this browser, but only a browser
+    // that is opened again can send it), not just while recording.
+    window.addEventListener("beforeunload", (e) => { if ((S.started && S.recording) || S.queued > 0) { e.preventDefault(); e.returnValue = ""; } });
     flushQueue();                                       // anything left over from a closed tab goes up first
     heartbeat();
   }

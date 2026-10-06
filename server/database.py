@@ -18,8 +18,16 @@ class ServerDatabase:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        # Many threads share this file (the dashboard polls it every few seconds, teammates' recorders
+        # check in every few seconds, the worker writes). In SQLite's default mode a reader makes a writer
+        # wait and gives up after 5 s with "database is locked", which refused a teammate's browser
+        # recorder as it checked its invite (2026-10-05). Write-ahead logging lets readers and one
+        # writer coexist, and a long busy timeout makes the rare collision wait instead of fail.
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 

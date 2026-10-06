@@ -55,7 +55,8 @@ class KeyedHttp:
 
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch):
-    saved = {k: settings.get(k) for k in ("server_url", "api_key")}
+    saved = {k: settings.get(k) for k in ("server_url", "api_key", "max_upload_retries")}
+    settings.set_many({"max_upload_retries": 5})                  # the retry tests depend on the cap; other tests change it
     monkeypatch.setattr(settings, "save", lambda: None)          # never touch the real settings.json
     uploader._key_cache.clear()
     yield

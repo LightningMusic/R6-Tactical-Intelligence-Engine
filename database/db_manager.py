@@ -24,6 +24,7 @@ class DatabaseManager:
         self,
         db_path: Optional[Path] = None,
         schema_path: Optional[Path] = None,
+        wal: bool = False,
     ) -> None:
         if db_path is None or schema_path is None:
             from app.config import DB_PATH, SCHEMA_PATH
@@ -32,6 +33,9 @@ class DatabaseManager:
 
         self.db_path: Path = db_path
         self.schema_path: Path = schema_path
+        # Write-ahead logging is for the server, where many threads share the file. The USB stick's
+        # own database keeps SQLite's default journal, which is safe to unplug.
+        self.wal = wal
         self._ensure_database_exists()
         self._initialize_schema()
 
@@ -43,8 +47,12 @@ class DatabaseManager:
         """
         Returns a new SQLite connection with foreign keys enabled.
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)       # wait for a busy file instead of failing after 5 s
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        if self.wal:
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
