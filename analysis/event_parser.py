@@ -228,6 +228,52 @@ class EventParser:
             events.planter_username = None
             events.defuser_username = None
 
+    @staticmethod
+    def apply_objective_attempts(events: RoundEvents, attempts: list[dict], our_role: Optional[str],
+                                 outcome: Optional[str] = None) -> None:
+        """Folds the replay's own plant/defuse countdowns (integration.replay_utility) into a round's
+        events. They are more reliable than r6-dissect's defuser events: they name the right player,
+        they include attempts that were let go or cut short, and a real defuse is a completed countdown
+        (no timing guess). `attempts`: [{kind, completed, username, operator, confidence}].
+        `outcome` ("win"/"loss" for us, from the score) settles one case the countdown cannot: a defuse
+        that finishes means the defenders won the round, so a countdown that reached zero in a round the
+        attackers won was a defuser killed in the last instant, not a defuse."""
+        we_attack = (our_role == "attack") if our_role in ("attack", "defense") else None
+        attackers_won = None
+        if we_attack is not None and outcome in ("win", "loss"):
+            attackers_won = (outcome == "win") == we_attack
+        marked = []
+        for a in attempts:
+            ours = None if we_attack is None else ((a["kind"] == "plant") == we_attack)
+            a = dict(a)
+            if a["kind"] == "defuse" and a.get("completed") and attackers_won:
+                a["completed"] = False
+            marked.append({**a, "ours": ours})
+        events.objective_tracked = True
+        events.objective_attempts = marked
+
+        plants = [a for a in marked if a["kind"] == "plant"]
+        defuses = [a for a in marked if a["kind"] == "defuse"]
+        done_plant = next((a for a in plants if a["completed"]), None)
+        if done_plant:
+            events.bomb_planted = True
+            if we_attack is not None:
+                events.planted_by_us = we_attack
+        events.bomb_defused = any(a["completed"] for a in defuses)
+        if we_attack is None:
+            return
+        mine = plants if we_attack else defuses
+        done = next((a for a in mine if a["completed"]), None)
+        events.plant_attempted = events.plant_completed = False
+        events.defuse_attempted = events.defuse_completed = False
+        events.planter_username = events.defuser_username = None
+        if we_attack:
+            events.plant_attempted, events.plant_completed = bool(mine), bool(done)
+            events.planter_username = done["username"] if done else None
+        else:
+            events.defuse_attempted, events.defuse_completed = bool(mine), bool(done)
+            events.defuser_username = done["username"] if done else None
+
     def _compute_clutch(
         self,
         events: RoundEvents,

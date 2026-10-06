@@ -187,23 +187,43 @@ class RecImporter:
         )
 
     def _attach_gadget_usage(self, rec_file: Path, round_obj: Round) -> None:
-        """Adds each player's operator-gadget charges and uses, which r6-dissect
-        doesn't read, from the replay's own state stream. Nothing is added when
-        the replay can't be read (so 'not measured' never looks like 'not used')."""
+        """Adds what r6-dissect doesn't read, straight from the replay's own state stream:
+        each player's operator-gadget charges and uses, and every plant/defuse attempt with
+        who made it. Nothing is added when the replay can't be read (so 'not measured' never
+        looks like 'not used')."""
+        roles = {p["username"]: (p.get("side") or "") for p in round_obj.raw_player_stats if p.get("username")}
         try:
-            from integration.replay_utility import analyze_rec
-            usage = analyze_rec(rec_file, [p["username"] for p in round_obj.raw_player_stats if p.get("username")])
+            from integration.replay_utility import analyze_rec_full
+            usage, secondary, attempts = analyze_rec_full(rec_file, roles)
         except Exception as e:                                       # noqa: BLE001 - optional enrichment
-            self._log(f"  (gadget usage unavailable for {rec_file.name}: {e})")
+            self._log(f"  (replay details unavailable for {rec_file.name}: {e})")
             return
-        if not usage:
-            return
-        for p in round_obj.raw_player_stats:
-            u = usage.get(p.get("username"))
-            p["gadget_start"] = u.start if u else 0      # 0: this operator has no countable gadget
-            p["gadget_used"] = u.used if u else 0
-        if round_obj.round_events is not None:
-            round_obj.round_events.utility_tracked = True
+        ev = round_obj.round_events
+        if usage:
+            for p in round_obj.raw_player_stats:
+                u = usage.get(p.get("username"))
+                p["gadget_start"] = u.start if u else 0      # 0: this operator has no countable gadget
+                p["gadget_used"] = u.used if u else 0
+            if ev is not None:
+                ev.utility_tracked = True
+        if secondary and ev is not None:
+            # Secondary gadgets (frags, stuns, claymores, wire...) ride in the round's events: there is no
+            # column for them, and "every player listed" means 0 is a measured zero, not a missing one.
+            ev.secondary_tracked = True
+            for p in round_obj.raw_player_stats:
+                u = secondary.get(p.get("username"))
+                ev.player_derived.setdefault(p["username"], {}).update(
+                    {"secondary_start": u.start if u else 0, "secondary_used": u.used if u else 0})
+        if attempts is not None and ev is not None:
+            from analysis.event_parser import EventParser
+            ops = {p["username"]: p.get("operator") or "" for p in round_obj.raw_player_stats}
+            EventParser.apply_objective_attempts(
+                ev,
+                [{"kind": a.kind, "completed": a.completed, "username": a.username,
+                  "operator": ops.get(a.username) or None, "confidence": a.confidence} for a in attempts],
+                ev.our_role,
+                getattr(round_obj, "outcome", None),
+            )
 
     @classmethod
     def timeline_round(cls, data: dict, round_number: int) -> dict:
@@ -214,8 +234,7 @@ class RecImporter:
         since prep began -- see r6-dissect's readTime).
         """
         players = data.get("players") or []
-        recording_id = data.get("recordingPlayerID")
-        recorder = next((p for p in players if p.get("id") == recording_id), None)
+        recorder = cls.find_recorder(data)
         our_team = recorder.get("teamIndex") if recorder else None
         ours = [str(p.get("username") or "") for p in players
                 if our_team is not None and p.get("teamIndex") == our_team]
@@ -601,14 +620,34 @@ class RecImporter:
 
         return []
 
+    @staticmethod
+    def find_recorder(data: dict) -> Optional[dict]:
+        """The player whose replay this is, which is how we know which team is ours.
+
+        Matched by Ubisoft profile id first: it is right in every round. The numeric player id is
+        right in some rounds only; in others every player carries the same stray value (seen on
+        2026-10-05: rounds 1-3 of a match, where no player matched, so the round had "0 ours,
+        10 theirs", no kill feed and no objective data). The numeric id is the fallback, and only
+        when it picks out exactly one player."""
+        players = data.get("players") or []
+        profile = data.get("recordingProfileID")
+        if profile:
+            hit = [p for p in players if p.get("profileID") == profile]
+            if len(hit) == 1:
+                return hit[0]
+        pid = data.get("recordingPlayerID")
+        if pid not in (None, "", 0):
+            hit = [p for p in players if p.get("id") == pid]
+            if len(hit) == 1:
+                return hit[0]
+        return None
+
     def _parse_round(self, data: dict) -> tuple[Round, dict]:
-        recording_player_id           = data.get("recordingPlayerID")
         our_team_index: Optional[int] = None
 
-        for player in data.get("players", []):
-            if player.get("id") == recording_player_id:
-                our_team_index = player.get("teamIndex")
-                break
+        recorder = self.find_recorder(data)
+        if recorder is not None:
+            our_team_index = recorder.get("teamIndex")
 
         teams = data.get("teams", [])
         score_us:   Optional[int] = None

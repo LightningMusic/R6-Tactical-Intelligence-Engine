@@ -75,4 +75,16 @@ def backfill_session(session_id: str, log=print) -> dict[str, Any]:
     with repo.db.get_connection() as conn:
         done = apply_round_updates(conn, match_id, result.rounds)
     log(f"[Backfill] match {match_id}: updated {done['stats']} player-round rows and {done['events']} rounds of events.")
+
+    # A round whose "our team" could not be worked out (2026-10-05: stray player ids) was also left out
+    # of the comms timeline. When the session already has a transcript, refresh its saved rounds from
+    # this read and rebuild the timeline, so teammates' lines and callouts are placed against the right rounds.
+    try:
+        if json.loads(row["host_utterances_json"] or "[]") and getattr(result, "timeline_rounds", None):
+            CommsService.save_rounds(session_id, result.timeline_rounds, match_id)
+            if CommsService.build(session_id) is not None:
+                done["timeline_rebuilt"] = True
+                log(f"[Backfill] match {match_id}: comms timeline rebuilt.")
+    except Exception as e:                                       # noqa: BLE001 - a repair, never fatal
+        log(f"[Backfill] match {match_id}: comms timeline not rebuilt: {e}")
     return {"match_id": match_id, **done}

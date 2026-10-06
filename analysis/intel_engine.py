@@ -673,6 +673,8 @@ class IntelEngine:
                 "baselines": self._player_baselines(repo, match_id, ours),
                 "opening":   team_facts.opening_counts(events),
                 "measured":  team_facts.utility_measured(match, ours, events),
+                "objective": team_facts.player_objective(events, ours),
+                "secondary": team_facts.player_secondary(events, ours),
             }
 
         results: dict[str, Any] = {}
@@ -693,6 +695,7 @@ class IntelEngine:
                 facts = team_facts.player_facts(
                     row, context["team"], context["baselines"].get(team_facts.norm(name)),
                     context["opening"].get(team_facts.norm(name)), utility=pu,
+                    objective=context["objective"].get(team_facts.norm(name)),
                 )
                 strength, weakness = team_facts.pick_lines(facts)
                 none = "Nothing clearly stands out tonight."
@@ -707,6 +710,19 @@ class IntelEngine:
                 ops = team_facts.operator_text(row)
                 if ops:
                     lines.append(f"OPERATORS: {ops}")
+                sec = context["secondary"].get(team_facts.norm(name))
+                if sec:
+                    lines.append("SECONDARY: " + team_facts.secondary_text(sec))
+                obj = context["objective"].get(team_facts.norm(name))
+                if obj and (obj["plants"] or obj["defuses"] or obj["cut"]):
+                    bits = []
+                    if obj["plants"]:
+                        bits.append("planted " + team_facts.objective_text(obj["plants"]))
+                    if obj["defuses"]:
+                        bits.append("disabled the enemy defuser " + team_facts.objective_text(obj["defuses"]))
+                    if obj["cut"]:
+                        bits.append(f"{obj['cut']} attempt(s) did not finish")
+                    lines.append("OBJECTIVE: " + "; ".join(bits) + ".")
                 results[name] = "\n".join(lines)
                 continue
             comms_lines = self._get_player_transcript_lines(match_id, name)

@@ -93,6 +93,11 @@ class RoundEvents:
     bomb_defused:     bool           = False   # a real defuse: >= MIN_DEFUSE_GAP_SEC after the plant
     plant_clock:      Optional[str]  = None    # round clock when the plant completed
     utility_tracked:  bool           = False   # gadget usage was read from the replay for this round
+    secondary_tracked: bool          = False   # secondary-gadget use is in player_derived (secondary_start/_used)
+    objective_tracked: bool          = False   # plant/defuse countdowns were read from the replay for this round
+    # Every plant/defuse attempt, completed or not, from the replay's defuser countdowns:
+    # {kind: "plant"|"defuse", completed, username, operator, confidence, ours}
+    objective_attempts: list[dict]   = field(default_factory=list)
 
     # Clutch detection
     # A clutch = one player from our team alive, ≥1 enemy alive, round won
@@ -118,7 +123,10 @@ class RoundEvents:
             "bomb_defused":        self.bomb_defused,
             "plant_clock":         self.plant_clock,
             "utility_tracked":     self.utility_tracked,
-            "clutch_player":       self.clutch_player,
+            "secondary_tracked":   self.secondary_tracked,
+            "objective_tracked":   self.objective_tracked,
+            "objective_attempts":  self.objective_attempts,
+            "clutch_player":      self.clutch_player,
             "clutch_kills":        self.clutch_kill_count,
             "kills": [
                 {

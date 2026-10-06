@@ -47,6 +47,61 @@ def test_measured_gadget_numbers_land_on_the_right_player_round():
     assert done["stats"] == 2
 
 
+def _run_backfill(monkeypatch, tmp_path, host_utterances, timeline_rounds):
+    """backfill_session with the importer, database and comms service replaced by fakes."""
+    import contextlib
+    import zipfile
+
+    import integration.rec_importer as rec_importer
+    import server.match_db as match_db
+    import server.services.comms_service as comms
+    import server.services.utility_backfill as ub
+
+    pkg = tmp_path / "p.r6session"
+    with zipfile.ZipFile(pkg, "w") as z:
+        z.writestr("replays/R01.rec", b"x")
+    monkeypatch.setattr(ub, "package_path", lambda sid: pkg)
+    monkeypatch.setattr(ub, "apply_round_updates", lambda conn, mid, rounds: {"stats": 1, "events": 1})
+
+    calls = []
+
+    class FakeImporter:
+        def __init__(self, **kw): pass
+        def import_match_folder(self, folder):
+            return NS(rounds=[NS(round_number=1)], timeline_rounds=timeline_rounds, error_message=None)
+
+    class FakeComms:
+        @staticmethod
+        def _get(sid): return {"match_id": 22, "host_utterances_json": json.dumps(host_utterances)}
+        @staticmethod
+        def save_rounds(sid, rounds, mid): calls.append(("save_rounds", rounds, mid))
+        @staticmethod
+        def build(sid): calls.append(("build",)); return {"flags": []}
+
+    class FakeRepo:
+        class db:
+            @staticmethod
+            @contextlib.contextmanager
+            def get_connection(): yield object()
+
+    monkeypatch.setattr(rec_importer, "RecImporter", FakeImporter)
+    monkeypatch.setattr(comms, "CommsService", FakeComms)
+    monkeypatch.setattr(match_db, "get_match_repo", lambda: FakeRepo)
+    return ub.backfill_session("session_x", log=lambda m: None), calls
+
+
+def test_a_session_with_a_transcript_gets_its_rounds_and_timeline_refreshed(monkeypatch, tmp_path):
+    rounds = [{"round": 1, "ours": ["Me"]}]
+    result, calls = _run_backfill(monkeypatch, tmp_path, [{"text": "hi"}], rounds)
+    assert result["match_id"] == 22 and result["timeline_rebuilt"] is True
+    assert calls == [("save_rounds", rounds, 22), ("build",)]
+
+
+def test_a_session_without_a_transcript_is_left_for_the_normal_pipeline(monkeypatch, tmp_path):
+    result, calls = _run_backfill(monkeypatch, tmp_path, [], [{"round": 1}])
+    assert "timeline_rebuilt" not in result and calls == []
+
+
 def test_events_are_replaced_not_duplicated_and_unknown_rounds_are_skipped():
     c = db()
     done = apply_round_updates(c, 22, rounds())
