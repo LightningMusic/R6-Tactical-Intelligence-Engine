@@ -647,7 +647,11 @@ class SessionManager:
             if settings.UPLOAD_VOICE and settings.SERVER_URL:
                 try:
                     from app.uploader import SessionUploader
-                    reachable = SessionUploader().test_connection().success
+                    probe = SessionUploader().test_connection()
+                    reachable = probe.success
+                    if not probe.success:
+                        # Say what the server actually answered: a refused key is not "unreachable".
+                        log(f"Server check failed: {probe.error or 'no answer'}")
                 except Exception as probe_err:
                     log(f"Server reachability check failed (non-fatal): {probe_err}")
                     reachable = False
@@ -1038,11 +1042,32 @@ class SessionManager:
         deleted   = 0
         freed_mb  = 0.0
 
+        # A video is only deleted once everything it gave us is safe on the server (every match
+        # from it uploaded AND analysed). Otherwise it stays, because the video can still be useful
+        # and a failed upload (a bad key, no connection) must never cost the footage.
+        from app.config import DATA_DIR
+        from app.recording_safety import load_queue, split_deletable
+        to_delete, kept = split_deletable(to_delete, load_queue(DATA_DIR / "queue" / "queue.json"))
+        for f, why in kept:
+            try:
+                log(f"Kept {f.name} ({f.stat().st_size / (1024 ** 3):.1f} GB): {why}.")
+            except OSError:
+                pass
+        if kept:
+            try:
+                import shutil
+                free_gb = shutil.disk_usage(str(RECORDINGS_DIR)).free / (1024 ** 3)
+                if free_gb < 10:
+                    log(f"Only {free_gb:.1f} GB is free and {len(kept)} recording(s) are being kept until their "
+                        f"matches upload; fix the upload (Settings > Remote Sync) or free space by hand.")
+            except OSError:
+                pass
+
         for f in to_delete:
             try:
                 mb = f.stat().st_size / (1024 * 1024)
                 f.unlink()
-                log(f"Deleted: {f.name} ({mb:.0f} MB)")
+                log(f"Deleted: {f.name} ({mb:.0f} MB), all its matches are uploaded and analysed")
                 deleted += 1
                 freed_mb += mb
             except Exception as e:

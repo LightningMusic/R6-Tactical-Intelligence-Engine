@@ -40,6 +40,14 @@ def _is_network_failure(error: Optional[str]) -> bool:
     return bool(error) and error.startswith("Upload request failed")
 
 
+def _is_auth_failure(error: Optional[str]) -> bool:
+    """True when the server refused the API key. That says nothing about the package: it is fixed
+    by correcting the key, after which the same package uploads fine. Treating it as a refusal of
+    the package (retry cap, then never again) stranded a whole night's matches on 2026-10-05."""
+    low = (error or "").lower()
+    return "api token" in low or "authentication credentials" in low
+
+
 def _seconds_since(iso_timestamp: Optional[str]) -> float:
     if not iso_timestamp:
         return float("inf")
@@ -93,7 +101,9 @@ class SyncCoordinator:
         # failure says nothing about the package, and giving up on it after a
         # few minutes of bad connection left finished matches stranded on the
         # USB for days, so those keep retrying at the backoff cap.
-        if item.retry_count >= settings.MAX_UPLOAD_RETRIES and not _is_network_failure(item.last_error):
+        if (item.retry_count >= settings.MAX_UPLOAD_RETRIES
+                and not _is_network_failure(item.last_error)
+                and not _is_auth_failure(item.last_error)):
             return False
         if item.package_status == "upload_failed":
             required_wait = backoff_seconds(item.retry_count)

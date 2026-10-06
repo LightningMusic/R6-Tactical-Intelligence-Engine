@@ -271,6 +271,21 @@ class _Settings:
             return manual
         return _embedded_api_key()
 
+    def api_key_candidates(self) -> list[str]:
+        """Every key worth trying against the server, best guess first: the one typed into
+        Settings, then the one built into this exe. They differ after a key rotation, when the
+        saved one goes stale and (being preferred) would otherwise lock the app out of its own
+        server (2026-10-05: a whole practice night of uploads refused)."""
+        manual = str(self._data.get("api_key", "")).strip()
+        embedded = _embedded_api_key()
+        return [k for i, k in enumerate((manual, embedded)) if k and k not in (manual, embedded)[:i]]
+
+    def forget_manual_api_key(self) -> None:
+        """Drops a saved key the server has rejected, so the built-in one is used from now on."""
+        if str(self._data.get("api_key", "")).strip():
+            self._data["api_key"] = ""
+            self.save()
+
     @property
     def UPLOAD_REPLAYS(self) -> bool:
         return bool(self._data.get("upload_replays", True))

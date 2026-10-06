@@ -1015,12 +1015,30 @@ class RecordingView(QWidget):
             )
             return
 
+        # Only recordings whose matches are all uploaded and analysed by the server may go.
+        from app.config import DATA_DIR
+        from app.recording_safety import load_queue, split_deletable
+        to_delete, kept = split_deletable(to_delete, load_queue(DATA_DIR / "queue" / "queue.json"))
+        kept_text = ""
+        if kept:
+            kept_text = ("\n\nKept (not safe on the server yet):\n"
+                         + "\n".join(f"{p.name}: {why}" for p, why in kept[:5])
+                         + ("\n..." if len(kept) > 5 else ""))
+        if not to_delete:
+            QMessageBox.information(
+                self, "Cleanup",
+                "Nothing can be deleted yet: every older recording still has a match that has not "
+                "uploaded or finished analysing." + kept_text
+            )
+            return
+
         delete_gb = sum(f.stat().st_size for f in to_delete) / (1024**3)
         confirm = QMessageBox.question(
             self, "Confirm Delete",
             f"Delete {len(to_delete)} recording(s) ({delete_gb:.1f} GB)?\n\n"
             + "\n".join(f.name for f in to_delete[:5])
-            + ("\n..." if len(to_delete) > 5 else ""),
+            + ("\n..." if len(to_delete) > 5 else "")
+            + kept_text,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:

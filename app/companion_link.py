@@ -25,7 +25,9 @@ class CompanionLink:
         self._last_lines: dict[str, str] = {}
 
     def _base(self) -> Optional[tuple[str, dict]]:
-        url, key = (settings.SERVER_URL or "").rstrip("/"), settings.API_KEY
+        from app.uploader import resolve_api_key
+        url = (settings.SERVER_URL or "").rstrip("/")
+        key = resolve_api_key(self.http if self.http is not requests else None)
         if not url or not key:
             return None
         return url, {"Authorization": f"Bearer {key}"}

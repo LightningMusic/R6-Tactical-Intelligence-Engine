@@ -11,6 +11,7 @@ log line, or returned UploadResult.
 """
 
 import io
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,6 +84,66 @@ class MultipartFileBody:
         return b""
 
 
+_KEY_OK_TTL = 600.0       # a key the server accepted is trusted for ten minutes
+_KEY_BAD_TTL = 30.0       # a refusal is rechecked soon: it may just have been fixed
+_key_cache: dict = {}
+
+
+@dataclass
+class KeyCheck:
+    key: str                    # the key to send ("" when there is none)
+    accepted: Optional[bool]    # True: the server took it. False: it refused every key. None: not checked
+
+
+def probe_api_key(http: Any = None) -> KeyCheck:
+    """Which API key does the server accept?
+
+    Only matters when the app has two different keys to choose from: the one saved in Settings
+    and the one built into the exe. After a key rotation the saved one goes stale, and because it is
+    preferred it locked a whole practice night out of its own server (every upload "Invalid or
+    expired API token"). Here the saved key is tried first, then the built-in one; the first the
+    server accepts wins, and a refused saved key is dropped so it cannot do this again. A server that
+    can't be reached, or answers with anything but 200/401, decides nothing (the real request will
+    report the trouble). With one key (or none) there is nothing to choose and nothing is sent."""
+    from app.config import settings
+
+    url = (settings.SERVER_URL or "").rstrip("/")
+    candidates = settings.api_key_candidates()
+    if len(candidates) < 2 or not url:
+        return KeyCheck(candidates[0] if candidates else "", None)
+    client = http if http is not None else requests
+    if client is None:
+        return KeyCheck(candidates[0], None)
+
+    cache_key = (url, tuple(candidates))
+    now = time.monotonic()
+    hit = _key_cache.get(cache_key)
+    if hit and now - hit[2] < (_KEY_OK_TTL if hit[1] else _KEY_BAD_TTL):
+        return KeyCheck(hit[0], hit[1])
+
+    for i, key in enumerate(candidates):
+        try:
+            resp = client.get(f"{url}/api/v1/auth/test", headers={"Authorization": f"Bearer {key}"}, timeout=10)
+        except Exception:
+            return KeyCheck(candidates[0], None)
+        code = getattr(resp, "status_code", None)
+        if code == 200:
+            _key_cache[cache_key] = (key, True, now)
+            if i > 0:
+                print("[Uploader] The API key saved in Settings was refused by the server; "
+                      "using the one built into this app and clearing the saved one.")
+                settings.forget_manual_api_key()
+            return KeyCheck(key, True)
+        if code != 401:
+            return KeyCheck(candidates[0], None)
+    _key_cache[cache_key] = (candidates[0], False, now)
+    return KeyCheck(candidates[0], False)
+
+
+def resolve_api_key(http: Any = None) -> str:
+    return probe_api_key(http).key
+
+
 @dataclass
 class UploadResult:
     success: bool
@@ -135,13 +196,23 @@ class SessionUploader:
         from app.config import settings
 
         server_url = settings.SERVER_URL
-        api_key = settings.API_KEY
         timeout = settings.REQUEST_TIMEOUT_SECONDS
 
         if not server_url:
             return UploadResult(success=False, error="No server_url configured.")
         if not package_path.exists():
             return UploadResult(success=False, error=f"Package file not found: {package_path.name}")
+
+        # Pick the key the server accepts BEFORE sending tens of megabytes: a server that refuses
+        # the key closes the connection early, which surfaces as a bogus "SSL EOF" network error.
+        check = probe_api_key(self._http)
+        api_key = check.key
+        if check.accepted is False:
+            return UploadResult(
+                success=False, status_code=401,
+                error="Invalid or expired API token. The server refused both the key saved in Settings "
+                      "and the one built into this app.",
+            )
 
         url = f"{server_url}/api/v1/sessions/upload"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -190,7 +261,7 @@ class SessionUploader:
         from app.config import settings
 
         server_url = settings.SERVER_URL
-        api_key = settings.API_KEY
+        api_key = resolve_api_key(self._http)
         timeout = settings.REQUEST_TIMEOUT_SECONDS
 
         if not server_url:
@@ -234,7 +305,7 @@ class SessionUploader:
         from app.config import settings
 
         server_url = settings.SERVER_URL
-        api_key = settings.API_KEY
+        api_key = resolve_api_key(self._http)
         timeout = settings.REQUEST_TIMEOUT_SECONDS
 
         if not server_url:
