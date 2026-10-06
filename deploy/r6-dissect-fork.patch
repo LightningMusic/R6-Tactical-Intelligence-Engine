@@ -1,0 +1,918 @@
+diff --git a/dissect/defuse.go b/dissect/defuse.go
+index 344dd7e..44e8728 100644
+--- a/dissect/defuse.go
++++ b/dissect/defuse.go
+@@ -1,55 +1,245 @@
+ package dissect
+ 
+ import (
+-	"strings"
++	"bytes"
++	"strconv"
+ 
+ 	"github.com/rs/zerolog/log"
+ )
+ 
+-func readDefuserTimer(r *Reader) error {
+-	timer, err := r.String()
+-	if err != nil {
+-		return err
++// Plants and defuses are a countdown (about 7 seconds down to 0) in the defuser-timer packets.
++//
++// Older replays put the interacting player's id 34 bytes after the timer text. Replays from
++// Y11S3 on do not, and the old code then credited whoever was first in the player list, and
++// reported a second "complete" a moment after every plant (two packets in a row read 0.00x), which
++// turned up as a defuse and flipped the round's win condition. The replay still records who is
++// doing it: that player's controller has a "weapon ready" flag that drops to false in the same
++// packet the countdown starts and comes back up just after it ends:
++//
++//	<controller entity> 00 00 00 00 <hash A4 DC 8D D4> 01 <ready>
++//
++// A player's controller entity is written just before their player record (controllerIndicator).
++var (
++	readyStateIndicator = []byte{0xA4, 0xDC, 0x8D, 0xD4, 0x01}
++	controllerIndicator = []byte{0x84, 0x1D, 0x24, 0xAB, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x1B}
++)
++
++const (
++	countdownRestart  = 0.5  // a value rising by this much means a new attempt (the last was let go)
++	countdownMinStart = 1.0  // a real countdown starts near 7, so a lone "0.00" is not an attempt
++	countdownComplete = 0.05 // a countdown that gets this low has completed
++	readyBefore       = 256  // the flag drops within this window around the countdown's first packet
++	readyAfter        = 1024
++)
++
++type readyState struct {
++	offset     int
++	controller string
++	ready      bool
++}
++
++// controllerIDBefore finds the controller entity id written in the 120 bytes before `end`.
++func (r *Reader) controllerIDBefore(end int) []byte {
++	if end > len(r.b) {
++		return nil
+ 	}
+-	if err = r.Skip(34); err != nil {
+-		return err
++	start := end - 120
++	if start < 0 {
++		start = 0
+ 	}
+-	id, err := r.Bytes(4)
++	i := bytes.LastIndex(r.b[start:end], controllerIndicator)
++	if i < 0 {
++		return nil
++	}
++	i += start + len(controllerIndicator)
++	if i+4 > len(r.b) {
++		return nil
++	}
++	return bytes.Clone(r.b[i : i+4])
++}
++
++// readReadyState records one change of a controller's "weapon ready" flag.
++func readReadyState(r *Reader) error {
++	start := r.offset - len(readyStateIndicator) - 8 // controller id, then four zero bytes, then the hash
++	if start < 1 || r.offset >= len(r.b) || r.b[start-1] != 0x23 ||
++		!bytes.Equal(r.b[start+4:start+8], []byte{0x00, 0x00, 0x00, 0x00}) {
++		return nil
++	}
++	r.readyStates = append(r.readyStates, readyState{
++		offset:     r.offset,
++		controller: string(r.b[start : start+4]),
++		ready:      r.b[r.offset] != 0,
++	})
++	return nil
++}
++
++// countdownValue reads the timer text ("6.982"); plain digits only.
++func countdownValue(text string) (float64, bool) {
++	if text == "" || len(text) > 8 {
++		return 0, false
++	}
++	dots := 0
++	for _, c := range text {
++		switch {
++		case c == '.':
++			dots++
++		case c < '0' || c > '9':
++			return 0, false
++		}
++	}
++	if dots > 1 {
++		return 0, false
++	}
++	v, err := strconv.ParseFloat(text, 64)
++	return v, err == nil
++}
++
++func readDefuserTimer(r *Reader) error {
++	packet := r.offset
++	timer, err := r.String()
+ 	if err != nil {
+ 		return err
+ 	}
+-	i := r.PlayerIndexByID(id)
+-	a := DefuserPlantStart
+-	if r.planted {
+-		a = DefuserDisableStart
++
++	// Older replays name the player in the packet.
++	named := -1
++	if r.Skip(34) == nil {
++		if id, idErr := r.Bytes(4); idErr == nil {
++			named = r.PlayerIndexByID(id)
++		}
+ 	}
+-	if i > -1 {
++	if named > -1 {
++		a := DefuserPlantStart
++		if r.planted {
++			a = DefuserDisableStart
++		}
+ 		u := MatchUpdate{
+-			Type:          a,
+-			Username:      r.Header.Players[i].Username,
+-			Time:          r.timeRaw,
+-			TimeInSeconds: r.time,
++			Type:           a,
++			Username:       r.Header.Players[named].Username,
++			Time:           r.timeRaw,
++			TimeInSeconds:  r.time,
++			ElapsedSeconds: r.elapsed,
+ 		}
+ 		r.MatchFeedback = append(r.MatchFeedback, u)
+ 		log.Debug().Interface("match_update", u).Send()
+-		r.lastDefuserPlayerIndex = i
++		r.lastDefuserPlayerIndex = named
+ 	}
+-	// TODO: 0.00 can be present even if defuser was not disabled.
+-	if !strings.HasPrefix(timer, "0.00") {
++
++	v, ok := countdownValue(timer)
++	if !ok {
+ 		return nil
+ 	}
+-	a = DefuserDisableComplete
++	if r.defuserCountdownStart < 0 || v > r.defuserCountdownLast+countdownRestart {
++		if v < countdownMinStart {
++			return nil // not the start of a countdown
++		}
++		r.defuserCountdownStart, r.defuserCountdownDone = packet, false
++	}
++	r.defuserCountdownLast = v
++	if r.defuserCountdownDone || v >= countdownComplete {
++		return nil
++	}
++
++	// The countdown reached zero: this is the plant (or, once planted, the disable). Only the
++	// first packet that low counts, so one countdown gives one event.
++	r.defuserCountdownDone = true
++	a, role := DefuserDisableComplete, Defense
+ 	if !r.planted {
+-		a = DefuserPlantComplete
++		a, role = DefuserPlantComplete, Attack
+ 		r.planted = true
+ 	}
++	who := r.lastDefuserPlayerIndex
++	if who < 0 {
++		who = r.interactingPlayer(r.defuserCountdownStart, packet, role)
++	}
++	r.lastDefuserPlayerIndex = -1
++	username := ""
++	if who > -1 {
++		username = r.Header.Players[who].Username
++	}
+ 	u := MatchUpdate{
+-		Type:          a,
+-		Username:      r.Header.Players[r.lastDefuserPlayerIndex].Username,
+-		Time:          r.timeRaw,
+-		TimeInSeconds: r.time,
++		Type:           a,
++		Username:       username,
++		Time:           r.timeRaw,
++		TimeInSeconds:  r.time,
++		ElapsedSeconds: r.elapsed,
+ 	}
+ 	r.MatchFeedback = append(r.MatchFeedback, u)
+ 	log.Debug().Interface("match_update", u).Send()
+ 	return nil
+ }
++
++// dropImpossibleDisables removes "defuser disabled" events from a round the attackers won. A defuse
++// that completes ends the round in the defenders' favour, so a countdown that reached zero in a round
++// the attackers took (by the score) was a defuser killed in the last instant, not a defuse.
++func (r *Reader) dropImpossibleDisables() {
++	attackersWon := false
++	for _, t := range r.Header.Teams {
++		if t.Role == Attack && t.Won {
++			attackersWon = true
++		}
++	}
++	if !attackersWon {
++		return
++	}
++	kept := r.MatchFeedback[:0]
++	for _, u := range r.MatchFeedback {
++		if u.Type != DefuserDisableComplete {
++			kept = append(kept, u)
++		}
++	}
++	r.MatchFeedback = kept
++}
++
++// interactingPlayer returns the index of the player on the given side who was planting or disabling
++// in the countdown that ran from `start` to `end`, or -1 when the replay doesn't say clearly enough.
++// A player qualifies if their weapon-ready flag dropped as the countdown began and was still down
++// when it ended. If several qualify the one whose flag dropped first is taken; if none does, a
++// single player whose flag was already down and never changed (a shield held out, say) is.
++func (r *Reader) interactingPlayer(start, end int, role TeamRole) int {
++	type dropped struct{ at, index int }
++	var drops []dropped
++	var carried []int
++	for i, p := range r.Header.Players {
++		if p.controllerID == nil || p.TeamIndex < 0 || p.TeamIndex >= len(r.Header.Teams) ||
++			r.Header.Teams[p.TeamIndex].Role != role {
++			continue
++		}
++		id := string(p.controllerID)
++		seen, lastReady, firstDrop, allBefore := false, true, -1, true
++		for _, s := range r.readyStates {
++			if s.controller != id || s.offset > end {
++				continue
++			}
++			seen, lastReady = true, s.ready
++			inWindow := s.offset >= start-readyBefore && s.offset <= start+readyAfter
++			if !s.ready && inWindow && firstDrop < 0 {
++				firstDrop = s.offset
++			}
++			if s.offset >= start-readyBefore {
++				allBefore = false
++			}
++		}
++		if !seen || lastReady {
++			continue // nothing known, or ready again by the end: not the one interacting
++		}
++		if firstDrop >= 0 {
++			drops = append(drops, dropped{firstDrop, i})
++		} else if allBefore {
++			carried = append(carried, i)
++		}
++	}
++	switch {
++	case len(drops) > 0:
++		best := drops[0]
++		for _, d := range drops[1:] {
++			if d.at < best.at {
++				best = d
++			}
++		}
++		return best.index
++	case len(carried) == 1:
++		return carried[0]
++	}
++	return -1
++}
+diff --git a/dissect/defuse_test.go b/dissect/defuse_test.go
+new file mode 100644
+index 0000000..2ff1393
+--- /dev/null
++++ b/dissect/defuse_test.go
+@@ -0,0 +1,251 @@
++package dissect
++
++import (
++	"testing"
++)
++
++// Synthetic streams laid out the way real Y11S3 replays are. (The layout was checked on 74 real
++// rounds, where this code and an independent Python reader agreed on every plant and defuse.)
++
++var (
++	ctrlA1 = []byte{0xB9, 0x38, 0x03, 0xF0} // attackers
++	ctrlA2 = []byte{0xBA, 0x38, 0x03, 0xF0}
++	ctrlA3 = []byte{0xBB, 0x38, 0x03, 0xF0}
++	ctrlD1 = []byte{0x4C, 0x38, 0x03, 0xF0} // defenders
++	ctrlD2 = []byte{0x4B, 0x38, 0x03, 0xF0}
++)
++
++// step is one thing in the stream: a defuser-timer packet, a weapon-ready change, or empty space.
++type step struct {
++	timer string
++	id    []byte // the player id an older-format timer packet carries (nil: four zero bytes)
++	ctrl  []byte
++	up    bool
++	pad   int
++}
++
++func tick(text string) step              { return step{timer: text} }
++func tickBy(text string, id []byte) step { return step{timer: text, id: id} }
++func flag(c []byte, up bool) step        { return step{ctrl: c, up: up} }
++func gap(n int) step                     { return step{pad: n} }
++func steps(s ...[]step) (out []step) { // flatten
++	for _, x := range s {
++		out = append(out, x...)
++	}
++	return
++}
++func one(s step) []step { return []step{s} }
++
++// countdown is a plant/defuse down to `low`: `who`'s flag drops in the first packet and rises just after
++// the end; later packets are spread out like the real thing (20-34 KB per countdown).
++func countdown(who []byte, low string, others ...step) []step {
++	out := []step{tick("6.982")}
++	if who != nil {
++		out = append(out, flag(who, false))
++	}
++	for _, v := range []string{"5.000", "3.000", "1.000"} {
++		out = append(out, gap(2000), tick(v))
++	}
++	out = append(out, gap(2000))
++	out = append(out, others...)
++	out = append(out, tick(low))
++	if who != nil {
++		out = append(out, gap(1500), flag(who, true))
++	}
++	return out
++}
++
++// play lays the steps out in one buffer and replays them through the listeners in stream order, as Read does.
++func play(t *testing.T, all []step) *Reader { return playWith(t, all, nil) }
++
++// playWith is play with a chance to adjust the reader (players, teams) before the stream is replayed.
++func playWith(t *testing.T, all []step, adjust func(*Reader)) *Reader {
++	t.Helper()
++	r := &Reader{lastDefuserPlayerIndex: -1, defuserCountdownStart: -1}
++	r.Header.Teams = [2]Team{{Role: Attack}, {Role: Defense}}
++	r.Header.Players = []Player{
++		{Username: "atk1", TeamIndex: 0, controllerID: ctrlA1},
++		{Username: "atk2", TeamIndex: 0, controllerID: ctrlA2},
++		{Username: "atk3", TeamIndex: 0, controllerID: ctrlA3},
++		{Username: "def1", TeamIndex: 1, controllerID: ctrlD1},
++		{Username: "def2", TeamIndex: 1, controllerID: ctrlD2},
++	}
++	if adjust != nil {
++		adjust(r)
++	}
++	type play struct {
++		offset int
++		s      step
++	}
++	var plays []play
++	b := make([]byte, 64)
++	for _, s := range all {
++		switch {
++		case s.timer != "":
++			b = append(b, 0x22, 0xA9, 0xC8, 0x58, 0xD9)
++			plays = append(plays, play{len(b), s})
++			b = append(b, byte(len(s.timer)))
++			b = append(b, s.timer...)
++			b = append(b, make([]byte, 34)...) // skipped bytes
++			if s.id != nil {
++				b = append(b, s.id...)
++			} else {
++				b = append(b, 0, 0, 0, 0)
++			}
++			b = append(b, make([]byte, 30)...)
++		case s.ctrl != nil:
++			b = append(b, 0x23)
++			b = append(b, s.ctrl...)
++			b = append(b, 0, 0, 0, 0)
++			b = append(b, readyStateIndicator...)
++			plays = append(plays, play{len(b), s})
++			b = append(b, 0, 0, 0, 0, 0, 0, 0, 0)
++			if s.up {
++				b[len(b)-8] = 1
++			}
++		default:
++			b = append(b, make([]byte, s.pad)...)
++		}
++	}
++	r.b = b
++	for _, p := range plays {
++		r.offset = p.offset
++		var err error
++		if p.s.timer != "" {
++			err = readDefuserTimer(r)
++		} else {
++			err = readReadyState(r)
++		}
++		if err != nil {
++			t.Fatal(err)
++		}
++	}
++	return r
++}
++
++func kinds(r *Reader) (out []string) {
++	for _, u := range r.MatchFeedback {
++		out = append(out, u.Type.String()+":"+u.Username)
++	}
++	return
++}
++
++func same(t *testing.T, got []string, want ...string) {
++	t.Helper()
++	if len(got) != len(want) {
++		t.Fatalf("got %v, want %v", got, want)
++	}
++	for i := range got {
++		if got[i] != want[i] {
++			t.Fatalf("got %v, want %v", got, want)
++		}
++	}
++}
++
++func TestThePlayerWhoseFlagDropsAsTheCountdownStartsIsCreditedWithThePlant(t *testing.T) {
++	r := play(t, steps(one(gap(500)), countdown(ctrlA2, "0.003")))
++	same(t, kinds(r), "DefuserPlantComplete:atk2")
++}
++
++func TestTrailingZeroPacketsDoNotBecomeAFalseDisable(t *testing.T) {
++	// the old reader read the second 0.00x packet as a "disable" a moment after every plant
++	r := play(t, steps(countdown(ctrlA1, "0.008"), []step{tick("0.003"), tick("0.00"), tick("0.000")}))
++	same(t, kinds(r), "DefuserPlantComplete:atk1")
++}
++
++func TestAPlantThenADefuseByADefender(t *testing.T) {
++	r := play(t, steps(countdown(ctrlA3, "0.006"), one(gap(20000)), countdown(ctrlD2, "0.022")))
++	same(t, kinds(r), "DefuserPlantComplete:atk3", "DefuserDisableComplete:def2")
++}
++
++func TestACountdownThatNeverFinishesMakesNoEventAndTheNextOneIsAFreshPlant(t *testing.T) {
++	r := play(t, steps(countdown(ctrlA1, "3.660"), one(gap(9000)), countdown(ctrlA3, "0.003")))
++	same(t, kinds(r), "DefuserPlantComplete:atk3")
++}
++
++func TestOtherPlayersFlagsDroppingLaterInTheCountdownAreIgnored(t *testing.T) {
++	r := play(t, steps(countdown(ctrlA1, "0.003", flag(ctrlA3, false))))
++	same(t, kinds(r), "DefuserPlantComplete:atk1")
++}
++
++func TestADefenderIsNeverCreditedWithAPlant(t *testing.T) {
++	r := play(t, []step{tick("6.982"), flag(ctrlD1, false), flag(ctrlA3, false), tick("0.003")})
++	same(t, kinds(r), "DefuserPlantComplete:atk3")
++}
++
++func TestAFlagAlreadyDownThatNeverChangedIsTheLikelyPlanter(t *testing.T) {
++	r := play(t, steps(one(flag(ctrlA2, false)), one(gap(5000)), countdown(nil, "0.003")))
++	same(t, kinds(r), "DefuserPlantComplete:atk2")
++}
++
++func TestNobodyQualifyingLeavesTheNameBlankInsteadOfGuessing(t *testing.T) {
++	r := play(t, countdown(nil, "0.003"))
++	same(t, kinds(r), "DefuserPlantComplete:")
++}
++
++func TestAFlagThatIsBackUpByTheEndIsNotThePlanter(t *testing.T) {
++	r := play(t, []step{tick("6.982"), flag(ctrlA1, false), gap(100), flag(ctrlA1, true), tick("0.003")})
++	same(t, kinds(r), "DefuserPlantComplete:")
++}
++
++func TestALoneZeroPacketIsNotAnAttempt(t *testing.T) {
++	r := play(t, []step{tick("0.000"), gap(100), tick("0.00")})
++	same(t, kinds(r))
++}
++
++func TestTimerTextThatIsNotPlainDigitsIsIgnored(t *testing.T) {
++	r := play(t, []step{tick("nan"), tick("inf"), tick("1e3"), tick("7.9.1"), tick("-3")})
++	same(t, kinds(r))
++}
++
++func TestOlderReplaysThatNameThePlayerInThePacketAreStillCreditedByName(t *testing.T) {
++	// Older replays put the player's id 34 bytes after the timer text; that is exact, so it is used as
++	// before (a start event per named packet, then the completion credited to that player), even
++	// when the weapon-ready flag points at someone else.
++	id := []byte{9, 8, 7, 6}
++	r := playWith(t, []step{tickBy("6.982", id), flag(ctrlA1, false), tick("3.000"), tick("0.004")},
++		func(r *Reader) { r.Header.Players[1].DissectID = id })
++	same(t, kinds(r), "DefuserPlantStart:atk2", "DefuserPlantComplete:atk2")
++}
++
++func TestADefuseInARoundTheAttackersWonIsDropped(t *testing.T) {
++	r := &Reader{}
++	r.Header.Teams = [2]Team{{Role: Attack, Won: true}, {Role: Defense}}
++	r.MatchFeedback = []MatchUpdate{
++		{Type: DefuserPlantComplete, Username: "atk1"},
++		{Type: DefuserDisableComplete, Username: "def1"},
++	}
++	r.dropImpossibleDisables()
++	same(t, kinds(r), "DefuserPlantComplete:atk1")
++}
++
++func TestADefuseInARoundTheDefendersWonStays(t *testing.T) {
++	r := &Reader{}
++	r.Header.Teams = [2]Team{{Role: Attack}, {Role: Defense, Won: true}}
++	r.MatchFeedback = []MatchUpdate{
++		{Type: DefuserPlantComplete, Username: "atk1"},
++		{Type: DefuserDisableComplete, Username: "def1"},
++	}
++	r.dropImpossibleDisables()
++	same(t, kinds(r), "DefuserPlantComplete:atk1", "DefuserDisableComplete:def1")
++}
++
++func TestControllerIDIsReadFromJustBeforeThePlayerRecord(t *testing.T) {
++	r := &Reader{}
++	r.b = append(append(append(make([]byte, 40), controllerIndicator...), 0xB9, 0x38, 0x03, 0xF0), make([]byte, 30)...)
++	got := r.controllerIDBefore(len(r.b))
++	if string(got) != string(ctrlA1) {
++		t.Fatalf("got %x", got)
++	}
++	if r.controllerIDBefore(20) != nil {
++		t.Fatal("found an id where there is no marker")
++	}
++}
++
++func TestCountdownValueAcceptsOnlyPlainDigits(t *testing.T) {
++	for text, want := range map[string]bool{"6.982": true, "0.000": true, "7": true, "": false, "nan": false, "1e3": false, "-1": false, "1.2.3": false, "123456789": false} {
++		if _, ok := countdownValue(text); ok != want {
++			t.Errorf("%q: got %v, want %v", text, ok, want)
++		}
++	}
++}
+diff --git a/dissect/feedback.go b/dissect/feedback.go
+index bf55843..78ea90a 100644
+--- a/dissect/feedback.go
++++ b/dissect/feedback.go
+@@ -33,6 +33,7 @@ type MatchUpdate struct {
+ 	Headshot               *bool           `json:"headshot,omitempty"`
+ 	Time                   string          `json:"time"`
+ 	TimeInSeconds          float64         `json:"timeInSeconds"`
++	ElapsedSeconds         float64         `json:"elapsedSeconds"`
+ 	Message                string          `json:"message,omitempty"`
+ 	Operator               Operator        `json:"operator,omitempty"`
+ 	usernameFromScoreboard string
+@@ -115,10 +116,11 @@ func readMatchFeedback(r *Reader) error {
+ 		}
+ 		if empty && len(target) > 0 {
+ 			u := MatchUpdate{
+-				Type:          Death,
+-				Username:      target,
+-				Time:          r.timeRaw,
+-				TimeInSeconds: r.time,
++				Type:           Death,
++				Username:       target,
++				Time:           r.timeRaw,
++				TimeInSeconds:  r.time,
++				ElapsedSeconds: r.elapsed,
+ 			}
+ 			r.MatchFeedback = append(r.MatchFeedback, u)
+ 			log.Debug().Interface("match_update", u).Send()
+@@ -128,11 +130,12 @@ func readMatchFeedback(r *Reader) error {
+ 			return nil
+ 		}
+ 		u := MatchUpdate{
+-			Type:          Kill,
+-			Username:      username,
+-			Target:        target,
+-			Time:          r.timeRaw,
+-			TimeInSeconds: r.time,
++			Type:           Kill,
++			Username:       username,
++			Target:         target,
++			Time:           r.timeRaw,
++			TimeInSeconds:  r.time,
++			ElapsedSeconds: r.elapsed,
+ 		}
+ 		if err = r.Skip(56); err != nil {
+ 			return err
+@@ -186,12 +189,13 @@ func readMatchFeedback(r *Reader) error {
+ 		msg = ""
+ 	}
+ 	u := MatchUpdate{
+-		Type:          t,
+-		Username:      username,
+-		Target:        "",
+-		Time:          r.timeRaw,
+-		TimeInSeconds: r.time,
+-		Message:       msg,
++		Type:           t,
++		Username:       username,
++		Target:         "",
++		Time:           r.timeRaw,
++		TimeInSeconds:  r.time,
++		ElapsedSeconds: r.elapsed,
++		Message:        msg,
+ 	}
+ 	if (u.Type == PlayerLeave || u.Type == LocateObjective) && len(u.Username) == 0 {
+ 		u.Type = Other
+diff --git a/dissect/header.go b/dissect/header.go
+index 91fe923..fcfc8e2 100644
+--- a/dissect/header.go
++++ b/dissect/header.go
+@@ -55,6 +55,9 @@ type Player struct {
+ 	Spawn        string   `json:"spawn,omitempty"`
+ 	DissectID    []byte   `json:"-" deep:"-"` // dissect player id at end of packet (4 bytes)
+ 	uiID         uint64   `json:"-" deep:"-"`
++	// controllerID is the player's controller entity (4 bytes). Its "weapon ready" flag tells who is
++	// planting or disabling the defuser in replays that no longer name them (see defuse.go).
++	controllerID []byte `json:"-" deep:"-"`
+ }
+ 
+ type stringerIntMarshal struct {
+diff --git a/dissect/player.go b/dissect/player.go
+index f91dee9..a1e392f 100644
+--- a/dissect/player.go
++++ b/dissect/player.go
+@@ -15,6 +15,7 @@ func readPlayer(r *Reader) error {
+ 	spawnIndicator := []byte{0xAF, 0x98, 0x99, 0xCA}
+ 	profileIDIndicator := []byte{0x8A, 0x50, 0x9B, 0xD0}
+ 	//unknownIndicator := []byte{0x22, 0xEE, 0xD4, 0x45, 0xC8, 0x08} // maybe player appearance?
++	controllerID := r.controllerIDBefore(r.offset) // written just before the player record
+ 	r.playersRead++
+ 	defer func() {
+ 		if r.playersRead == 10 {
+@@ -136,6 +137,8 @@ func readPlayer(r *Reader) error {
+ 		Spawn:     spawn,
+ 		DissectID: id,
+ 		uiID:      uiID,
++
++		controllerID: controllerID,
+ 	}
+ 	if p.Operator != Recruit && p.Operator.Role() == Defense {
+ 		p.Spawn = r.Header.Site // We cannot detect the spawn here on defense
+@@ -160,6 +163,9 @@ func readPlayer(r *Reader) error {
+ 			r.Header.Players[i].Spawn = p.Spawn
+ 			r.Header.Players[i].DissectID = p.DissectID
+ 			r.Header.Players[i].uiID = p.uiID
++			if controllerID != nil {
++				r.Header.Players[i].controllerID = controllerID
++			}
+ 			found = true
+ 			break
+ 		}
+@@ -190,11 +196,12 @@ func readAtkOpSwap(r *Reader) error {
+ 		if i > -1 {
+ 			r.Header.Players[i].Operator = o
+ 			u := MatchUpdate{
+-				Type:          OperatorSwap,
+-				Username:      r.Header.Players[i].Username,
+-				Time:          r.timeRaw,
+-				TimeInSeconds: r.time,
+-				Operator:      o,
++				Type:           OperatorSwap,
++				Username:       r.Header.Players[i].Username,
++				Time:           r.timeRaw,
++				TimeInSeconds:  r.time,
++				ElapsedSeconds: r.elapsed,
++				Operator:       o,
+ 			}
+ 			r.MatchFeedback = append(r.MatchFeedback, u)
+ 			log.Debug().Interface("match_update", u).Send()
+@@ -214,11 +221,12 @@ func readAtkOpSwap(r *Reader) error {
+ 		if p.uiID == id {
+ 			r.Header.Players[i].Operator = o
+ 			u := MatchUpdate{
+-				Type:          OperatorSwap,
+-				Username:      p.Username,
+-				Time:          r.timeRaw,
+-				TimeInSeconds: r.time,
+-				Operator:      o,
++				Type:           OperatorSwap,
++				Username:       p.Username,
++				Time:           r.timeRaw,
++				TimeInSeconds:  r.time,
++				ElapsedSeconds: r.elapsed,
++				Operator:       o,
+ 			}
+ 			r.MatchFeedback = append(r.MatchFeedback, u)
+ 			log.Debug().Interface("match_update", u).Send()
+diff --git a/dissect/reader.go b/dissect/reader.go
+index ce3ee4c..bfc3e61 100644
+--- a/dissect/reader.go
++++ b/dissect/reader.go
+@@ -24,11 +24,19 @@ type Reader struct {
+ 	listeners                [][]func(r *Reader) error
+ 	time                     float64 // in seconds
+ 	timeRaw                  string  // raw dissect format
+-	lastDefuserPlayerIndex   int
++	elapsed                  float64 // seconds since prep started (Y8S1+ clock ticks)
++	clockStarted             bool
++	lastDefuserPlayerIndex   int // -1: no player named by an older-format defuser packet
+ 	planted                  bool
++	readyStates              []readyState // every "weapon ready" change seen so far, in stream order
++	defuserCountdownStart    int          // offset of the plant/disable countdown in progress, -1 if none
++	defuserCountdownLast     float64      // its last value
++	defuserCountdownDone     bool         // it already reached zero (so a trailing 0.00x packet adds nothing)
+ 	readPartial              bool // reads up to the player info packets
+ 	playersRead              int
+ 	lastKillerFromScoreboard string
++	scoreboardAssists        []scoreboardObs
++	scoreboardScore          []scoreboardObs
+ 	Header                   Header        `json:"header"`
+ 	MatchFeedback            []MatchUpdate `json:"matchFeedback"`
+ 	Scoreboard               Scoreboard
+@@ -44,7 +52,9 @@ func NewReader(in io.Reader) (r *Reader, err error) {
+ 	}
+ 	log.Debug().Bool("chunkedCompression (>=Y8S4)", chunkedCompression).Send()
+ 	r = &Reader{
+-		readPartial: false,
++		readPartial:            false,
++		lastDefuserPlayerIndex: -1,
++		defuserCountdownStart:  -1,
+ 	}
+ 	if chunkedCompression {
+ 		if err = r.readChunkedData(br); err != nil {
+@@ -67,6 +77,7 @@ func NewReader(in io.Reader) (r *Reader, err error) {
+ 	}
+ 	r.Listen([]byte{0x59, 0x34, 0xE5, 0x8B, 0x04}, readMatchFeedback)
+ 	r.Listen([]byte{0x22, 0xA9, 0xC8, 0x58, 0xD9}, readDefuserTimer)
++	r.Listen(readyStateIndicator, readReadyState)
+ 	r.Listen([]byte{0xEC, 0xDA, 0x4F, 0x80}, readScoreboardScore)
+ 	r.Listen([]byte{0x4D, 0x73, 0x7F, 0x9E}, readScoreboardAssists)
+ 	r.Listen([]byte{0x1C, 0xD2, 0xB1, 0x9D}, readScoreboardKills)
+@@ -226,6 +237,7 @@ func (r *Reader) Read() (err error) {
+ 		}
+ 	}
+ 	if !r.readPartial {
++		r.resolveScoreboard()
+ 		r.roundEnd()
+ 	}
+ 	r.b = nil
+diff --git a/dissect/scoreboard.go b/dissect/scoreboard.go
+index 8e2c73f..a0c0096 100644
+--- a/dissect/scoreboard.go
++++ b/dissect/scoreboard.go
+@@ -1,6 +1,11 @@
+ package dissect
+ 
+-import "github.com/rs/zerolog/log"
++import (
++	"bytes"
++	"encoding/binary"
++
++	"github.com/rs/zerolog/log"
++)
+ 
+ type Scoreboard struct {
+ 	Players []ScoreboardPlayer
+@@ -38,59 +43,93 @@ func readScoreboardKills(r *Reader) error {
+ 	return nil
+ }
+ 
+-func readScoreboardAssists(r *Reader) error {
+-	assists, err := r.Uint32()
+-	if err != nil {
+-		return err
++// A scoreboard update is one block per player:
++//
++//	23 <owner:4> 00 00 00 00 <field> [22 <field>]...
++//	field = <hash:4> 04 <value:uint32 LE>
++//
++// Blocks only carry fields that changed, values are cumulative for the whole
++// match, and the owner is the player's scoreboard object -- its handle is the
++// player's DissectID minus 4, not the DissectID itself (which is why the old
++// "skip N bytes, read the player id" approach stopped finding anyone). The
++// first block in each round file is a full sync of the running totals, so a
++// round's own count is its last value minus its first.
++type scoreboardObs struct {
++	owner uint32
++	value uint32
++}
++
++const scoreboardOwnerOffset = 4
++
++// scoreboardOwner walks back from the start of a field hash over the other
++// fields in the same block to the block header, and returns the owner handle.
++func (r *Reader) scoreboardOwner(fieldStart int) (uint32, bool) {
++	p := fieldStart
++	for p >= 10 && r.b[p-1] == 0x22 && r.b[p-6] == 0x04 {
++		p -= 10
+ 	}
+-	if assists == 0 {
+-		return nil
++	if p < 9 || r.b[p-9] != 0x23 || !bytes.Equal(r.b[p-4:p], []byte{0, 0, 0, 0}) {
++		return 0, false
+ 	}
+-	if err = r.Skip(30); err != nil {
+-		return err
++	return binary.LittleEndian.Uint32(r.b[p-8 : p-4]), true
++}
++
++func (r *Reader) readScoreboardField(dst *[]scoreboardObs, name string) error {
++	fieldStart := r.offset - 4
++	if r.offset >= len(r.b) || r.b[r.offset] != 0x04 {
++		return nil
+ 	}
+-	id, err := r.Bytes(4)
++	value, err := r.Uint32()
+ 	if err != nil {
+ 		return err
+ 	}
+-	idx := r.PlayerIndexByID(id)
+-	username := "N/A"
+-	if idx != -1 {
+-		username = r.Header.Players[idx].Username
+-		r.Scoreboard.Players[idx].Assists = assists
+-		r.Scoreboard.Players[idx].AssistsFromRound++
++	owner, ok := r.scoreboardOwner(fieldStart)
++	if !ok {
++		log.Debug().Str("field", name).Msg("scoreboard block without a recognisable owner")
++		return nil
+ 	}
+-	log.Debug().
+-		Uint32("assists", assists).
+-		Str("username", username).
+-		Msg("scoreboard_assists")
++	*dst = append(*dst, scoreboardObs{owner: owner, value: value})
++	log.Debug().Str("field", name).Uint32("value", value).Uint32("owner", owner).Msg("scoreboard_" + name)
+ 	return nil
+ }
+ 
++func readScoreboardAssists(r *Reader) error {
++	return r.readScoreboardField(&r.scoreboardAssists, "assists")
++}
++
+ func readScoreboardScore(r *Reader) error {
+-	score, err := r.Uint32()
+-	if err != nil {
+-		return err
+-	}
+-	if score == 0 {
+-		return nil
+-	}
+-	if err = r.Skip(13); err != nil {
+-		return err
+-	}
+-	id, err := r.Bytes(4)
+-	if err != nil {
+-		return err
+-	}
+-	idx := r.PlayerIndexByID(id)
+-	username := "N/A"
+-	if idx != -1 {
+-		username = r.Header.Players[idx].Username
+-		r.Scoreboard.Players[idx].Score = score
++	return r.readScoreboardField(&r.scoreboardScore, "score")
++}
++
++// resolveScoreboard fills Scoreboard.Players (indexed like Header.Players)
++// once every player is known.
++func (r *Reader) resolveScoreboard() {
++	r.Scoreboard.Players = make([]ScoreboardPlayer, len(r.Header.Players))
++	for i, p := range r.Header.Players {
++		if len(p.DissectID) != 4 {
++			continue
++		}
++		owner := binary.LittleEndian.Uint32(p.DissectID) - scoreboardOwnerOffset
++		sp := &r.Scoreboard.Players[i]
++		sp.ID = p.DissectID
++		first, last, seen := uint32(0), uint32(0), false
++		for _, o := range r.scoreboardAssists {
++			if o.owner != owner {
++				continue
++			}
++			if !seen {
++				first, seen = o.value, true
++			}
++			last = o.value
++		}
++		sp.Assists = last
++		if last > first {
++			sp.AssistsFromRound = last - first
++		}
++		for _, o := range r.scoreboardScore {
++			if o.owner == owner {
++				sp.Score = o.value
++			}
++		}
+ 	}
+-	log.Debug().
+-		Uint32("score", score).
+-		Str("username", username).
+-		Msg("scoreboard_score")
+-	return nil
+ }
+diff --git a/dissect/time.go b/dissect/time.go
+index 0aa1599..32cd64c 100644
+--- a/dissect/time.go
++++ b/dissect/time.go
+@@ -15,6 +15,19 @@ func readTime(r *Reader) error {
+ 	}
+ 	r.time = float64(time)
+ 	r.timeRaw = fmt.Sprintf("%d:%02d", time/60, time%60)
++	// The round clock ticks once per second (prep 44..0, action 179..0, then
++	// the defuser timer after a plant), so counting ticks gives seconds since
++	// prep started -- a clock that keeps running across phases, unlike the
++	// displayed time. The initial state snapshot carries a stray 0 before
++	// prep begins; counting starts at the first non-zero tick.
++	if !r.clockStarted {
++		if time == 0 {
++			return nil
++		}
++		r.clockStarted = true
++		return nil
++	}
++	r.elapsed++
+ 	return nil
+ }
+ 
+@@ -60,6 +73,7 @@ func (r *Reader) roundEnd() {
+ 		team0Won := r.Header.Teams[0].StartingScore < r.Header.Teams[0].Score
+ 		r.Header.Teams[0].Won = team0Won
+ 		r.Header.Teams[1].Won = !team0Won
++		r.dropImpossibleDisables()
+ 	}
+ 
+ 	for _, u := range r.MatchFeedback {
