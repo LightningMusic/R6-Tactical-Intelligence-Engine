@@ -69,12 +69,12 @@
   </section>
 
   <section class="card hidden" id="setupCard">
-    <div class="headline" style="font-size:1rem">Before practice</div>
+    <div class="headline" style="font-size:1rem">One-time setup</div>
     <ol>
-      <li>Pick the headset mic you use for Discord below (the first entry, "Default", is often a different device), then press <b>Start</b>. Your browser asks for the microphone once.</li>
-      <li>Say something. The green bar on this page must move. If it doesn't, press <b>Stop</b>, pick another microphone and try again.</li>
-      <li>Leave this tab open and the computer awake while you play. Minimize it, don't close it.</li>
-      <li>That's it. It records when the host starts a match and stops when they stop.</li>
+      <li>Press <b>Start</b> and allow the microphone when the browser asks.</li>
+      <li>Say something: the green bar must move. If your microphone sends nothing, this page looks for one that works by itself.</li>
+      <li>Leave this tab open and the computer awake while you play (minimize it, don't close it). The host starts and stops the recording.</li>
+      <li>From now on, opening your link starts it by itself: there is nothing to press.</li>
     </ol>
     <div class="row"><select id="device" aria-label="Microphone"></select></div>
     <label class="check"><input type="checkbox" id="always"> Record continuously (ignore the host's start/stop)</label>
@@ -82,11 +82,14 @@
   </section>
 
   <section class="card hidden" id="runCard">
-    <div class="row" style="margin-top:0">
-      <button class="ghost" id="pauseBtn">Pause my mic</button>
-      <button class="ghost" id="stopBtn">Stop</button>
-    </div>
-    <p class="small" id="micName" style="margin:10px 0 0"></p>
+    <p class="small" id="micName" style="margin:0"></p>
+    <details id="opts" style="margin-top:10px">
+      <summary class="small" style="cursor:pointer">Options (you never need these)</summary>
+      <div class="row" style="margin-top:10px">
+        <button class="ghost" id="pauseBtn">Pause my mic</button>
+        <button class="ghost" id="stopBtn">Stop</button>
+      </div>
+    </details>
     <div class="stats">
       <div>Recorded <b id="sRec">0:00</b></div>
       <div>Uploaded <b id="sUp">0</b> chunks</div>
@@ -109,6 +112,16 @@
   const CLOCK_RESYNC_MS = 10 * 60 * 1000;
   const DB_NAME = "r6rec", STORE = "chunks";
   const LS_TOKEN = "r6rec.token", LS_DEVICE = "r6rec.device", LS_MIC = "r6rec.mic";
+  const LS_AUTO = "r6rec.auto", LS_ALWAYS = "r6rec.always";   // set by the first manual Start: later opens start by themselves
+  // Nobody here is asked to pick a microphone or press anything. When the one in use sends only zeros, other
+  // real microphones are tried in turn and the first that carries sound is kept (and remembered).
+  const HEAL_TRY_MS = 4500;                  // how long each candidate gets to prove it carries sound
+  const HEAL_MAX_TRIES = 4;
+  const HEAL_RETRY_MS = 5 * 60 * 1000;       // after a search that found nothing, look again this much later
+  // Never used as "the player's microphone": things that hear the whole room or carry the computer's own sound.
+  const MIC_SKIP = /camera|webcam|stereo mix|loopback|virtual|cable|voicemeeter|steam streaming|what u hear|line out|speaker|output|obs|nvidia|broadcast|array/i;
+  const MIC_PREFER = [/head ?set/i, /head ?phone|ear ?phone|ear ?bud/i, /wireless|bluetooth/i, /usb/i, /micro/i];
+  const MIC_ALIAS = /^(default|communications)\s*-\s*/i;     // Chrome's duplicate entries for whichever device is the default
   const ALIVE_PEAK = 0.003;                  // below this the mic is effectively digital silence (muted / dead)
   const SILENT_WARN_MS = 30 * 1000;
   // A working microphone always has some noise of its own; samples that are exactly (or almost exactly) zero
@@ -141,6 +154,7 @@
     buf: [], bufSamples: 0, haveT0: false, totalSamples: 0,
     uploaded: 0, queued: 0,
     level: 0, lastAliveAt: 0, lastSoundAt: 0, micLabel: "", micNote: "", fatal: "",
+    healing: false, healAfter: 0, healedTo: "", healFailed: false, needsTap: false, autoStarted: false,
     wakeLock: null, db: null, flushing: false, authFailed: false, online: true,
   };
   if (!S.deviceId) { S.deviceId = hex(8); ls.set(LS_DEVICE, S.deviceId); }
@@ -402,6 +416,7 @@
       since: (S.recording && S.haveT0) ? Math.round(S.cycleStartEpoch) : null,
       uploads_waiting: S.queued, uploaded: S.uploaded, level: +S.level.toFixed(3),
       mic_ok: S.started ? (performance.now() - S.lastAliveAt < SILENT_WARN_MS && performance.now() - S.lastSoundAt < DEAD_MS) : null,
+      mic: S.started ? S.micLabel : null, mic_healed: S.healedTo || null, needs_tap: S.needsTap || null,
       clock: +S.clockOffset.toFixed(2),
     };
     try {
@@ -454,8 +469,8 @@
     throw new Error("This browser couldn't set up audio capture.");
   }
 
-  async function openMic() {
-    const id = $("device").value;
+  async function openMic(forceId) {
+    const id = forceId !== undefined ? forceId : $("device").value;
     // Raw like R6Voice: echo cancellation / noise suppression / auto-gain mangle speech for Whisper, and
     // echo cancellation would also duck the headset's own playback.
     const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
@@ -474,6 +489,64 @@
     S.lastAliveAt = performance.now();
     S.lastSoundAt = performance.now();
     S.micLabel = (S.stream.getAudioTracks()[0] && S.stream.getAudioTracks()[0].label) || "";
+  }
+
+  // Which microphones are worth trying next, best first: the system default (a different default is the most
+  // common cure), then by how much the name says "this is a headset". Anything already tried, or sharing a
+  // physical device with something already tried, is left out.
+  function micCandidates(devs, deadIds, deadGroups) {
+    const ok = devs.filter((d) => d.kind === "audioinput" && d.deviceId !== "communications"
+      && !deadIds.has(d.deviceId) && !(d.groupId && deadGroups.has(d.groupId))
+      && !MIC_SKIP.test((d.label || "").replace(MIC_ALIAS, "")));
+    const score = (d) => { const i = MIC_PREFER.findIndex((p) => p.test(d.label || "")); return i < 0 ? MIC_PREFER.length : i; };
+    return ok.filter((d) => d.deviceId === "default").concat(
+      ok.filter((d) => d.deviceId !== "default").sort((a, b) => score(a) - score(b) || (a.label || "").localeCompare(b.label || "")));
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const currentMicId = () => (S.stream && S.stream.getAudioTracks()[0] && S.stream.getAudioTracks()[0].getSettings().deviceId) || $("device").value || "default";
+
+  // The microphone in use sends only zeros: try the other real ones, one at a time, and keep the first that
+  // carries sound. If none does, the original is put back and the search repeats a few minutes later, so
+  // whoever sits at this PC is never asked to do anything.
+  async function healMic() {
+    if (S.healing || !S.started) return;
+    S.healing = true;
+    const original = currentMicId();
+    const deadIds = new Set([original]), deadGroups = new Set();
+    try {
+      let devs = [];
+      try { devs = await navigator.mediaDevices.enumerateDevices(); } catch (e) {}
+      const here = devs.find((d) => d.deviceId === original);
+      if (here && here.groupId) deadGroups.add(here.groupId);
+      const options = micCandidates(devs, deadIds, deadGroups).slice(0, HEAL_MAX_TRIES);
+      for (const d of options) {
+        if (!S.started) return;
+        try { await openMic(d.deviceId); } catch (e) { continue; }
+        const since = S.lastSoundAt;
+        await sleep(HEAL_TRY_MS);
+        if (!S.started) return;
+        if (S.lastSoundAt > since) {
+          S.healedTo = S.micLabel || d.label || "another microphone"; S.healFailed = false;
+          ls.set(LS_MIC, d.deviceId);
+          await listMics();
+          return;
+        }
+        deadIds.add(d.deviceId); if (d.groupId) deadGroups.add(d.groupId);
+      }
+      if (options.length && S.started) {
+        try { await openMic(original); } catch (e) { reacquireMic("The microphone was lost while looking for a working one."); }
+      }
+      S.healFailed = true;
+    } finally {
+      S.healing = false;
+      S.healAfter = performance.now() + HEAL_RETRY_MS;
+      render();
+    }
+  }
+  function watchMic() {
+    if (!S.started || S.paused || S.fatal || S.healing || reacquiring) return;
+    if (performance.now() - S.lastSoundAt <= DEAD_MS || performance.now() < S.healAfter) return;
+    healMic();
   }
 
   let reacquiring = false;
@@ -500,20 +573,31 @@
   }
 
   // ───────── buttons ─────────
-  async function start() {
+  async function start(auto) {
     $("startBtn").disabled = true; S.fatal = ""; S.micNote = "";
     try {
       S.always = $("always").checked;
-      await openMic();
+      try { await openMic(); }
+      catch (e) {
+        // A remembered microphone that isn't plugged in today: fall back to the computer's default, unattended.
+        if (auto === true && e && (e.name === "NotFoundError" || e.name === "OverconstrainedError")) await openMic("");
+        else throw e;
+      }
       await listMics();
-      S.started = true; S.paused = false;
+      S.started = true; S.paused = false; S.healFailed = false; S.healAfter = 0; S.healedTo = "";
+      S.autoStarted = auto === true; S.needsTap = false;
+      ls.set(LS_AUTO, "1"); ls.set(LS_ALWAYS, S.always ? "1" : "0");     // from now on, opening the link is enough
       $("pauseBtn").textContent = "Pause my mic";
       takeWakeLock();
       $("setupCard").classList.add("hidden"); $("runCard").classList.remove("hidden");
       heartbeat();
+      // A browser may keep the audio engine suspended until the page has been touched; if so, ask for one tap.
+      if (S.ctx && S.ctx.state !== "running") { try { await S.ctx.resume(); } catch (e) {} }
+      if (S.ctx && S.ctx.state !== "running") S.needsTap = true;
     } catch (e) {
       $("startBtn").disabled = false;
       const name = e && e.name;
+      if (auto === true) { S.needsTap = true; S.fatal = ""; S.micNote = ""; render(); return; }     // nobody to ask: wait for a tap
       S.fatal = name === "NotAllowedError"
         ? "The browser blocked the microphone. Click the lock icon in the address bar, allow the microphone, then press Start again."
         : name === "NotFoundError" || name === "OverconstrainedError" ? "That microphone wasn't found. Plug in your headset (or pick another one) and press Start again."
@@ -551,21 +635,30 @@
     // what shows on the taskbar when the page is minimized.
     const dead = S.started && !S.paused && !S.fatal && performance.now() - S.lastSoundAt > DEAD_MS;
     $("micName").textContent = S.started && S.micLabel ? "Using: " + S.micLabel : "";
-    const wantTitle = dead ? "⚠ MIC SILENT - " + TITLE : TITLE;
+    const searching = S.healing;
+    const wantTitle = dead && !searching ? "⚠ MIC SILENT - " + TITLE : TITLE;
     if (document.title !== wantTitle) document.title = wantTitle;
-    banner("bannerBad", S.fatal || (dead
-      ? "Your microphone is not sending any sound at all, so nothing useful is being recorded. Press Stop, pick the headset you use for Discord in the list, press Start, and say something: the green bar must move."
+    banner("bannerBad", S.fatal || (dead && !searching
+      ? (S.healFailed
+        ? "No microphone on this computer is sending any sound, so nothing useful is being recorded. Check that the headset is plugged in and its mute switch is off. This page keeps looking by itself; tell the host if it stays like this."
+        : "Your microphone is not sending any sound at all, so nothing useful is being recorded. Looking for one that works...")
       : ""));
     const ratio = audioRatio();
     const slow = ratio !== null && (ratio < RATIO_OK[0] || ratio > RATIO_OK[1]);
     banner("bannerWarn", S.micNote
+      || (S.needsTap ? "Click anywhere on this page once to finish starting the recording (your browser wants one touch)." : "")
+      || (searching ? "Your microphone isn't sending sound: looking for one that works..." : "")
+      || (S.healedTo && !dead ? "Your microphone wasn't sending sound, so this page switched to \"" + S.healedTo + "\" by itself." : "")
       || (slow ? "This computer is delivering your microphone audio at " + Math.round(ratio * 100) + "% of normal speed, so the recording won't line up with the match. Tell the host; closing other programs that use audio, or using Chrome or Edge, may help." : "")
       || (silent ? "Your mic has been silent for a while. Check it isn't muted and that the right headset is selected." : "")
       || (!S.online ? "Can't reach the server - your audio is being kept safely and uploads when it's back." : ""));
 
     if (S.authFailed) return setState("bad", "This link doesn't work any more", "Ask the host for a new invite link.");
+    if (!S.started && S.needsTap) return setState("warn", "One click needed", "Click anywhere on this page to start the recording.");
     if (!S.started) return setState("", "Ready", S.queued ? S.queued + " recorded chunks are still to upload - press Start to continue." : "Press Start when you're at your computer.");
     if (S.paused) return setState("warn", "Mic paused", "Nothing is recorded until you resume.");
+    if (searching) return setState("warn", "Looking for a microphone that works", "Your microphone sent nothing; trying the others on this computer.");
+    if (S.needsTap) return setState("warn", "One click needed", "Click anywhere on this page to finish starting.");
     if (dead) return setState("bad", "Your mic is silent", S.recording ? "The host's session is running but your mic is sending nothing." : "Fix this before the session starts.");
     if (S.recording) return setState("rec", "Recording", S.always ? "Recording continuously." : "The host's session is running.");
     setState("ok", "Waiting for the host to start a match", "Nothing is recorded yet. Keep this tab open.");
@@ -602,9 +695,19 @@
     $("setupCard").classList.remove("hidden");
     await listMics();
     if (navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener("devicechange", listMics);
-    $("startBtn").onclick = start; $("stopBtn").onclick = stop; $("pauseBtn").onclick = togglePause;
+    $("startBtn").onclick = () => start(); $("stopBtn").onclick = stop; $("pauseBtn").onclick = togglePause;
+    $("always").checked = ls.get(LS_ALWAYS) === "1";
+    // Some browsers keep the audio engine (or the permission prompt) waiting for one touch of the page. Any
+    // touch finishes the job, so nobody has to find a particular button.
+    const tap = () => {
+      if (!S.needsTap || $("startBtn").disabled) return;
+      if (!S.started) start();
+      else if (S.ctx) S.ctx.resume().then(() => { if (S.ctx.state === "running") { S.needsTap = false; render(); } }, () => {});
+    };
+    for (const ev of ["pointerdown", "keydown", "touchstart"]) document.addEventListener(ev, tap, { passive: true });
     setInterval(heartbeat, HEARTBEAT_MS);
     setInterval(render, 500);
+    setInterval(watchMic, 2000);
     setInterval(() => { if (S.started) takeWakeLock(); }, 30000);
     setInterval(() => { if (S.started) syncClock(3, true); }, CLOCK_RESYNC_MS);
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.started) takeWakeLock(); });
@@ -614,6 +717,15 @@
     window.addEventListener("beforeunload", (e) => { if ((S.started && S.recording) || S.queued > 0) { e.preventDefault(); e.returnValue = ""; } });
     flushQueue();                                       // anything left over from a closed tab goes up first
     heartbeat();
+    if (ls.get(LS_AUTO) === "1") autoStart();           // pressed Start once on this browser: opening the link is enough from now on
+  }
+
+  async function autoStart() {
+    let perm = "unknown";
+    try { perm = (await navigator.permissions.query({ name: "microphone" })).state; } catch (e) {}
+    // Asking while the permission is undecided would put a prompt in front of nobody; wait for a touch instead.
+    if (perm === "denied" || perm === "prompt") { S.needsTap = true; render(); return; }
+    await start(true);
   }
   boot();
 
@@ -621,7 +733,8 @@
   window.__r6rec = { get: () => ({ started: S.started, recording: S.recording, uploaded: S.uploaded, queued: S.queued,
     username: S.username, rate: S.ctx && S.ctx.sampleRate, clockOffset: S.clockOffset, fatal: S.fatal, auth: S.authFailed,
     dead: S.started && !S.paused && performance.now() - S.lastSoundAt > DEAD_MS, mic: S.micLabel, title: document.title,
-    ratio: audioRatio() }),
+    ratio: audioRatio(), healing: S.healing, healed: S.healedTo, healFailed: S.healFailed, needsTap: S.needsTap,
+    autoStarted: S.autoStarted, ctx: S.ctx ? S.ctx.state : null }),
     // Test-only: pretend `sec` seconds of audio went missing from this recording (e2e_silent_mic.py uses it,
     // because a fake microphone always delivers in perfect real time).
     testLoseAudio: (sec) => { S.cycleSamples = Math.max(0, S.cycleSamples - Math.round(sec * SR)); } };

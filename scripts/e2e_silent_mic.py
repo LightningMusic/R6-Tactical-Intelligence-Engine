@@ -76,11 +76,13 @@ def main() -> int:
             # Nothing is recording yet (the host hasn't started): the warning must already be there.
             ok = wait_for(lambda: state()["dead"], 15, "dead-mic detection")
             check(bool(ok), "the page detects a mic that sends nothing, before any session has started")
-            wait_for(lambda: "not sending any sound" in page.inner_text("#bannerBad"), 5, "the banner (the page redraws twice a second)")
+            # The page now looks for another microphone by itself first (every fake device here plays the same
+            # silence), then says that nothing on the PC works. Wait for that verdict.
+            wait_for(lambda: state()["healFailed"] and not state()["healing"], 60, "the page finishing its search for another microphone")
+            wait_for(lambda: "sending any sound" in page.inner_text("#bannerBad"), 15, "the banner (the page redraws twice a second)")
             time.sleep(0.6)
-            check("not sending any sound" in page.inner_text("#bannerBad"), "a red banner explains it and what to do")
-            check("Pick the headset" in page.inner_text("#bannerBad") or "pick the headset" in page.inner_text("#bannerBad"),
-                  "the banner tells them to pick the Discord headset")
+            check("sending any sound" in page.inner_text("#bannerBad"), "a red banner explains it: " + page.inner_text("#bannerBad")[:80])
+            check("mute switch" in page.inner_text("#bannerBad"), "and tells them what to check")
             check("silent" in page.inner_text("#headline").lower(), "the headline says the mic is silent")
             check(state()["title"].startswith("⚠"), "the tab title carries the warning (visible when minimized): " + state()["title"])
             check("Using:" in page.inner_text("#micName"), "the page shows which microphone is in use: " + page.inner_text("#micName"))

@@ -193,6 +193,7 @@ def main() -> int:
             print("\n[5] pause, then revoke")
             control(True)
             wait_for(lambda: state()["recording"], 12, "recording for pause test")
+            page.click("#opts > summary")                              # the buttons live under "Options" now (nobody needs them)
             page.click("#pauseBtn")
             wait_for(lambda: not state()["recording"], 8, "pause stops recording")
             check("paused" in page.inner_text("#headline").lower(), "page says the mic is paused")
