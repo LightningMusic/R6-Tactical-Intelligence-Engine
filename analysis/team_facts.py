@@ -208,6 +208,67 @@ def opening_counts(events: dict[int, dict]) -> dict[str, dict[str, int]]:
     return out
 
 
+# ── this match against the team's own usual ───────────────────────────────
+
+USUAL_MIN_MATCHES = 3        # earlier matches needed before "your usual" means anything
+USUAL_MIN_ROUNDS = 20
+USUAL_MIN_THIS_ROUNDS = 4    # a one- or two-round package says nothing about how a night went
+
+
+def match_record(match: Any, ours: Optional[set[str]], events: dict[int, dict]) -> dict[str, int]:
+    """The counts one match adds to (or is compared with) the team's usual."""
+    table = player_table(match, ours)
+    team = team_totals(table)
+    op = opening_summary(match, events)
+    return {
+        "rounds": len(match.rounds), "won": sum(1 for r in match.rounds if r.outcome == "win"),
+        "fk": op["first_kill_rounds"], "fk_won": op["first_kill_wins"],
+        "conc": op["conceded_rounds"], "conc_won": op["conceded_wins"],
+        "k": team["k"], "d": team["d"],
+        "player_rounds": sum(r["rounds"] for r in table.values()),
+        "survived": sum(r["survived"] for r in table.values()),
+    }
+
+
+def usual_baseline(records: Iterable[Optional[dict[str, int]]]) -> Optional[dict[str, int]]:
+    """Totals over the earlier matches, or None when there are too few to call anything usual."""
+    recs = [r for r in records if r and r["rounds"] >= USUAL_MIN_THIS_ROUNDS]
+    if len(recs) < USUAL_MIN_MATCHES or sum(r["rounds"] for r in recs) < USUAL_MIN_ROUNDS:
+        return None
+    out = {k: sum(r[k] for r in recs) for k in recs[0]}
+    out["matches"] = len(recs)
+    return out
+
+
+def usual_lines(this: Optional[dict[str, int]], base: Optional[dict[str, int]]) -> list[str]:
+    """How this match compares with the team's earlier ones, as plain lines. Empty when there is no
+    fair comparison (too few earlier matches, or this one is too short)."""
+    if not this or not base or this["rounds"] < USUAL_MIN_THIS_ROUNDS:
+        return []
+    out: list[str] = []
+    n, b = this["fk"] + this["conc"], base["fk"] + base["conc"]
+    if n >= 3 and b >= 10:
+        here, usual = this["fk"] / n, base["fk"] / b
+        out.append(f"- First kill: we got it in {this['fk']} of {n} rounds ({here:.0%}), "
+                   f"{band_points(here, usual).lower()} your usual {usual:.0%} over {base['matches']} earlier matches.")
+        if base["fk"] >= 5 and base["conc"] >= 5:
+            out.append(f"- What the first kill is worth to this team: in your earlier matches you won "
+                       f"{base['fk_won'] / base['fk']:.0%} of the rounds where you got it and "
+                       f"{base['conc_won'] / base['conc']:.0%} of the rounds where they did"
+                       + (f". Here: {this['fk_won']} of {this['fk']} and {this['conc_won']} of {this['conc']}."
+                          if this["fk"] and this["conc"] else
+                          f". Here: {this['fk_won']} of {this['fk']} when we got it." if this["fk"] else
+                          f". Here: {this['conc_won']} of {this['conc']} when they got it."))
+    if this["player_rounds"] >= 10 and base["player_rounds"] >= 30:
+        here, usual = this["survived"] / this["player_rounds"], base["survived"] / base["player_rounds"]
+        out.append(f"- Staying alive: players lived through {here:.0%} of their rounds, "
+                   f"{band_points(here, usual).lower()} your usual {usual:.0%}.")
+    if this["d"] and base["d"]:
+        here, usual = _kd(this["k"], this["d"]), _kd(base["k"], base["d"])
+        out.append(f"- Team K/D {here:.2f}, {band_ratio(here, usual).lower()} your usual {usual:.2f}.")
+    return out
+
+
 # ── objective play, utility and operators ─────────────────────────────────
 
 HARD_BREACH = {"thermite", "hibana", "ace", "maverick"}
@@ -696,8 +757,10 @@ def focus_points(match: Any, facts: dict[str, Any]) -> str:
 # ── bundle for the match prompt ───────────────────────────────────────────
 
 def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, dict],
-                      display: dict[str, str], report_players: Optional[set[str]] = None) -> dict[str, Any]:
-    """`ours`: our whole team (team numbers). `report_players`: who is listed by name (the saved team list)."""
+                      display: dict[str, str], report_players: Optional[set[str]] = None,
+                      usual: Optional[dict[str, int]] = None) -> dict[str, Any]:
+    """`ours`: our whole team (team numbers). `report_players`: who is listed by name (the saved team list).
+    `usual`: totals over the team's earlier matches (usual_baseline), when there are enough."""
     table = player_table(match, ours)
     team = team_totals(table)
     opening = opening_summary(match, events)
@@ -728,6 +791,7 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
         "team": team,
         "round_patterns": round_patterns(match),
         "round_kda": round_kda(match, ours),
+        "usual_lines": usual_lines(match_record(match, ours, events), usual) if ours else [],
         "opening": opening,
         "opening_lines": opening_lines(opening),
         "clutches": clutch_lines(events, ours, display),
@@ -760,6 +824,7 @@ def assemble_report(model_text: str, facts: dict[str, Any], focus: str) -> str:
     sections = [
         ("MATCH SUMMARY", section_body(model_text, "MATCH SUMMARY")),
         ("ROUND PATTERNS", facts["round_patterns"]),
+        ("COMPARED WITH YOUR USUAL", "\n".join(facts.get("usual_lines") or [])),
         ("OBJECTIVE PLAY", objective),
         ("UTILITY & OPERATORS", "\n".join(utility)),
         ("WHAT TO FOCUS ON NEXT", focus),

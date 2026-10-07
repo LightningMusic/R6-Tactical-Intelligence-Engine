@@ -573,6 +573,30 @@ class IntelEngine:
             }
         return out
 
+    def _team_usual(self, repo, match_id: int) -> Optional[dict]:
+        """Totals over every OTHER stored match whose team is known, so a night can be judged against the
+        team's own normal. None when there are too few to call anything usual (or on any trouble: this is a
+        nicety, never a reason to fail a debrief)."""
+        from analysis import team_facts
+        try:
+            with repo.db.get_connection() as conn:
+                ids = [r[0] for r in conn.execute("SELECT match_id FROM matches WHERE match_id != ?", (match_id,))]
+                teams = {r[0]: r[1] for r in conn.execute(
+                    "SELECT match_id, metric_text FROM derived_metrics "
+                    "WHERE metric_name = 'our_players' AND metric_text IS NOT NULL")}
+        except Exception:
+            return None
+        records = []
+        for mid in ids:
+            try:
+                names = team_facts.ours_set(json.loads(teams[mid])) if mid in teams else None
+                other = repo.get_match_full(mid) if names else None
+                if other is not None and other.rounds:
+                    records.append(team_facts.match_record(other, names, self._get_round_events(mid)))
+            except Exception:
+                continue
+        return team_facts.usual_baseline(records)
+
     def analyze_match(
         self,
         match_id: int,
@@ -592,7 +616,8 @@ class IntelEngine:
         ours    = self._resolve_ours(repo, match_id, match, our_players)
         display = {str(k).lower(): v for k, v in (display_names or {}).items()}
         facts   = (team_facts.build_match_facts(match, ours, self._get_round_events(match_id), display,
-                                                report_players=team_facts.ours_set(report_players))
+                                                report_players=team_facts.ours_set(report_players),
+                                                usual=self._team_usual(repo, match_id))
                    if ours else None)
         if facts:
             facts["comms_counts"] = self._comms_counts(repo, match_id)
@@ -1024,6 +1049,8 @@ class IntelEngine:
             )
             for line in facts["opening_lines"]:
                 team_metrics_text += f"  {line}\n"
+            for line in facts.get("usual_lines") or []:
+                team_metrics_text += f"  {line.lstrip('- ')}\n"
             for line in facts.get("objective_lines", [])[:2]:
                 team_metrics_text += f"  {line.lstrip('- ')}\n"
             u = facts.get("utility") or {}
