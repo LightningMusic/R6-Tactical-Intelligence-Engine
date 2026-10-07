@@ -55,12 +55,17 @@ class App:
         self.big.pack(anchor="w")
         self.why = ttk.Label(top, text="", style="Muted.TLabel")
         self.why.pack(anchor="w", pady=(2, 8))
-        row = ttk.Frame(top, style="Card.TFrame")
-        row.pack(fill="x")
+        # Nobody here ever needs these: the host starts and stops everything. They live behind "Advanced" so
+        # that "Stop now" can't be pressed by accident (it holds until the host next changes the team state).
+        self.advanced = ttk.Frame(top, style="Card.TFrame")
+        row = ttk.Frame(self.advanced, style="Card.TFrame")
+        row.pack(fill="x", pady=(6, 0))
         for text, cmd in (("Start now", lambda: self.comp.set_manual(True)),
                           ("Stop now", lambda: self.comp.set_manual(False)),
                           ("Follow team", lambda: self.comp.set_manual(None))):
             ttk.Button(row, text=text, command=cmd).pack(side="left", padx=(0, 6))
+        self.adv_btn = ttk.Button(top, text="Advanced", command=self.toggle_advanced)
+        self.adv_btn.pack(anchor="w")
 
         setup = ttk.Frame(outer, style="Card.TFrame", padding=12)
         setup.pack(fill="x", pady=(10, 0))
@@ -75,8 +80,9 @@ class App:
         ttk.Button(setup, text="Use", command=self.save_mic).grid(row=1, column=2)
         self.mics: list[tuple[str, str]] = []
         self.mic_misses = 0
-        ttk.Label(setup, text="Pick the headset you use for Discord. The list fills in once recording has started "
-                              "(press Start now to test: within a minute this window tells you if your mic is silent).",
+        ttk.Label(setup, text="Nothing to do here once it is set up: the host starts and stops the recording, and if "
+                              "your microphone delivers nothing this finds one that works by itself. (The list "
+                              "fills in once recording has started.)",
                   style="Muted.TLabel", wraplength=420, justify="left").grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
         if not credentials.SERVER_URL:
             self.url = tk.StringVar(value=self.comp.settings.get("server_url", ""))
@@ -108,6 +114,12 @@ class App:
         key = credentials.VOICE_TOKEN or s.get("voice_token", "")
         return {"server_url": url.rstrip("/"), "voice_token": key}
 
+    def toggle_advanced(self) -> None:
+        if self.advanced.winfo_ismapped():
+            self.advanced.pack_forget()
+        else:
+            self.advanced.pack(fill="x", before=self.adv_btn)
+
     def save_name(self) -> None:
         name = self.name.get().strip()
         if len(name) < 2:
@@ -119,7 +131,7 @@ class App:
     def save_mic(self) -> None:
         pick = next((d for d, n in self.mics if n == self.mic.get()), None)
         if pick is not None:
-            self.comp.save_settings(mic_device=pick)
+            self.comp.save_settings(mic_device=pick, mic_name=self.mic.get())
             self.log(f"Microphone: {self.mic.get()} (used from the next recording)")
 
     def save_server(self) -> None:
@@ -140,9 +152,13 @@ class App:
             big = f"● Recording  {secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d}"
             why = "Started on this PC (Start now)." if c.manual else "Following the team -- stops when the main app stops."
             color = RED
-            if c.mic_ok is False:
-                why = ("⚠ Your microphone is delivering only silence. Check the headset's mute switch, and pick the "
-                       "headset you use for Discord in the Microphone list, then press Use.")
+            if c._healing:
+                why = "Your microphone isn't sending sound: looking for one that works..."
+            elif c.mic_ok is False:
+                why = ("⚠ No microphone on this PC is delivering sound. Is the headset's mute switch on, or is it "
+                       "unplugged? (Tell the host.)")
+            elif c.mic_healed and c.mic_ok:
+                why += f"  Microphone: {c.mic_healed}."
             elif c.mic_ok is None and secs < 60:
                 why += "  Checking your microphone..."
         elif c.wanted():
@@ -175,7 +191,7 @@ class App:
                     self.mic.set("(OBS lists no microphones on this PC)" if self.mic_misses > 20
                                  else "(looking for microphones...)")
             else:
-                self.mic.set("(appears once OBS starts: press Start now)")
+                self.mic.set("(appears once the recording starts)")
         self.root.after(500, self.refresh)
 
     def on_close(self) -> None:

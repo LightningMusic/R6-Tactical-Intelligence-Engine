@@ -107,6 +107,7 @@ class ObsLink:
         self.ws = None
         self.set_up = False
         self.mic_device = "default"
+        self.mic_name = ""                  # remembered by name: ids differ from PC to PC, a headset's name doesn't
         self.last_error = ""
         self.split_minutes = 5
 
@@ -248,6 +249,7 @@ class ObsLink:
             else:
                 self.call(R.SetInputSettings(inputName=MIC, inputSettings={"device_id": self.mic_device},
                                              overlay=True))
+            self._use_remembered_mic()
             special = self.call(R.GetSpecialInputs()).datain or {}
             for key in ("desktop1", "desktop2", "mic1", "mic2", "mic3", "mic4"):
                 if special.get(key):
@@ -265,6 +267,28 @@ class ObsLink:
         except Exception as e:
             self.last_error = f"OBS setup failed: {e}"
             return False
+
+    def set_mic(self, device_id: str) -> bool:
+        """Point OBS's microphone at another device, in the middle of a recording if need be."""
+        from obswebsocket import requests as R
+        try:
+            self.call(R.SetInputSettings(inputName=MIC, inputSettings={"device_id": device_id}, overlay=True))
+            self.mic_device = device_id
+            return True
+        except Exception:
+            return False
+
+    def _use_remembered_mic(self) -> None:
+        """A microphone chosen (or found) on another PC is remembered by name; use the same-named device here."""
+        if not self.mic_name:
+            return
+        try:
+            from mic_pick import find_by_name
+            hit = find_by_name(self.microphones(), self.mic_name)
+            if hit and hit[0] != self.mic_device:
+                self.set_mic(hit[0])
+        except Exception:
+            pass
 
     def microphones(self) -> list[tuple[str, str]]:
         """(device_id, name) of every mic OBS can see, "default" first."""

@@ -94,6 +94,17 @@ class FakeObs:
     def __init__(self):
         self.ws, self.rec, self.starts, self.stops, self.fail_connect = None, False, 0, 0, False
         self.last_error, self.mic_device, self.set_up = "", "default", False
+        self.mic_name = ""
+        self.mics = []                 # [(device id, name)] this PC's microphones, as OBS would list them
+        self.set_mic_calls = []
+
+    def microphones(self):
+        return list(self.mics)
+
+    def set_mic(self, device_id):
+        self.set_mic_calls.append(device_id)
+        self.mic_device = device_id
+        return True
 
     def running(self):
         return self.ws is not None
@@ -432,11 +443,69 @@ def recording_now(comp, monkeypatch, peaks, seconds_in=100.0):
 def test_a_microphone_that_delivers_only_zeros_is_reported(comp, monkeypatch):
     now, calls = recording_now(comp, monkeypatch, [0.0])
     logs = []
-    comp.log = logs.append
+    comp.log = logs.append                                         # (no other microphones on this fake PC)
     assert comp.check_mic(now) is False
     assert comp.mic_ok is False and comp.mic_peak == 0.0
     assert comp.status()["mic_ok"] is False                        # goes to the host with the next check-in
-    assert len(logs) == 1 and "silence" in logs[0] and "mute switch" in logs[0]
+    assert "silence" in logs[0] and "mute switch" in logs[-1]
+
+
+def test_a_dead_microphone_is_replaced_by_one_that_works_without_anyone_doing_anything(comp, monkeypatch):
+    import core
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    now, calls = recording_now(comp, monkeypatch, [0.0, 0.0, 0.18])    # the one in use, the first spare, the second spare
+    comp.obs.mics = [("default", "Default"), ("{usb}", "Microphone (USB Live Camera audio)"),
+                     ("{a}", "Speakers (Loopback)"), ("{b}", "Headset Microphone (AWPRO H Wireless Chat)"),
+                     ("{c}", "Microphone (Realtek Audio)")]
+    comp.obs.mic_device = "{dead}"
+    logs = []
+    comp.log = logs.append
+    assert comp.check_mic(now) is True
+    # camera and loopback are never tried; the system default goes first, then the headset
+    assert comp.obs.set_mic_calls == ["default", "{b}"]
+    assert comp.mic_ok is True and comp.mic_healed == "Headset Microphone (AWPRO H Wireless Chat)"
+    assert comp.settings["mic_device"] == "{b}" and comp.settings["mic_name"].startswith("Headset Microphone")
+    assert comp.status()["mic_healed"].startswith("Headset") and comp.status()["mic_ok"] is True
+    assert any("Switched to another microphone automatically" in line for line in logs)
+
+
+def test_when_no_microphone_works_the_original_is_put_back_and_the_host_is_told(comp, monkeypatch):
+    import core
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    now, calls = recording_now(comp, monkeypatch, [0.0] * 6)
+    comp.obs.mics = [("default", "Default"), ("{b}", "Headset Microphone (X)"), ("{c}", "Microphone (Y)")]
+    comp.obs.mic_device = "{orig}"
+    logs = []
+    comp.log = logs.append
+    assert comp.check_mic(now) is False
+    assert comp.obs.set_mic_calls == ["default", "{b}", "{c}", "{orig}"]      # everything tried, then back where it was
+    assert comp.mic_ok is False and comp.status()["mic_ok"] is False
+    assert any("No microphone on this PC is delivering sound" in line for line in logs)
+    # and it doesn't hammer OBS: the next look is a few minutes away
+    assert comp._heal_after >= core.time.time() + core.MIC_HEAL_RETRY_SEC - 5
+
+
+def test_a_merely_quiet_microphone_is_flagged_but_never_swapped(comp, monkeypatch):
+    import core
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    now, calls = recording_now(comp, monkeypatch, [0.001])                     # noisy-floor quiet, not digital silence
+    comp.obs.mics = [("default", "Default"), ("{b}", "Headset Microphone (X)")]
+    assert comp.check_mic(now) is False and comp.obs.set_mic_calls == []
+
+
+def test_the_search_stops_when_the_recording_does(comp, monkeypatch):
+    import core
+    monkeypatch.setattr(core.time, "sleep", lambda s: setattr(comp, "recording", False))
+    now, calls = recording_now(comp, monkeypatch, [0.0, 0.5])
+    comp.obs.mics = [("default", "Default"), ("{b}", "Headset Microphone (X)")]
+    comp.obs.mic_device = "{orig}"
+    logs = []
+    comp.log = logs.append
+    comp.check_mic(now)
+    # the first candidate was set, the session ended before it was proven, so nothing is kept and the original is back
+    assert comp.obs.set_mic_calls == ["default", "{orig}"] and comp.mic_healed == ""
+    assert not comp.settings.get("mic_name")                                      # nothing saved
+    assert not any("No microphone on this PC" in line for line in logs)
 
 
 def test_a_working_microphone_is_not_flagged(comp, monkeypatch):

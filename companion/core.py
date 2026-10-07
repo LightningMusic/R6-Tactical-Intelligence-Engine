@@ -35,6 +35,7 @@ from typing import Callable, Optional
 import requests
 
 from audio_export import export_piece, measure_peak, recording_id, recording_start_epoch
+from mic_pick import candidates
 from obs_link import ObsLink
 
 TICK_SEC = 3.0
@@ -52,6 +53,13 @@ MIC_PROBE_AFTER_SEC = 40.0     # first look this long after recording starts (OB
 MIC_PROBE_EVERY_SEC = 60.0
 MIC_PROBE_WINDOW_SEC = 20.0
 MIC_SILENT_PEAK = 0.002        # a working mic's own noise is far above this
+# Teammates do nothing, so a microphone that delivers literally nothing is replaced automatically. Only digital
+# silence triggers it (a merely quiet mic is left alone), and a replacement must be clearly alive.
+MIC_DEAD_PEAK = 0.0003
+MIC_TRY_SEC = 14.0             # how long each alternative gets (OBS needs a moment to open a device)
+MIC_TRY_SKIP_SEC = 3.0
+MIC_MAX_TRIES = 4
+MIC_HEAL_RETRY_SEC = 300.0     # after a round that found nothing, look again this much later
 
 
 def in_use(path: Path) -> bool:
@@ -100,6 +108,7 @@ class Companion:
         self.obs = obs or ObsLink(base_dir / "OBS-Studio", self.rec_dir,
                                   self.settings["ws_port"], self.settings["ws_password"], log=log)
         self.obs.mic_device = self.settings.get("mic_device", "default")
+        self.obs.mic_name = self.settings.get("mic_name", "")
         if uploader is None:
             from uploader import Uploader
             uploader = Uploader(self.pending, self.get_server)
@@ -117,7 +126,10 @@ class Companion:
         self.exporting = ""
         self.mic_ok: Optional[bool] = None          # None = not checked yet; False = the mic delivered only silence
         self.mic_peak: Optional[float] = None
+        self.mic_healed = ""                        # name of the microphone found automatically, for the window
         self._mic_probe_at = 0.0
+        self._healing = False
+        self._heal_after = 0.0
         self._stop = False
         self._export_lock = threading.Lock()
 
@@ -143,6 +155,8 @@ class Companion:
         if "mic_device" in updates:
             self.obs.mic_device = updates["mic_device"]
             self.obs.set_up = False           # re-applied before the next recording
+        if "mic_name" in updates:
+            self.obs.mic_name = updates["mic_name"]
 
     # ── control ─────────────────────────────────────────────────────
 
@@ -182,7 +196,7 @@ class Companion:
                 "obs": self.obs_status, "mode": "manual" if self.manual is not None else "following",
                 "uploads_waiting": self.uploader.waiting(), "uploaded": self.uploader.sent,
                 "exporting": self.exporting, "free_gb": free_gb, "clock": time.time(),
-                "mic_ok": self.mic_ok, "mic_peak": self.mic_peak}
+                "mic_ok": self.mic_ok, "mic_peak": self.mic_peak, "mic_healed": self.mic_healed or None}
 
     def mic_check_due(self, now: Optional[float] = None) -> bool:
         now = time.time() if now is None else now
@@ -203,28 +217,76 @@ class Companion:
         if now - self.recording_since < MIC_PROBE_AFTER_SEC or now - self._mic_probe_at < MIC_PROBE_EVERY_SEC:
             return self.mic_ok
         self._mic_probe_at = now
-        try:
-            files = sorted((f for f in self.rec_dir.iterdir()
-                            if f.suffix.lower() in VIDEO_SUFFIXES and recording_start_epoch(f) is not None),
-                           key=lambda f: recording_start_epoch(f) or 0.0)
-            current = files[-1] if files else None
-            if current is None:
-                return self.mic_ok
-            elapsed = now - (recording_start_epoch(current) or now)
-            peak = measure_peak(self.ffmpeg, current, elapsed - MIC_PROBE_WINDOW_SEC - 5.0, MIC_PROBE_WINDOW_SEC)
-        except Exception:
-            return self.mic_ok
+        peak = self._peak_between(now - MIC_PROBE_WINDOW_SEC - 5.0, MIC_PROBE_WINDOW_SEC)
         if peak is None:
             return self.mic_ok
         self.mic_peak = round(peak, 4)
         was = self.mic_ok
         self.mic_ok = peak >= MIC_SILENT_PEAK
         if self.mic_ok is False and was is not False:
-            self.log("The microphone is delivering only silence. Check that the headset's mute switch is off and "
-                     "pick the headset you use for Discord in the Microphone list.")
+            self.log("The microphone is delivering only silence.")
         elif self.mic_ok and was is False:
             self.log("The microphone is picking up sound now.")
+        if peak < MIC_DEAD_PEAK and not self._healing and now >= self._heal_after:
+            self.heal_mic()
         return self.mic_ok
+
+    def _peak_between(self, start_epoch: float, seconds: float) -> Optional[float]:
+        """Loudest sample in a stretch of the recording OBS is writing right now (None = couldn't read it)."""
+        try:
+            files = sorted((f for f in self.rec_dir.iterdir()
+                            if f.suffix.lower() in VIDEO_SUFFIXES and recording_start_epoch(f) is not None),
+                           key=lambda f: recording_start_epoch(f) or 0.0)
+            if not files:
+                return None
+            current = files[-1]
+            return measure_peak(self.ffmpeg, current, start_epoch - (recording_start_epoch(current) or start_epoch), seconds)
+        except Exception:
+            return None
+
+    def heal_mic(self) -> bool:
+        """The microphone in use delivers only zeros: try the other real microphones OBS can see, one at a time,
+        and keep the first that carries sound. Teammates are never asked to do anything; the choice is saved
+        (by name, so it also works on another PC) and used from then on. If nothing works the original device
+        is put back and the host is told, so someone can look at the headset."""
+        self._healing = True
+        original = self.obs.mic_device
+        try:
+            try:
+                devices = self.obs.microphones()
+            except Exception:
+                devices = []
+            tried = [original]
+            options = candidates(devices, tried)[:MIC_MAX_TRIES]
+            if options:
+                self.log("Looking for a microphone that works...")
+            for dev_id, name in options:
+                if not self.recording:
+                    break
+                if not self.obs.set_mic(dev_id):
+                    continue
+                switched = time.time()
+                time.sleep(MIC_TRY_SEC)
+                if not self.recording:
+                    break                                   # the session ended mid-search: nothing was proven
+                peak = self._peak_between(switched + MIC_TRY_SKIP_SEC, MIC_TRY_SEC - MIC_TRY_SKIP_SEC - 1.0)
+                if peak is not None and peak >= MIC_SILENT_PEAK:
+                    self.save_settings(mic_device=dev_id, mic_name=name)
+                    self.obs.set_up = True                  # already applied; don't redo OBS's setup mid-recording
+                    self.mic_ok, self.mic_peak, self.mic_healed = True, round(peak, 4), name
+                    self.log(f"Switched to another microphone automatically: {name}.")
+                    return True
+            if options:
+                self.obs.set_mic(original)
+            if self.recording:
+                self.log("No microphone on this PC is delivering sound. Is the headset's mute switch on, or is it unplugged?")
+            return False
+        except Exception as e:
+            self.log(f"Microphone search failed: {e}")
+            return False
+        finally:
+            self._healing = False
+            self._heal_after = time.time() + MIC_HEAL_RETRY_SEC
 
     # ── OBS ─────────────────────────────────────────────────────────
 
