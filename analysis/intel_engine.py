@@ -831,7 +831,9 @@ class IntelEngine:
                 won_str = " (our advantage)" if fb_won else " (their advantage)"
                 lines.append(
                     f"    Opening kill: {label(fb_killer)} → {label(fb_victim)}"
-                    + (f" @ {fb_time:.0f}s" if fb_time is not None else "")
+                    # the clock on screen (time left), as the players saw it
+                    + (f" @ {(ev.get('kills') or [{}])[0].get('time')} on the clock"
+                       if fb_time is not None and (ev.get("kills") or [{}])[0].get("time") else "")
                     + won_str
                 )
 

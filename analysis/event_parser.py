@@ -93,8 +93,14 @@ class EventParser:
             else:
                 event_type = str(type_field or "")
 
+            # "time" is the CLOCK ON SCREEN: time LEFT in the round, and after a plant the defuser's
+            # 45 s countdown. Sorting by it put every round's kills roughly backwards, so the "first
+            # kill" was really the last one before the plant (found 2026-10-06 against a round the host
+            # remembered kill by kill). elapsedSeconds counts up from the start of prep, through the
+            # plant, so it is the one to order by.
             time_str = str(item.get("time") or item.get("timeInSeconds") or "0")
-            time_sec = _parse_time(time_str)
+            elapsed = item.get("elapsedSeconds")
+            time_sec = float(elapsed) if isinstance(elapsed, (int, float)) and elapsed > 0 else -1.0
 
             if event_type in KILL_TYPES:
                 killer   = str(item.get("username") or item.get("attacker") or "").strip()
@@ -126,8 +132,13 @@ class EventParser:
                     elapsed=float(item.get("elapsedSeconds") or 0.0),
                 ))
 
-        # Sort kills chronologically
-        kills.sort(key=lambda k: k.time_sec)
+        # Chronological order: by elapsed time when every kill has it; otherwise keep the feed's own
+        # order (r6-dissect writes it as it happened) and leave the timing unknown.
+        if kills and all(k.time_sec >= 0 for k in kills):
+            kills.sort(key=lambda k: k.time_sec)
+        else:
+            for k in kills:
+                k.time_sec = -1.0
         events.kills        = kills
         events.plant_events = plant_events
 
@@ -151,7 +162,7 @@ class EventParser:
 
         events.first_blood_killer = first.killer
         events.first_blood_victim = first.victim
-        events.first_blood_time   = first.time_sec
+        events.first_blood_time   = first.time_sec if first.time_sec >= 0 else None   # seconds since prep began
 
         # Opening duel won if our team got first blood
         events.opening_duel_won = (first.killer_team_index == self.our_team_index)
@@ -165,8 +176,8 @@ class EventParser:
         for i, kill in enumerate(events.kills):
             for j in range(i + 1, len(events.kills)):
                 later = events.kills[j]
-                if later.time_sec - kill.time_sec > TRADE_WINDOW_SEC:
-                    break
+                if kill.time_sec < 0 or later.time_sec - kill.time_sec > TRADE_WINDOW_SEC:
+                    break                  # (no timing known: no trades claimed)
                 # later.victim == kill.killer means the killer got killed shortly after
                 if later.victim == kill.killer:
                     kill.is_trade = True   # this kill was traded
@@ -319,8 +330,10 @@ class EventParser:
                 if kill.killer == clutch_candidate:
                     clutch_kills += 1
 
-        # We won and had a clutch scenario — record it
-        if clutch_candidate and clutch_kills >= 1:
+        # We won and had a clutch scenario — record it. Kills are not required: holding the last
+        # player alive and running out the clock wins a round too (2026-10-06, Nighthaven R4: 1v1
+        # against the last attacker until time ran out, missed because it took no kill).
+        if clutch_candidate:
             events.clutch_player     = clutch_candidate
             events.clutch_kill_count = clutch_kills
 
@@ -432,7 +445,7 @@ def format_events_for_prompt(events_by_round: dict[int, RoundEvents]) -> str:
             fb_note = " (opening duel WON)" if ev.opening_duel_won else " (opening duel LOST)"
             lines.append(
                 f"    First blood: {ev.first_blood_killer} → {ev.first_blood_victim}"
-                f" @ {ev.first_blood_time:.0f}s{fb_note}"
+                f" @ {ev.kills[0].time_str if ev.kills else '?'} on the clock{fb_note}"
             )
 
         if ev.kills:
@@ -442,7 +455,7 @@ def format_events_for_prompt(events_by_round: dict[int, RoundEvents]) -> str:
                 tr  = "TR" if k.is_trade  else ""
                 tag = " ".join(filter(None, [hs, tr]))
                 kf_parts.append(
-                    f"{k.killer}→{k.victim}@{k.time_sec:.0f}s"
+                    f"{k.killer}→{k.victim}@{k.time_str}"
                     + (f"[{tag}]" if tag else "")
                 )
             lines.append(f"    Kill feed: {', '.join(kf_parts)}")

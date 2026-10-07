@@ -191,8 +191,9 @@ def clutch_lines(events: dict[int, dict], ours: Optional[set[str]], display: dic
     for n in sorted(events):
         who = events[n].get("clutch_player") or ""
         if who and (ours is None or norm(who) in ours):
+            kills = int(events[n].get("clutch_kills") or 0)
             out.append(f"R{n:02d}: {display.get(norm(who), who)} won the round alone "
-                       f"({int(events[n].get('clutch_kills') or 0)} kill(s))")
+                       + (f"({kills} kill(s))" if kills else "(held on with no kill until the round was won)"))
     return out
 
 
