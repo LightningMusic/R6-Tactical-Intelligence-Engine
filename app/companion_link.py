@@ -111,7 +111,8 @@ class CompanionLink:
         if c.get("seconds_since_seen", 1e9) > 30:
             what = "browser recorder" if browser else "companion"
             return f"{label}: {what} not checking in (last seen {int(c['seconds_since_seen'] // 60)} min ago)"
-        silent = " -- mic looks silent, check headset" if browser and s.get("started") and s.get("mic_ok") is False else ""
+        live = s.get("started") if browser else s.get("recording")          # a browser reports it while waiting too
+        silent = " -- mic looks silent, check headset" if live and s.get("mic_ok") is False else ""
         # A companion can't see its own microphone, but the server can hear what it uploaded last time.
         last = c.get("last_recording") or {}
         if not silent and last.get("silent") and float(last.get("seconds") or 0) >= 60:

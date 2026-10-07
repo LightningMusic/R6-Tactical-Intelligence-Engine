@@ -34,7 +34,7 @@ from typing import Callable, Optional
 
 import requests
 
-from audio_export import export_piece, recording_id, recording_start_epoch
+from audio_export import export_piece, measure_peak, recording_id, recording_start_epoch
 from obs_link import ObsLink
 
 TICK_SEC = 3.0
@@ -45,6 +45,13 @@ CHAIN_TOLERANCE_SEC = 2.5     # a file starting this close to the previous one's
 STARTUP_SLACK_SEC = 8.0       # OBS's first file gets audio this long after it's named, at most
 KEEP_RECORDINGS_DAYS = 14
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov"}
+# Is the microphone actually delivering sound? Checked from the file OBS is writing, so it works for any device
+# without a second audio library. 2026-10-06: this PC's headset mic was opened fine by OBS but delivered only
+# zeros for 102 minutes, and nothing on screen or in the host's log said so until the recording was uploaded.
+MIC_PROBE_AFTER_SEC = 40.0     # first look this long after recording starts (OBS's first file needs a few seconds)
+MIC_PROBE_EVERY_SEC = 60.0
+MIC_PROBE_WINDOW_SEC = 20.0
+MIC_SILENT_PEAK = 0.002        # a working mic's own noise is far above this
 
 
 def in_use(path: Path) -> bool:
@@ -108,6 +115,9 @@ class Companion:
         self.current_file: Optional[Path] = None
         self.obs_status = "waiting"
         self.exporting = ""
+        self.mic_ok: Optional[bool] = None          # None = not checked yet; False = the mic delivered only silence
+        self.mic_peak: Optional[float] = None
+        self._mic_probe_at = 0.0
         self._stop = False
         self._export_lock = threading.Lock()
 
@@ -171,7 +181,50 @@ class Companion:
         return {"recording": self.recording, "since": self.recording_since,
                 "obs": self.obs_status, "mode": "manual" if self.manual is not None else "following",
                 "uploads_waiting": self.uploader.waiting(), "uploaded": self.uploader.sent,
-                "exporting": self.exporting, "free_gb": free_gb, "clock": time.time()}
+                "exporting": self.exporting, "free_gb": free_gb, "clock": time.time(),
+                "mic_ok": self.mic_ok, "mic_peak": self.mic_peak}
+
+    def mic_check_due(self, now: Optional[float] = None) -> bool:
+        now = time.time() if now is None else now
+        if not self.recording:
+            return self.mic_ok is not None            # one call to clear the last answer
+        return (now - self.recording_since >= MIC_PROBE_AFTER_SEC
+                and now - self._mic_probe_at >= MIC_PROBE_EVERY_SEC)
+
+    def check_mic(self, now: Optional[float] = None) -> Optional[bool]:
+        """While recording: is the microphone delivering anything? Looks at a short stretch of the file OBS is
+        writing and records the answer in `mic_ok` (sent to the host with every check-in). Never raises and
+        never changes OBS; an unreadable file leaves the last answer alone."""
+        now = time.time() if now is None else now
+        if not self.recording:
+            self.mic_ok = self.mic_peak = None
+            self._mic_probe_at = 0.0
+            return None
+        if now - self.recording_since < MIC_PROBE_AFTER_SEC or now - self._mic_probe_at < MIC_PROBE_EVERY_SEC:
+            return self.mic_ok
+        self._mic_probe_at = now
+        try:
+            files = sorted((f for f in self.rec_dir.iterdir()
+                            if f.suffix.lower() in VIDEO_SUFFIXES and recording_start_epoch(f) is not None),
+                           key=lambda f: recording_start_epoch(f) or 0.0)
+            current = files[-1] if files else None
+            if current is None:
+                return self.mic_ok
+            elapsed = now - (recording_start_epoch(current) or now)
+            peak = measure_peak(self.ffmpeg, current, elapsed - MIC_PROBE_WINDOW_SEC - 5.0, MIC_PROBE_WINDOW_SEC)
+        except Exception:
+            return self.mic_ok
+        if peak is None:
+            return self.mic_ok
+        self.mic_peak = round(peak, 4)
+        was = self.mic_ok
+        self.mic_ok = peak >= MIC_SILENT_PEAK
+        if self.mic_ok is False and was is not False:
+            self.log("The microphone is delivering only silence. Check that the headset's mute switch is off and "
+                     "pick the headset you use for Discord in the Microphone list.")
+        elif self.mic_ok and was is False:
+            self.log("The microphone is picking up sound now.")
+        return self.mic_ok
 
     # ── OBS ─────────────────────────────────────────────────────────
 
@@ -370,6 +423,8 @@ class Companion:
         last_export = time.time()
         while not self._stop:
             self.tick()
+            if self.mic_check_due():
+                self._in_background(self.check_mic)
             if time.time() - last_export >= EXPORT_EVERY_SEC:
                 last_export = time.time()
                 self._in_background(self.export_all)

@@ -414,6 +414,95 @@ def test_a_later_success_clears_the_error(_server_settings):
     assert link.set_recording(True) is True and link.last_error == ""
 
 
+# ── is the microphone actually delivering sound? (2026-10-06: a headset opened fine and delivered only zeros) ──
+
+def recording_now(comp, monkeypatch, peaks, seconds_in=100.0):
+    """A companion that has been recording for `seconds_in` s, whose file reads back as the given peaks in turn."""
+    import core
+    now = 1_800_000_000.0
+    comp.recording, comp.recording_since = True, now - seconds_in
+    name = time.strftime("%Y-%m-%d %H-%M-%S", time.localtime(now - seconds_in)) + ".mp4"
+    (comp.rec_dir / name).write_bytes(b"x")
+    answers = iter(peaks)
+    calls = []
+    monkeypatch.setattr(core, "measure_peak", lambda *a, **k: (calls.append(a), next(answers))[1])
+    return now, calls
+
+
+def test_a_microphone_that_delivers_only_zeros_is_reported(comp, monkeypatch):
+    now, calls = recording_now(comp, monkeypatch, [0.0])
+    logs = []
+    comp.log = logs.append
+    assert comp.check_mic(now) is False
+    assert comp.mic_ok is False and comp.mic_peak == 0.0
+    assert comp.status()["mic_ok"] is False                        # goes to the host with the next check-in
+    assert len(logs) == 1 and "silence" in logs[0] and "mute switch" in logs[0]
+
+
+def test_a_working_microphone_is_not_flagged(comp, monkeypatch):
+    now, calls = recording_now(comp, monkeypatch, [0.1])
+    assert comp.check_mic(now) is True and comp.status()["mic_ok"] is True
+
+
+def test_the_check_waits_for_obs_to_get_going_and_is_not_repeated_every_few_seconds(comp, monkeypatch):
+    now, calls = recording_now(comp, monkeypatch, [0.1, 0.1], seconds_in=20)
+    assert comp.mic_check_due(now) is False and comp.check_mic(now) is None and not calls     # too early
+    assert comp.mic_check_due(now + 30) is True                                                  # 50 s in
+    comp.check_mic(now + 30)
+    assert len(calls) == 1
+    assert comp.mic_check_due(now + 40) is False and comp.check_mic(now + 40) is True and len(calls) == 1
+    assert comp.mic_check_due(now + 95) is True                                                  # a minute later: again
+
+
+def test_a_file_that_cant_be_read_yet_is_unknown_not_silent(comp, monkeypatch):
+    now, calls = recording_now(comp, monkeypatch, [None])
+    assert comp.check_mic(now) is None and comp.mic_ok is None                                  # no false alarm
+    now2, _ = recording_now(comp, monkeypatch, [0.0, None], seconds_in=100)
+    comp.mic_ok = None
+    comp._mic_probe_at = 0.0
+    assert comp.check_mic(now2) is False
+    assert comp.check_mic(now2 + 70) is False and comp.mic_ok is False                           # an unreadable probe keeps the last answer
+
+
+def test_recovery_is_logged_and_stopping_clears_the_answer(comp, monkeypatch):
+    now, calls = recording_now(comp, monkeypatch, [0.0, 0.2])
+    logs = []
+    comp.log = logs.append
+    comp.check_mic(now)
+    comp.check_mic(now + 70)
+    assert comp.mic_ok is True and any("picking up sound now" in line for line in logs)
+    comp.recording = False
+    assert comp.mic_check_due(now + 80) is True                                                  # one call to clear it
+    comp.check_mic(now + 80)
+    assert comp.mic_ok is None and comp.mic_peak is None and comp.mic_check_due(now + 90) is False
+
+
+def test_the_host_log_tells_the_host_a_companions_mic_is_silent_while_it_records():
+    from app.companion_link import CompanionLink
+    c = {"username": "Comp_User", "seconds_since_seen": 3, "status": {"recording": True, "since": 0, "mic_ok": False}}
+    assert "mic looks silent" in CompanionLink.describe(c, now=600)
+    c["status"]["mic_ok"] = True
+    assert "silent" not in CompanionLink.describe(c, now=600)
+    c["status"].update(recording=False, mic_ok=False)                                            # not recording: nothing to say
+    assert "silent" not in CompanionLink.describe(c, now=600)
+
+
+@pytest.mark.skipif(not (Path(__file__).resolve().parent.parent / "ffmpeg.exe").exists(), reason="ffmpeg.exe not in the repo root")
+def test_measure_peak_hears_a_tone_and_a_silent_stretch_in_a_real_file(tmp_path):
+    import subprocess
+    import audio_export
+    ff = Path(__file__).resolve().parent.parent / "ffmpeg.exe"
+    f = tmp_path / "2026-10-06 20-00-00.mp4"
+    graph = ("sine=frequency=440:sample_rate=48000,volume=4,atrim=0:10[a];"
+             "anullsrc=r=48000:cl=mono,atrim=0:10[b];[a][b]concat=n=2:v=0:a=1[o]")
+    subprocess.run([str(ff), "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=160x90:r=5",
+                    "-filter_complex", graph, "-map", "0:v", "-map", "[o]", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", "-t", "20", str(f)], check=True, timeout=120)
+    assert audio_export.measure_peak(ff, f, 0, 6) > 0.1                                           # the tone
+    assert audio_export.measure_peak(ff, f, 12, 6) < 0.002                                        # the silence
+    assert audio_export.measure_peak(ff, f, 500, 6) is None                                       # past the end: unknown
+
+
 def test_one_missed_minute_in_the_middle_of_a_session_does_not_raise_an_alarm():
     # 2026-10-06: a single 10 s timeout (while a package uploaded) warned that recorders "will NOT record",
     # and it had fixed itself a minute later.

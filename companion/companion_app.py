@@ -74,6 +74,10 @@ class App:
         self.mic_box.grid(row=1, column=1, sticky="ew", padx=8, pady=3)
         ttk.Button(setup, text="Use", command=self.save_mic).grid(row=1, column=2)
         self.mics: list[tuple[str, str]] = []
+        self.mic_misses = 0
+        ttk.Label(setup, text="Pick the headset you use for Discord. The list fills in once recording has started "
+                              "(press Start now to test: within a minute this window tells you if your mic is silent).",
+                  style="Muted.TLabel", wraplength=420, justify="left").grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
         if not credentials.SERVER_URL:
             self.url = tk.StringVar(value=self.comp.settings.get("server_url", ""))
             self.key = tk.StringVar(value=self.comp.settings.get("voice_token", ""))
@@ -136,6 +140,11 @@ class App:
             big = f"● Recording  {secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d}"
             why = "Started on this PC (Start now)." if c.manual else "Following the team -- stops when the main app stops."
             color = RED
+            if c.mic_ok is False:
+                why = ("⚠ Your microphone is delivering only silence. Check the headset's mute switch, and pick the "
+                       "headset you use for Discord in the Microphone list, then press Use.")
+            elif c.mic_ok is None and secs < 60:
+                why += "  Checking your microphone..."
         elif c.wanted():
             big, why, color = "Starting OBS...", c.obs_status, AMBER
         else:
@@ -152,12 +161,21 @@ class App:
             f"Server: {server}\nOBS: {c.obs_status}"
             f"\nUploads: {up.sent} sent, {up.waiting()} waiting" + (f"   (preparing {c.exporting})" if c.exporting else "")))
         self.logbox.configure(text="\n".join(self.lines))
-        if not self.mics and c.obs.ws is not None:
-            self.mics = c.obs.microphones()
-            if self.mics:
-                self.mic_box.configure(values=[n for _, n in self.mics])
-                cur = c.settings.get("mic_device", "default")
-                self.mic.set(next((n for d, n in self.mics if d == cur), self.mics[0][1]))
+        if not self.mics:
+            # The list can only come from OBS, which isn't running until a recording starts: say so instead of
+            # showing an empty box (2026-10-06: a teammate saw no option at all and reasonably gave up).
+            if c.obs.ws is not None:
+                self.mics = c.obs.microphones()
+                if self.mics:
+                    self.mic_box.configure(values=[n for _, n in self.mics])
+                    cur = c.settings.get("mic_device", "default")
+                    self.mic.set(next((n for d, n in self.mics if d == cur), self.mics[0][1]))
+                else:
+                    self.mic_misses += 1
+                    self.mic.set("(OBS lists no microphones on this PC)" if self.mic_misses > 20
+                                 else "(looking for microphones...)")
+            else:
+                self.mic.set("(appears once OBS starts: press Start now)")
         self.root.after(500, self.refresh)
 
     def on_close(self) -> None:

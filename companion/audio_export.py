@@ -61,6 +61,28 @@ def export_piece(ffmpeg: Path, recording: Path, out_path: Path, start_sec: float
         return 0.0
 
 
+def measure_peak(ffmpeg: Path, recording: Path, start_sec: float, seconds: float = 20.0) -> Optional[float]:
+    """Loudest sample (0..1) in [start_sec, start_sec + seconds) of a recording's audio, readable while OBS is
+    still writing the file (the same read export_piece does for uploads). None means nothing could be read,
+    which is "don't know", never "silent": only a real read of real samples can say a mic is dead."""
+    import tempfile
+    tmp = Path(tempfile.gettempdir()) / f"r6comp_probe_{int(time.time() * 1000)}.ogg"
+    try:
+        dur = export_piece(ffmpeg, recording, tmp, max(0.0, start_sec), seconds)
+        if dur < 2.0 or not tmp.exists():
+            return None
+        peak = 0.0
+        with sf.SoundFile(str(tmp)) as f:
+            for block in f.blocks(blocksize=1 << 16, dtype="float32"):
+                if len(block):
+                    peak = max(peak, float(abs(block).max()))
+        return peak
+    except Exception:
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def export_chunks(ffmpeg: Path, recording: Path, out_dir: Path, rid: str) -> list[tuple[Path, float, float]]:
     """(chunk file, seconds into the recording, duration) for each chunk."""
     out_dir.mkdir(parents=True, exist_ok=True)
