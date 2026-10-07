@@ -572,11 +572,19 @@ def companion_status(_client: str = Depends(verify_api_token)) -> dict:
         rows = conn.execute("SELECT * FROM companions WHERE last_seen > ? ORDER BY username",
                             (now - 24 * 3600,)).fetchall()
         control = _companion_control(conn)
+    # What each person's newest recording on the server sounded like: a companion reports nothing about its
+    # microphone while it records, so this is how the host finds out a mic picked up nothing.
+    from server.services.comms_service import CommsService
+    try:
+        last = CommsService.last_recording_by_user([r["username"] for r in rows])
+    except Exception:
+        last = {}
     return {
         "control": control,
         "companions": [{"device_id": r["device_id"], "username": r["username"],
                         "seconds_since_seen": round(now - float(r["last_seen"]), 1),
-                        "status": _json.loads(r["status_json"] or "{}")} for r in rows],
+                        "status": _json.loads(r["status_json"] or "{}"),
+                        "last_recording": last.get(str(r["username"]).lower())} for r in rows],
     }
 
 

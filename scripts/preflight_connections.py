@@ -296,6 +296,29 @@ def main() -> int:
             r = get(base + "/api/v1/join/whoami", key=tok)
             say(PASS if r.status_code == 401 else FAIL, "the throwaway invite was revoked and no longer works", f"HTTP {r.status_code}")
 
+    print("\n[11] did teammates' microphones pick up anything last time?")
+    if main_key:
+        recs = get(base + "/api/v1/voice/recordings?limit=50", key=main_key).json().get("recordings", [])
+        newest: dict[str, dict] = {}
+        for r in recs:                                        # newest first
+            if r["username"].lower() not in newest and not r["username"].lower().startswith(("preflight", "zz_")):
+                newest[r["username"].lower()] = r
+        if not recs:
+            say(WARN, "no teammate recordings on the server yet")
+        elif not any("silent" in r for r in recs):
+            say(WARN, "the server doesn't report recording loudness yet (it needs the 2026-10-06 update)")
+        else:
+            for name, r in sorted(newest.items()):
+                when = time.strftime("%a %H:%M", time.localtime(r["start_epoch"]))
+                mins = int((r.get("seconds") or 0) // 60)
+                if r.get("peak") is None:
+                    say(WARN, f"{r['username']}: last recording ({when}, {mins} min) not measured yet")
+                elif r.get("silent") and (r.get("seconds") or 0) >= 60:
+                    say(FAIL, f"{r['username']}: last recording ({when}, {mins} min) was SILENT: that mic picked up nothing",
+                        "they must choose the headset they use for Discord, then press the level bar test")
+                else:
+                    say(PASS, f"{r['username']}: last recording ({when}, {mins} min) had sound", f"peak {r['peak']:.2f}")
+
     bad = [r for r in results if r[0] == FAIL]
     warn = [r for r in results if r[0] == WARN]
     print(f"\n{'ALL CLEAR' if not bad else 'PROBLEMS FOUND'}: {len(results) - len(bad) - len(warn)} passed, {len(warn)} warning(s), {len(bad)} failed")

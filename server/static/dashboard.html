@@ -655,6 +655,8 @@
     else if (browser) state = "ready, waiting for you to start";
     else state = `idle · ${escapeHtml(s.obs || "")}`;
     if (browser && s.started && s.mic_ok === false) state += ` <span style="color:var(--red)">· mic silent</span>`;
+    else if (c.last_recording && c.last_recording.silent && (c.last_recording.seconds || 0) >= 60)
+      state += ` <span style="color:var(--red)">· last recording was silent</span>`;
     return `<div class="detail-row"><span class="k">${escapeHtml(c.username)} <span style="color:var(--muted-dim)">${browser ? "browser" : "companion"}</span></span><span class="v">${state}${
       s.free_gb != null ? ` · ${s.free_gb} GB free` : ""}</span></div>`;
   }
@@ -735,7 +737,8 @@
         const mins = Math.round((r.seconds || 0) / 60);
         return `<div class="detail-row"><span class="k">${escapeHtml(r.username)}</span><span class="v">${
           start.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
-        } · ${mins} min · ${r.chunks} chunk${r.chunks === 1 ? "" : "s"}${r.finished ? "" : " · still recording"}</span></div>`;
+        } · ${mins} min · ${r.chunks} chunk${r.chunks === 1 ? "" : "s"}${r.finished ? "" : " · still recording"}${
+          r.silent ? ` · <span style="color:var(--red)">SILENT: this mic picked up nothing</span>` : ""}</span></div>`;
       }).join("") : "No recordings yet. Teammates' R6 Companion / R6 Voice recordings show up here as they arrive.");
     } catch (e) {
       $("voiceList").textContent = "Could not load (" + e.message + ").";

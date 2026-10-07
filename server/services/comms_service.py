@@ -610,11 +610,27 @@ class CommsService:
         return out, ".ogg"
 
     @staticmethod
+    def peak_of(path: Path) -> Optional[float]:
+        """Loudest sample (0..1) of an audio file, or None when it can't be decoded here.
+        Read in blocks, so a long chunk never needs to sit in memory whole."""
+        try:
+            import soundfile as sf
+            peak = 0.0
+            with sf.SoundFile(str(path)) as f:
+                for block in f.blocks(blocksize=1 << 18, dtype="float32"):
+                    if len(block):
+                        peak = max(peak, float(abs(block).max()))
+            return peak
+        except Exception:
+            return None
+
+    @staticmethod
     def store_voice_chunk(src: Path, *, recording_id: str, chunk_index: int, username: str,
                           start_epoch: float, duration_sec: float, sample_rate: int,
                           is_final: bool, suffix: str) -> dict:
         if suffix == ".wav":
             src, suffix = CommsService._compress_wav(src)
+        peak = CommsService.peak_of(src)
         sha = hashlib.sha256(src.read_bytes()).hexdigest()
         dest_dir = server_settings.VOICE_DIR / username.lower() / recording_id
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -623,27 +639,87 @@ class CommsService:
         with server_db.get_connection() as conn:
             conn.execute(
                 """INSERT INTO voice_chunks (recording_id, chunk_index, username, start_epoch, duration_sec,
-                                             sample_rate, file_path, sha256, is_final, uploaded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                             sample_rate, file_path, sha256, is_final, uploaded_at, peak)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(recording_id, chunk_index) DO UPDATE SET
                      username=excluded.username, start_epoch=excluded.start_epoch,
                      duration_sec=excluded.duration_sec, sample_rate=excluded.sample_rate,
                      file_path=excluded.file_path, sha256=excluded.sha256, is_final=excluded.is_final,
-                     uploaded_at=excluded.uploaded_at""",
+                     uploaded_at=excluded.uploaded_at, peak=excluded.peak""",
                 (recording_id, chunk_index, username, start_epoch, duration_sec, sample_rate,
-                 str(dest), sha, int(is_final), _now()),
+                 str(dest), sha, int(is_final), _now(), peak),
             )
             conn.commit()
         return {"recording_id": recording_id, "chunk_index": chunk_index, "sha256": sha}
 
-    @staticmethod
-    def list_voice_recordings(limit: int = 50) -> list[dict]:
+    # Loudest sample below this is a mic that picked up nothing (a working mic's own noise is far above it).
+    SILENT_PEAK = 0.002
+    _peak_fill_lock = threading.Lock()
+
+    @classmethod
+    def fill_missing_peaks(cls, limit: int = 5000) -> int:
+        """Measures chunks stored before loudness was recorded. Runs in the background, one pass at a time."""
+        if not cls._peak_fill_lock.acquire(blocking=False):
+            return 0
+        done = 0
+        try:
+            with server_db.get_connection() as conn:
+                rows = conn.execute("SELECT recording_id, chunk_index, file_path FROM voice_chunks WHERE peak IS NULL LIMIT ?",
+                                    (limit,)).fetchall()
+            for r in rows:
+                p = cls.peak_of(Path(r["file_path"]))
+                if p is None:
+                    continue
+                with server_db.get_connection() as conn:
+                    conn.execute("UPDATE voice_chunks SET peak = ? WHERE recording_id = ? AND chunk_index = ?",
+                                 (p, r["recording_id"], r["chunk_index"]))
+                    conn.commit()
+                done += 1
+        finally:
+            cls._peak_fill_lock.release()
+        return done
+
+    @classmethod
+    def _flag(cls, row: dict) -> dict:
+        """Adds `peak` (None = not measured yet) and `silent` to a recording row."""
+        peak = row.get("peak")
+        row["peak"] = None if peak is None else round(float(peak), 4)
+        row["silent"] = bool(peak is not None and float(peak) < cls.SILENT_PEAK)
+        return row
+
+    @classmethod
+    def list_voice_recordings(cls, limit: int = 50) -> list[dict]:
         with server_db.get_connection() as conn:
             rows = conn.execute(
                 """SELECT recording_id, username, MIN(start_epoch) AS start_epoch,
                           MAX(start_epoch + duration_sec) AS end_epoch, COUNT(*) AS chunks,
-                          SUM(duration_sec) AS seconds, MAX(is_final) AS finished, MAX(uploaded_at) AS last_upload
+                          SUM(duration_sec) AS seconds, MAX(is_final) AS finished, MAX(uploaded_at) AS last_upload,
+                          MAX(peak) AS peak, SUM(peak IS NULL) AS unmeasured
                    FROM voice_chunks GROUP BY recording_id ORDER BY start_epoch DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            unmeasured = d.pop("unmeasured", 0) or 0
+            # Chunks still waiting to be measured may be the loud ones: a loud answer from the rest stands,
+            # a quiet one does not (it is "not known yet", never "silent").
+            if unmeasured and (d["peak"] is None or d["peak"] < cls.SILENT_PEAK):
+                d["peak"] = None
+            out.append(cls._flag(d))
+        if any(d["peak"] is None for d in out):
+            threading.Thread(target=cls.fill_missing_peaks, daemon=True, name="PeakFill").start()
+        return out
+
+    @classmethod
+    def last_recording_by_user(cls, usernames: list[str]) -> dict[str, dict]:
+        """{lowercase username: the newest recording's summary} for the host app and dashboard."""
+        wanted = {u.lower() for u in usernames if u}
+        if not wanted:
+            return {}
+        out: dict[str, dict] = {}
+        for rec in cls.list_voice_recordings(limit=200):
+            key = str(rec["username"]).lower()
+            if key in wanted and key not in out:
+                out[key] = {k: rec[k] for k in ("start_epoch", "seconds", "peak", "silent", "finished")}
+        return out

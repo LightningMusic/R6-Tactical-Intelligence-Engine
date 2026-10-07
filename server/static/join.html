@@ -71,7 +71,8 @@
   <section class="card hidden" id="setupCard">
     <div class="headline" style="font-size:1rem">Before practice</div>
     <ol>
-      <li>Pick your headset mic below, then press <b>Start</b>. Your browser asks for the microphone once.</li>
+      <li>Pick the headset mic you use for Discord below (the first entry, "Default", is often a different device), then press <b>Start</b>. Your browser asks for the microphone once.</li>
+      <li>Say something. The green bar on this page must move. If it doesn't, press <b>Stop</b>, pick another microphone and try again.</li>
       <li>Leave this tab open and the computer awake while you play. Minimize it, don't close it.</li>
       <li>That's it. It records when the host starts a match and stops when they stop.</li>
     </ol>
@@ -85,6 +86,7 @@
       <button class="ghost" id="pauseBtn">Pause my mic</button>
       <button class="ghost" id="stopBtn">Stop</button>
     </div>
+    <p class="small" id="micName" style="margin:10px 0 0"></p>
     <div class="stats">
       <div>Recorded <b id="sRec">0:00</b></div>
       <div>Uploaded <b id="sUp">0</b> chunks</div>
@@ -109,6 +111,12 @@
   const LS_TOKEN = "r6rec.token", LS_DEVICE = "r6rec.device", LS_MIC = "r6rec.mic";
   const ALIVE_PEAK = 0.003;                  // below this the mic is effectively digital silence (muted / dead)
   const SILENT_WARN_MS = 30 * 1000;
+  // A working microphone always has some noise of its own; samples that are exactly (or almost exactly) zero
+  // mean the page is being fed nothing: the wrong device, a muted one, or a blocked one. On 2026-10-05 a
+  // whole practice was recorded as silence while the tab sat minimized with only a small note inside it.
+  const DEAD_PEAK = 0.0002;
+  const DEAD_MS = 6 * 1000;
+  const TITLE = "R6 Team Recorder";
   const MAX_QUEUE_BYTES = 300 * 1024 * 1024;
   const AC = window.AudioContext || window.webkitAudioContext;
 
@@ -130,7 +138,7 @@
     recordingId: null, chunkIndex: 0, cycleStartEpoch: 0, cycleSamples: 0,
     buf: [], bufSamples: 0, haveT0: false, totalSamples: 0,
     uploaded: 0, queued: 0,
-    level: 0, lastAliveAt: 0, micNote: "", fatal: "",
+    level: 0, lastAliveAt: 0, lastSoundAt: 0, micLabel: "", micNote: "", fatal: "",
     wakeLock: null, db: null, flushing: false, authFailed: false, online: true,
   };
   if (!S.deviceId) { S.deviceId = hex(8); ls.set(LS_DEVICE, S.deviceId); }
@@ -279,6 +287,7 @@
     for (let i = 0; i < frames.length; i++) { const a = frames[i] < 0 ? -frames[i] : frames[i]; if (a > peak) peak = a; }
     S.level = Math.max(peak, S.level * 0.92);
     if (peak > ALIVE_PEAK) S.lastAliveAt = performance.now();
+    if (peak > DEAD_PEAK) S.lastSoundAt = performance.now();
     if (!S.recording || S.paused) return;
     if (!S.haveT0) {
       S.cycleStartEpoch = audioToServerEpoch(msg.t, frames.length);
@@ -375,7 +384,7 @@
       started: S.started, recording: S.recording, paused: S.paused, mode: S.always ? "always" : "follow",
       since: (S.recording && S.haveT0) ? Math.round(S.cycleStartEpoch) : null,
       uploads_waiting: S.queued, uploaded: S.uploaded, level: +S.level.toFixed(3),
-      mic_ok: S.started ? (performance.now() - S.lastAliveAt < SILENT_WARN_MS) : null,
+      mic_ok: S.started ? (performance.now() - S.lastAliveAt < SILENT_WARN_MS && performance.now() - S.lastSoundAt < DEAD_MS) : null,
       clock: +S.clockOffset.toFixed(2),
     };
     try {
@@ -446,6 +455,8 @@
       S.source.connect(S.node);
     }
     S.lastAliveAt = performance.now();
+    S.lastSoundAt = performance.now();
+    S.micLabel = (S.stream.getAudioTracks()[0] && S.stream.getAudioTracks()[0].label) || "";
   }
 
   let reacquiring = false;
@@ -519,7 +530,15 @@
     $("meter").classList.toggle("hot", S.level > 0.9);
 
     const silent = S.started && !S.paused && S.recording && performance.now() - S.lastAliveAt > SILENT_WARN_MS;
-    banner("bannerBad", S.fatal);
+    // Exactly-zero audio, even while only waiting for the host: say so loudly and in the tab's title, which is
+    // what shows on the taskbar when the page is minimized.
+    const dead = S.started && !S.paused && !S.fatal && performance.now() - S.lastSoundAt > DEAD_MS;
+    $("micName").textContent = S.started && S.micLabel ? "Using: " + S.micLabel : "";
+    const wantTitle = dead ? "⚠ MIC SILENT - " + TITLE : TITLE;
+    if (document.title !== wantTitle) document.title = wantTitle;
+    banner("bannerBad", S.fatal || (dead
+      ? "Your microphone is not sending any sound at all, so nothing useful is being recorded. Press Stop, pick the headset you use for Discord in the list, press Start, and say something: the green bar must move."
+      : ""));
     banner("bannerWarn", S.micNote
       || (silent ? "Your mic has been silent for a while. Check it isn't muted and that the right headset is selected." : "")
       || (!S.online ? "Can't reach the server - your audio is being kept safely and uploads when it's back." : ""));
@@ -527,6 +546,7 @@
     if (S.authFailed) return setState("bad", "This link doesn't work any more", "Ask the host for a new invite link.");
     if (!S.started) return setState("", "Ready", S.queued ? S.queued + " recorded chunks are still to upload - press Start to continue." : "Press Start when you're at your computer.");
     if (S.paused) return setState("warn", "Mic paused", "Nothing is recorded until you resume.");
+    if (dead) return setState("bad", "Your mic is silent", S.recording ? "The host's session is running but your mic is sending nothing." : "Fix this before the session starts.");
     if (S.recording) return setState("rec", "Recording", S.always ? "Recording continuously." : "The host's session is running.");
     setState("ok", "Waiting for the host to start a match", "Nothing is recorded yet. Keep this tab open.");
   }
@@ -579,7 +599,8 @@
 
   // Read-only view of the recorder's counters for automated testing.
   window.__r6rec = { get: () => ({ started: S.started, recording: S.recording, uploaded: S.uploaded, queued: S.queued,
-    username: S.username, rate: S.ctx && S.ctx.sampleRate, clockOffset: S.clockOffset, fatal: S.fatal, auth: S.authFailed }) };
+    username: S.username, rate: S.ctx && S.ctx.sampleRate, clockOffset: S.clockOffset, fatal: S.fatal, auth: S.authFailed,
+    dead: S.started && !S.paused && performance.now() - S.lastSoundAt > DEAD_MS, mic: S.micLabel, title: document.title }) };
 })();
 </script>
 </body>

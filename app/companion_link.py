@@ -19,6 +19,39 @@ import requests
 from app.config import settings
 
 
+class SignalWatch:
+    """Decides when the host's 'recording' signal failing is worth interrupting the host about.
+
+    Until the signal works, teammates' recorders that follow the host are never told to start and record
+    nothing. That is serious at the START of a session (nothing has told them yet) but not for one missed
+    minute in the middle: the signal is re-sent every minute and the server only lets go after 20 silent
+    minutes. On 2026-10-06 a single 10 s timeout during a background upload raised an alarm that had fixed
+    itself a minute later. So: warn at once when it has never worked this session, otherwise after two
+    failures in a row; say so once; and say when it recovers (only if a warning was shown)."""
+
+    def __init__(self, fails_before_warning: int = 2) -> None:
+        self.fails_before_warning = fails_before_warning
+        self.ever_worked = False
+        self.fails = 0
+        self.warned = False
+
+    def record(self, ok: bool, last_chance: bool = False) -> Optional[str]:
+        """Feed each attempt's result; returns "warn", "recovered" or None. `last_chance` is for a signal that
+        will not be tried again (the stop at the end of a session): it warns at once."""
+        if ok:
+            self.ever_worked = True
+            self.fails = 0
+            if self.warned:
+                self.warned = False
+                return "recovered"
+            return None
+        self.fails += 1
+        if not self.warned and (last_chance or not self.ever_worked or self.fails >= self.fails_before_warning):
+            self.warned = True
+            return "warn"
+        return None
+
+
 class CompanionLink:
     def __init__(self, http=None) -> None:
         self.http = http or requests
@@ -79,6 +112,17 @@ class CompanionLink:
             what = "browser recorder" if browser else "companion"
             return f"{label}: {what} not checking in (last seen {int(c['seconds_since_seen'] // 60)} min ago)"
         silent = " -- mic looks silent, check headset" if browser and s.get("started") and s.get("mic_ok") is False else ""
+        # A companion can't see its own microphone, but the server can hear what it uploaded last time.
+        last = c.get("last_recording") or {}
+        if not silent and last.get("silent") and float(last.get("seconds") or 0) >= 60:
+            when = time.strftime("%a %H:%M", time.localtime(float(last.get("start_epoch") or now)))
+            mins = int(float(last["seconds"]) // 60)
+            if last.get("finished"):
+                silent = (f" -- but their last recording ({when}, {mins} min) was SILENT: that mic picked up "
+                          f"nothing, so they need to pick the headset they use for Discord")
+            else:
+                silent = (f" -- the audio uploaded so far ({mins} min) is SILENT: that mic is picking up nothing, "
+                          f"so they need to pick the headset they use for Discord")
         if s.get("recording"):
             secs = int(now - float(s.get("since") or now))
             extra = f", {s['free_gb']} GB free" if s.get("free_gb") is not None and s["free_gb"] < 5 else ""
@@ -89,9 +133,9 @@ class CompanionLink:
             if s.get("paused"):
                 return f"{label}: mic paused in the browser"
             if s.get("started") is False:
-                return f"{label}: browser page is open but their mic isn't started"
+                return f"{label}: browser page is open but their mic isn't started{silent}"
             return f"{label}: browser ready, waiting for the session{silent}"
-        return f"{label}: not recording -- {s.get('obs', 'unknown')}"
+        return f"{label}: not recording -- {s.get('obs', 'unknown')}{silent}"
 
     def changed_lines(self, names: Optional[dict] = None) -> list[str]:
         """Companion status lines that changed since the last call (so the log

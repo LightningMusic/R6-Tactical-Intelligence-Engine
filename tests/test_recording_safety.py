@@ -116,7 +116,14 @@ def test_load_queue_reads_the_real_queue_file_shape(tmp_path):
     assert rs.load_queue(f) == []
 
 
-def test_the_automatic_cleanup_keeps_what_has_not_uploaded(tmp_path, monkeypatch):
+NAMES = ["2025-09-21 17-00-00.mp4", "2025-09-22 17-00-00.mp4", "2025-09-23 17-00-00.mp4",
+         "2025-09-24 17-00-00.mp4", "2025-09-25 17-00-00.mp4"]
+
+
+@pytest.fixture
+def stick(tmp_path, monkeypatch):
+    """Five old recordings on a pretend stick. The two oldest each have one match on record; s0 uploaded and
+    analysed, s1 never uploaded. Returns (manager, recordings folder, a way to set how much space is free)."""
     import sys
     import types
 
@@ -124,33 +131,66 @@ def test_the_automatic_cleanup_keeps_what_has_not_uploaded(tmp_path, monkeypatch
     # session_manager imports the Discord recorder at module level; the cleanup needs none of it.
     monkeypatch.setitem(sys.modules, "integration.discord_capture", types.SimpleNamespace(DiscordCapture=object))
     from app.session_manager import SessionManager
+    import shutil
 
     rec_dir, data_dir = tmp_path / "recordings", tmp_path / "data"
     (data_dir / "queue").mkdir(parents=True)
     rec_dir.mkdir()
     monkeypatch.setattr(config, "RECORDINGS_DIR", rec_dir)
     monkeypatch.setattr(config, "DATA_DIR", data_dir)
-    # five recordings from last year (so all are old by any clock), one hour long each
-    names = ["2025-09-21 17-00-00.mp4", "2025-09-22 17-00-00.mp4", "2025-09-23 17-00-00.mp4",
-             "2025-09-24 17-00-00.mp4", "2025-09-25 17-00-00.mp4"]
     queue = {}
-    for i, n in enumerate(names):
+    for i, n in enumerate(NAMES):
         p = rec_dir / n
         p.write_bytes(b"video")
         start = rs.recording_start(p)
         os.utime(p, (start + 3600, start + 3600))
-        if i < 2:        # the two oldest have a match on record: the first uploaded, the second never did
+        if i < 2:
             queue[f"s{i}"] = {"session_id": f"s{i}", "created_at": datetime.fromtimestamp(start + 1800, timezone.utc).isoformat(),
                               "package_status": "uploaded" if i == 0 else "upload_failed",
                               "remote_analysis_status": "completed" if i == 0 else "none", "last_error": None}
     (data_dir / "queue" / "queue.json").write_text(json.dumps(queue), encoding="utf-8")
 
-    mgr = SessionManager.__new__(SessionManager)
+    space = {"base": 200.0, "per_file": 0.0}                      # free GB = base + per_file * recordings deleted so far
+
+    def fake_usage(path):
+        gone = len(NAMES) - len(list(rec_dir.glob("*.mp4")))
+        return types.SimpleNamespace(total=500 * 1024 ** 3, used=0, free=int((space["base"] + space["per_file"] * gone) * 1024 ** 3))
+
+    monkeypatch.setattr(shutil, "disk_usage", fake_usage)
+    return SessionManager.__new__(SessionManager), rec_dir, space
+
+
+def test_nothing_is_deleted_while_the_stick_has_plenty_of_room(stick):
+    mgr, rec_dir, space = stick
+    space["base"] = 200.0                                         # the real stick: ~220 GB free
+    logs = []
+    assert mgr.cleanup_old_recordings(keep_latest_n=3, log_callback=logs.append) == 0
+    assert len(list(rec_dir.glob("*.mp4"))) == 5                  # even the one whose matches are uploaded and analysed stays
+    assert any("200 GB free: keeping all 5" in line for line in logs)
+
+
+def test_when_space_is_short_only_safe_recordings_go_and_only_the_oldest_needed(stick):
+    mgr, rec_dir, space = stick
+    space["base"], space["per_file"] = 5.0, 20.0                  # 5 GB free; each recording deleted frees 20 GB
     logs = []
     deleted = mgr.cleanup_old_recordings(keep_latest_n=3, log_callback=logs.append)
     left = sorted(p.name for p in rec_dir.glob("*.mp4"))
-    assert deleted == 1
-    assert names[0] not in left                                   # uploaded + analysed: gone
-    assert names[1] in left                                       # its match never uploaded: kept
-    assert all(n in left for n in names[2:])                      # the newest three are always spared
+    assert deleted == 1 and NAMES[0] not in left                  # uploaded + analysed: the one that may go
+    assert NAMES[1] in left                                       # its match never uploaded: kept however low space is
+    assert all(n in left for n in NAMES[2:])                      # the newest three are always spared
     assert any("Kept 2025-09-22 17-00-00.mp4" in line and "has not uploaded yet" in line for line in logs)
+    assert any("nothing more can be deleted safely" in line for line in logs)       # 25 GB is still short of 30: say so
+
+
+def test_deletion_stops_as_soon_as_there_is_enough_room(stick, tmp_path):
+    mgr, rec_dir, space = stick
+    # make the second-oldest safe too, then let one deletion be enough
+    import json as _json
+    q = tmp_path / "data" / "queue" / "queue.json"
+    data = _json.loads(q.read_text(encoding="utf-8"))
+    data["s1"].update(package_status="uploaded", remote_analysis_status="completed")
+    q.write_text(_json.dumps(data), encoding="utf-8")
+    space["base"], space["per_file"] = 15.0, 20.0                 # one deletion: 35 GB, above the 30 GB limit
+    assert mgr.cleanup_old_recordings(keep_latest_n=3, log_callback=lambda m: None) == 1
+    left = sorted(p.name for p in rec_dir.glob("*.mp4"))
+    assert NAMES[0] not in left and NAMES[1] in left              # oldest first, and no more than needed

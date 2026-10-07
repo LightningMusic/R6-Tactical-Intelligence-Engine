@@ -1002,17 +1002,27 @@ class SessionManager:
             if f.exists()
         )
     
+    LOW_SPACE_GB = 30.0
+
     def cleanup_old_recordings(
         self,
         keep_latest_n: int = 3,
         log_callback: Optional[Callable[[str], None]] = None,
+        low_space_gb: Optional[float] = None,
     ) -> int:
         """
-        Deletes old recording files to free USB space.
-        Keeps the most recent `keep_latest_n` recordings.
-        Returns number of files deleted.
+        Frees USB space, and only when it is actually needed.
+
+        A recording is video the server never receives (only an audio clip and the replays go up), so once
+        it is deleted it is gone for good, and it can still be worth watching long after its matches are
+        analysed. So nothing is deleted while the stick has `low_space_gb` (default 30 GB) or more free. When
+        space is low, the oldest recordings go first, only those whose matches are all uploaded AND analysed
+        by the server, never the newest `keep_latest_n`, and only as many as it takes to get back above the
+        limit. Returns the number of files deleted.
         """
+        import shutil
         from app.config import RECORDINGS_DIR
+        limit_gb = self.LOW_SPACE_GB if low_space_gb is None else float(low_space_gb)
 
         def log(msg: str) -> None:
             print(f"[Cleanup] {msg}")
@@ -1042,37 +1052,45 @@ class SessionManager:
         deleted   = 0
         freed_mb  = 0.0
 
-        # A video is only deleted once everything it gave us is safe on the server (every match
-        # from it uploaded AND analysed). Otherwise it stays, because the video can still be useful
+        def free_gb() -> float:
+            try:
+                return shutil.disk_usage(str(RECORDINGS_DIR)).free / (1024 ** 3)
+            except OSError:
+                return 0.0           # can't tell: behave as if space is short (the safety rule below still applies)
+
+        if free_gb() >= limit_gb:
+            log(f"{free_gb():.0f} GB free: keeping all {len(recordings)} recording(s). Nothing is deleted until "
+                f"less than {limit_gb:.0f} GB is free.")
+            return 0
+
+        # Space is short. A video is only deleted once everything it gave us is safe on the server (every
+        # match from it uploaded AND analysed). Otherwise it stays, because the video can still be useful
         # and a failed upload (a bad key, no connection) must never cost the footage.
         from app.config import DATA_DIR
         from app.recording_safety import load_queue, split_deletable
-        to_delete, kept = split_deletable(to_delete, load_queue(DATA_DIR / "queue" / "queue.json"))
+        safe, kept = split_deletable(to_delete, load_queue(DATA_DIR / "queue" / "queue.json"))
         for f, why in kept:
             try:
                 log(f"Kept {f.name} ({f.stat().st_size / (1024 ** 3):.1f} GB): {why}.")
             except OSError:
                 pass
-        if kept:
-            try:
-                import shutil
-                free_gb = shutil.disk_usage(str(RECORDINGS_DIR)).free / (1024 ** 3)
-                if free_gb < 10:
-                    log(f"Only {free_gb:.1f} GB is free and {len(kept)} recording(s) are being kept until their "
-                        f"matches upload; fix the upload (Settings > Remote Sync) or free space by hand.")
-            except OSError:
-                pass
 
-        for f in to_delete:
+        for f in sorted(safe, key=lambda p: p.stat().st_mtime):          # oldest first
+            if free_gb() >= limit_gb:
+                break
             try:
                 mb = f.stat().st_size / (1024 * 1024)
                 f.unlink()
-                log(f"Deleted: {f.name} ({mb:.0f} MB), all its matches are uploaded and analysed")
+                log(f"Deleted: {f.name} ({mb:.0f} MB) to free space; all its matches are uploaded and analysed")
                 deleted += 1
                 freed_mb += mb
             except Exception as e:
                 log(f"Could not delete {f.name}: {e}")
 
+        if free_gb() < limit_gb:
+            log(f"Only {free_gb():.1f} GB is free and nothing more can be deleted safely "
+                f"({len(kept)} recording(s) are waiting on their matches to upload or finish analysing). "
+                f"Fix the upload (Settings > Remote Sync) or free space by hand.")
         log(f"Cleanup complete: {deleted} file(s) deleted, {freed_mb / 1024:.1f} GB freed.")
         return deleted
 

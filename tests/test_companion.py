@@ -414,6 +414,33 @@ def test_a_later_success_clears_the_error(_server_settings):
     assert link.set_recording(True) is True and link.last_error == ""
 
 
+def test_one_missed_minute_in_the_middle_of_a_session_does_not_raise_an_alarm():
+    # 2026-10-06: a single 10 s timeout (while a package uploaded) warned that recorders "will NOT record",
+    # and it had fixed itself a minute later.
+    from app.companion_link import SignalWatch
+    w = SignalWatch()
+    assert w.record(True) is None
+    assert w.record(False) is None            # one miss: say nothing
+    assert w.record(True) is None             # and nothing when it comes back, since nothing was said
+    assert w.record(False) is None and w.record(False) == "warn"      # two in a row: now it matters
+    assert w.record(False) is None            # only said once
+    assert w.record(True) == "recovered" and w.record(True) is None
+
+
+def test_a_signal_that_has_never_worked_this_session_warns_at_once():
+    from app.companion_link import SignalWatch
+    w = SignalWatch()
+    assert w.record(False) == "warn"           # nothing has told the teammates to start yet
+    assert w.record(False) is None and w.record(True) == "recovered"
+
+
+def test_a_failed_stop_signal_warns_at_once_because_there_is_no_next_attempt():
+    from app.companion_link import SignalWatch
+    w = SignalWatch()
+    assert w.record(True) is None
+    assert w.record(False, last_chance=True) == "warn"
+
+
 def test_host_log_lines_only_when_something_changes():
     from app.companion_link import CompanionLink
     now = time.time()

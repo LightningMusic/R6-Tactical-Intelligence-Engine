@@ -197,6 +197,9 @@ class ServerDatabase:
                 "ALTER TABLE server_parsed_matches ADD COLUMN match_id INTEGER",
                 "ALTER TABLE server_parsed_matches ADD COLUMN analysis_status TEXT NOT NULL DEFAULT 'pending'",
                 "ALTER TABLE server_parsed_matches ADD COLUMN analysis_error TEXT",
+                # Loudest sample of a voice chunk (0..1), measured when it arrives. NULL = not measured yet.
+                # Lets the server say "this recording is silent" (a teammate's mic picked up nothing).
+                "ALTER TABLE voice_chunks ADD COLUMN peak REAL",
             ):
                 try:
                     conn.execute(ddl)
