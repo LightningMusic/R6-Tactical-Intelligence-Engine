@@ -654,6 +654,9 @@
     else if (browser && s.started === false) state = "page open, mic not started";
     else if (browser) state = "ready, waiting for you to start";
     else state = `idle · ${escapeHtml(s.obs || "")}`;
+    if (!browser && s.recording && s.mic_ok === false) state += ` <span style="color:var(--red)">· mic silent</span>`;
+    if (browser && s.recording && typeof s.audio_ratio === "number" && (s.audio_ratio < 0.93 || s.audio_ratio > 1.07))
+      state += ` <span style="color:var(--red)">· audio at ${Math.round(s.audio_ratio * 100)}% of real time</span>`;
     if (browser && s.started && s.mic_ok === false) state += ` <span style="color:var(--red)">· mic silent</span>`;
     else if (c.last_recording && c.last_recording.silent && (c.last_recording.seconds || 0) >= 60)
       state += ` <span style="color:var(--red)">· last recording was silent</span>`;

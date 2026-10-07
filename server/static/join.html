@@ -116,6 +116,8 @@
   // whole practice was recorded as silence while the tab sat minimized with only a small note inside it.
   const DEAD_PEAK = 0.0002;
   const DEAD_MS = 6 * 1000;
+  const RATIO_MIN_SEC = 60;                  // judge the audio's speed only after a minute of recording
+  const RATIO_OK = [0.93, 1.07];
   const TITLE = "R6 Team Recorder";
   const MAX_QUEUE_BYTES = 300 * 1024 * 1024;
   const AC = window.AudioContext || window.webkitAudioContext;
@@ -376,11 +378,26 @@
     render();
   }
 
+  // How much audio has arrived per second of real time since this recording began. It should be 1.0. On
+  // 2026-10-06 one PC delivered about 0.66 for the whole practice (4,070 s of audio in 6,160 s), which puts the
+  // recording up to 35 minutes out of step with the match; nothing on the page said so. Measured on the server's
+  // clock (the same clock the chunk times use), and only once there is enough to judge.
+  function audioRatio() {
+    if (!S.recording || !S.haveT0) return null;
+    const wall = serverNow() - S.cycleStartEpoch;
+    if (wall < RATIO_MIN_SEC) return null;
+    return ((S.cycleSamples + S.bufSamples) / SR) / wall;
+  }
+
   // ───────── heartbeat ─────────
   async function heartbeat() {
     if (S.authFailed) return;
     if (S.ctx && S.started && S.ctx.state !== "running") { try { await S.ctx.resume(); } catch (e) {} }
+    const ratio = audioRatio();
     const status = {
+      audio_ratio: ratio === null ? null : +ratio.toFixed(2),
+      ctx: S.ctx ? S.ctx.state : null, ctx_rate: S.ctx ? S.ctx.sampleRate : null,
+      visible: document.visibilityState === "visible",
       started: S.started, recording: S.recording, paused: S.paused, mode: S.always ? "always" : "follow",
       since: (S.recording && S.haveT0) ? Math.round(S.cycleStartEpoch) : null,
       uploads_waiting: S.queued, uploaded: S.uploaded, level: +S.level.toFixed(3),
@@ -539,7 +556,10 @@
     banner("bannerBad", S.fatal || (dead
       ? "Your microphone is not sending any sound at all, so nothing useful is being recorded. Press Stop, pick the headset you use for Discord in the list, press Start, and say something: the green bar must move."
       : ""));
+    const ratio = audioRatio();
+    const slow = ratio !== null && (ratio < RATIO_OK[0] || ratio > RATIO_OK[1]);
     banner("bannerWarn", S.micNote
+      || (slow ? "This computer is delivering your microphone audio at " + Math.round(ratio * 100) + "% of normal speed, so the recording won't line up with the match. Tell the host; closing other programs that use audio, or using Chrome or Edge, may help." : "")
       || (silent ? "Your mic has been silent for a while. Check it isn't muted and that the right headset is selected." : "")
       || (!S.online ? "Can't reach the server - your audio is being kept safely and uploads when it's back." : ""));
 
@@ -600,7 +620,11 @@
   // Read-only view of the recorder's counters for automated testing.
   window.__r6rec = { get: () => ({ started: S.started, recording: S.recording, uploaded: S.uploaded, queued: S.queued,
     username: S.username, rate: S.ctx && S.ctx.sampleRate, clockOffset: S.clockOffset, fatal: S.fatal, auth: S.authFailed,
-    dead: S.started && !S.paused && performance.now() - S.lastSoundAt > DEAD_MS, mic: S.micLabel, title: document.title }) };
+    dead: S.started && !S.paused && performance.now() - S.lastSoundAt > DEAD_MS, mic: S.micLabel, title: document.title,
+    ratio: audioRatio() }),
+    // Test-only: pretend `sec` seconds of audio went missing from this recording (e2e_silent_mic.py uses it,
+    // because a fake microphone always delivers in perfect real time).
+    testLoseAudio: (sec) => { S.cycleSamples = Math.max(0, S.cycleSamples - Math.round(sec * SR)); } };
 })();
 </script>
 </body>

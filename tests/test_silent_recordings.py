@@ -112,6 +112,18 @@ def test_while_a_recording_is_still_going_the_host_log_says_so_in_the_present_te
     assert "recording ✓" in line and "audio uploaded so far (10 min) is SILENT" in line and "last recording" not in line
 
 
+def test_a_browser_delivering_audio_at_the_wrong_speed_is_called_out_in_the_host_log():
+    base = {"username": "Web_User", "seconds_since_seen": 3, "status": {"kind": "browser", "started": True,
+                                                                          "recording": True, "since": 0}}
+    slow = {**base, "status": {**base["status"], "audio_ratio": 0.66}}
+    assert "66% of real time" in CompanionLink.describe(slow, now=900)
+    for fine in (1.0, 0.95, 1.05, None):
+        assert "real time" not in CompanionLink.describe({**base, "status": {**base["status"], "audio_ratio": fine}}, now=900)
+    # not recording: the ratio is meaningless, say nothing
+    idle = {**base, "status": {"kind": "browser", "started": True, "recording": False, "audio_ratio": 0.5}}
+    assert "real time" not in CompanionLink.describe(idle, now=900)
+
+
 def test_a_short_or_working_recording_adds_nothing_to_the_log_line():
     base = {"username": "Comp_User", "seconds_since_seen": 5, "status": {"obs": "ok", "recording": False}}
     ok = CompanionLink.describe({**base, "last_recording": {"silent": False, "seconds": 6000, "start_epoch": 1.0}})

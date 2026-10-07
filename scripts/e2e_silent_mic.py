@@ -101,6 +101,27 @@ def main() -> int:
             check(not page.inner_text("#bannerBad").strip(), "no red banner")
             check(not state()["title"].startswith("⚠"), "the tab title stays normal: " + state()["title"])
             check(bool(state()["mic"]), "its name is shown: " + str(state()["mic"]))
+
+            print("\n[3] audio arriving at the wrong speed (2026-10-06: 4,070 s of audio in 6,160 s of real time)")
+            httpx.put(base + "/api/v1/companion/control", headers=H, json={"recording": True}, timeout=5)
+            wait_for(lambda: state()["recording"], 15, "page began recording")
+            time.sleep(66)                                            # the page judges the speed after a minute
+            r = state()["ratio"]
+            check(r is not None and 0.95 < r < 1.05, f"a healthy page measures its audio at real-time speed ({r})")
+            check("normal speed" not in page.inner_text("#bannerWarn"), "and shows no speed warning")
+            page.evaluate("window.__r6rec.testLoseAudio(33)")         # as if a third of the audio never arrived
+            time.sleep(1.5)
+            r2 = state()["ratio"]
+            check(r2 is not None and r2 < 0.6, f"lost audio shows up in the measurement ({r2})")
+            wait_for(lambda: "normal speed" in page.inner_text("#bannerWarn"), 5, "the speed warning")
+            check("% of normal speed" in page.inner_text("#bannerWarn"), "the player is told: " + page.inner_text("#bannerWarn")[:90])
+
+            def host_sees():
+                st = httpx.get(base + "/api/v1/companion/status", headers=H).json()["companions"]
+                return [c for c in st if c["username"] == "Working_Mic_Player" and (c["status"].get("audio_ratio") or 1) < 0.6]
+            seen = wait_for(host_sees, 10, "the host being told")
+            check(bool(seen), "the server holds the slow ratio for the host: " + (str(seen[0]["status"].get("audio_ratio")) if seen else "none"))
+            httpx.put(base + "/api/v1/companion/control", headers=H, json={"recording": False}, timeout=5)
             browser.close()
     finally:
         srv.terminate()
