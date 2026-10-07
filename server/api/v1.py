@@ -459,20 +459,23 @@ def put_roster(body: dict, _client: str = Depends(verify_api_token)) -> dict:
 
 
 @router.post("/sessions/{session_id}/reread-replays", status_code=202)
-def reread_replays(session_id: str, _client: str = Depends(verify_api_token)) -> dict:
-    """Re-read this session's stored replays for gadget usage and objective facts (no
-    transcription), then regenerate its AI text. Runs in the background."""
+def reread_replays(session_id: str, ai: bool = True, _client: str = Depends(verify_api_token)) -> dict:
+    """Re-read this session's stored replays for gadget usage, objective facts and the kill order (no
+    transcription), then regenerate its AI text. `?ai=false` stops after the facts: seconds instead of
+    minutes of model time per match, for re-reading many old matches at once. Runs in the background."""
     import threading
 
     def run() -> None:
         from server.services.comms_service import CommsService
         from server.services.utility_backfill import backfill_session
         result = backfill_session(session_id)
-        if "match_id" in result:
+        if "match_id" in result and ai:
             CommsService._refresh_ai(result["match_id"], refresh_players=True)
+        elif "match_id" in result:
+            print(f"[Backfill] match {result['match_id']}: facts re-read; AI text left as it was (ai=false).")
 
     threading.Thread(target=run, daemon=True, name="RereadReplays").start()
-    return {"status": "started", "session_id": session_id}
+    return {"status": "started", "session_id": session_id, "ai": ai}
 
 
 @router.get("/voices")
