@@ -136,7 +136,9 @@ class EventParser:
         # order (r6-dissect writes it as it happened) and leave the timing unknown.
         if kills and all(k.time_sec >= 0 for k in kills):
             kills.sort(key=lambda k: k.time_sec)
+            events.kill_order = "elapsed"
         else:
+            events.kill_order = "feed" if kills else None
             for k in kills:
                 k.time_sec = -1.0
         events.kills        = kills

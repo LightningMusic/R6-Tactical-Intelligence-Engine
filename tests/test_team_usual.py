@@ -21,7 +21,7 @@ def match(plan):
     for i, (out, fk, h, e) in enumerate(plan, 1):
         rounds.append(NS(round_number=i, side="attack" if i <= len(plan) // 2 else "defense", outcome=out, site="",
                          player_stats=[stat("Hector", *h), stat("Elijah", *e), stat("Enemy", 1, 1)]))
-        events[i] = {"opening_duel_won": fk}
+        events[i] = {"opening_duel_won": fk, "kill_order": "elapsed"}
     return NS(rounds=rounds, map="Border", opponent_name="Imported", result="win"), events
 
 

@@ -84,11 +84,21 @@ def test_without_enough_history_the_team_is_the_yardstick():
 def test_first_kill_conversion_comes_from_the_kill_feed():
     events = {1: {"opening_duel_won": True}, 2: {"opening_duel_won": True}, 3: {"opening_duel_won": False},
               4: {"opening_duel_won": None}}
+    for e in events.values():
+        e["kill_order"] = "elapsed"
     m = NS(rounds=[rnd(1, "defense", "win", []), rnd(2, "defense", "loss", []),
                    rnd(3, "defense", "loss", []), rnd(4, "attack", "win", [])])
     s = tf.opening_summary(m, events)
     assert (s["first_kill_rounds"], s["first_kill_wins"], s["conceded_rounds"], s["conceded_wins"]) == (2, 1, 1, 0)
     assert "first kill in 2 rounds and won 1" in tf.opening_lines(s)[0]
+
+
+def test_first_kills_stored_before_the_kill_order_fix_are_not_used():
+    events = {1: {"opening_duel_won": True}, 2: {"opening_duel_won": False, "kill_order": "elapsed"}}
+    m = NS(rounds=[rnd(1, "defense", "win", []), rnd(2, "defense", "loss", [])])
+    s = tf.opening_summary(m, events)
+    assert (s["first_kill_rounds"], s["conceded_rounds"]) == (0, 1)        # round 1 has no marker: wrong order
+    assert tf.opening_counts({1: {"first_blood_killer": "Hector"}}) == {}
 
 
 def test_replace_section_swaps_only_that_section():

@@ -103,6 +103,9 @@ class RoundEvents:
     # A clutch = one player from our team alive, ≥1 enemy alive, round won
     clutch_player:     Optional[str]  = None
     clutch_kill_count: int            = 0
+    # "elapsed" when the kill feed was put in order by elapsed time (2026-10-06 fix). Events stored
+    # before then have no marker: their first kill, trades and clutch were read in the wrong order.
+    kill_order:        Optional[str]  = None
 
     def to_dict(self) -> dict:
         """Serialise to a JSON-safe dict for storage in derived_metrics."""
@@ -128,6 +131,7 @@ class RoundEvents:
             "objective_attempts":  self.objective_attempts,
             "clutch_player":      self.clutch_player,
             "clutch_kills":        self.clutch_kill_count,
+            "kill_order":          self.kill_order,
             "kills": [
                 {
                     "time":       k.time_str,

@@ -48,6 +48,12 @@
   label.check { display: flex; gap: 8px; align-items: center; margin-top: 14px; color: var(--dim); font-size: .9rem; }
   .hidden { display: none !important; }
   .small { font-size: .82rem; color: var(--dim); }
+  .mrow { border-top: 1px solid var(--line); padding: 10px 0 4px; margin-top: 10px; font-size: .9rem; }
+  .mrow .top { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .mrow .top b { font-weight: 600; }
+  .mrow .win { color: var(--ok); } .mrow .loss { color: var(--bad); }
+  .mrow pre { white-space: pre-wrap; font: inherit; font-size: .85rem; color: var(--dim); margin: 6px 0 0; }
+  .up { color: var(--ok); } .down { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -97,6 +103,15 @@
       <div>Clock offset <b id="sClock">-</b></div>
     </div>
     <p class="small">Only your own microphone is recorded, and only while the host's session is running. Nothing is recorded while this page says "Waiting".</p>
+  </section>
+
+  <section class="card hidden" id="statsCard">
+    <div class="row" style="margin-top:0;justify-content:space-between;align-items:center">
+      <div class="headline" style="font-size:1rem">My stats</div>
+      <button class="ghost" id="statsBtn" style="padding:6px 12px">Refresh</button>
+    </div>
+    <p class="small" id="statsNote" style="margin:6px 0 0">Your own numbers from the team's matches.</p>
+    <div id="statsBody"></div>
   </section>
 </main>
 
@@ -664,6 +679,68 @@
     setState("ok", "Waiting for the host to start a match", "Nothing is recorded yet. Keep this tab open.");
   }
 
+  // ───────── my stats (read-only: the server only adds up what it already stored) ─────────
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const pctTxt = (x) => Math.round(x * 100) + "%";
+  const sideTxt = (s) => s === "attack" ? "att" : "def";
+  let statsLoading = false;
+  async function loadStats() {
+    if (statsLoading || !S.token || S.authFailed) return;
+    statsLoading = true; $("statsBtn").disabled = true;
+    try {
+      const r = await api("/join/mystats");
+      if (!r.ok) { $("statsNote").textContent = r.status === 503 ? "Stats are unavailable right now." : "Couldn't load your stats."; return; }
+      renderStats(await r.json());
+    } catch (e) { $("statsNote").textContent = "Couldn't reach the server for your stats."; }
+    finally { statsLoading = false; $("statsBtn").disabled = false; }
+  }
+  function renderStats(s) {
+    const body = $("statsBody"); body.innerHTML = "";
+    const t = s.totals || {};
+    if (!t.matches) { $("statsNote").textContent = "No team matches with you in them yet. They appear here after the host's sessions are processed."; return; }
+    $("statsNote").textContent = `${t.matches} team matches, ${t.rounds} rounds.`;
+    const sum = el("div", "stats");
+    const cell = (label, value) => { const d = el("div", null, label + " "); d.appendChild(el("b", null, value)); return d; };
+    sum.appendChild(cell("K/D", `${t.kd.toFixed(2)} (${t.k}/${t.d})`));
+    sum.appendChild(cell("Survived", pctTxt(t.survival) + " of rounds"));
+    if (t.opening_rounds_known) sum.appendChild(cell("First kills", `${t.first_kills}, first deaths ${t.first_deaths}` +
+      (t.opening_rounds_known < t.rounds ? ` (in ${t.opening_rounds_known} of ${t.rounds} rounds read so far)` : "")));
+    if (t.plants || t.clutches) sum.appendChild(cell("Plants / clutches", `${t.plants} / ${t.clutches}`));
+    body.appendChild(sum);
+    if (t.top_operators && t.top_operators.length)
+      body.appendChild(el("p", "small", "Most played: " + t.top_operators.map((o) => `${o.op} (${sideTxt(o.side)}) x${o.rounds}`).join(", ")));
+    const lv = s.latest_vs_usual;
+    if (lv) {
+      const p = el("p", "small");
+      const bit = (label, now, usual, fmt) => {
+        const span = el("span", now > usual * 1.1 ? "up" : now < usual * 0.9 ? "down" : null, `${label} ${fmt(now)}`);
+        p.appendChild(span); p.appendChild(document.createTextNode(` (your usual ${fmt(usual)})  `));
+      };
+      p.appendChild(document.createTextNode("Latest match against your usual over " + lv.matches_before + " earlier: "));
+      bit("K/D", lv.kd[0], lv.kd[1], (x) => x.toFixed(2));
+      bit("survived", lv.survival[0], lv.survival[1], pctTxt);
+      body.appendChild(p);
+    }
+    for (const m of s.matches || []) {
+      const row = el("div", "mrow"), top = el("div", "top");
+      const left = el("div"); left.appendChild(el("b", null, `${m.map}`)); left.appendChild(document.createTextNode(`  ${m.date}`));
+      const res = el("span", m.score_us > m.score_them ? "win" : m.score_us < m.score_them ? "loss" : null, `${m.score_us}-${m.score_them}`);
+      top.appendChild(left); top.appendChild(res); row.appendChild(top);
+      const bits = [`K/D ${m.kd.toFixed(2)} (${m.k}/${m.d}/${m.a})`, `survived ${pctTxt(m.survival)}`];
+      if (m.opening_rounds_known) bits.push(`first kills ${m.first_kills}, first deaths ${m.first_deaths}`);
+      if (m.plants.length) bits.push("planted R" + m.plants.join(", R"));
+      if (m.defuses.length) bits.push("defused R" + m.defuses.join(", R"));
+      for (const c of m.clutches) bits.push(`clutch R${c.round}` + (c.kills ? ` (${c.kills} kills)` : ""));
+      row.appendChild(el("div", "small", bits.join(" · ")));
+      row.appendChild(el("div", "small", m.operators.map((o) => `${o.op} (${sideTxt(o.side)}) x${o.rounds}`).join(", ")));
+      if (m.intel) {
+        const d = el("details"); d.appendChild(el("summary", "small", "What the debrief said about you"));
+        d.appendChild(el("pre", null, m.intel)); row.appendChild(d);
+      }
+      body.appendChild(row);
+    }
+  }
+
   // ───────── boot ─────────
   async function boot() {
     const fromHash = decodeURIComponent((location.hash || "").replace(/^#/, "")).trim();
@@ -693,6 +770,8 @@
     S.clockOffset = j.server_time - wallNow();
     syncClock(4, true);
     $("setupCard").classList.remove("hidden");
+    $("statsCard").classList.remove("hidden"); $("statsBtn").onclick = loadStats;
+    loadStats();                                        // once on open; Refresh for more (never polled: the server is the host's PC)
     await listMics();
     if (navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener("devicechange", listMics);
     $("startBtn").onclick = () => start(); $("stopBtn").onclick = stop; $("pauseBtn").onclick = togglePause;

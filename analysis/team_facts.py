@@ -165,7 +165,14 @@ def round_kda(match: Any, ours: Optional[set[str]]) -> dict[int, tuple[int, int,
 
 # ── first kills and clutches (from the replay's kill feed) ────────────────
 
+def ordered(events: dict[int, dict]) -> dict[int, dict]:
+    """Only rounds whose kill feed is in the order things happened. Before 2026-10-06 it was sorted by the
+    on-screen clock (time left), so first kills, trades and clutches stored then are wrong until re-read."""
+    return {n: e for n, e in events.items() if e.get("kill_order")}
+
+
 def opening_summary(match: Any, events: dict[int, dict]) -> dict[str, Any]:
+    events = ordered(events)
     won_by_round = {int(r.round_number): r.outcome == "win" for r in match.rounds}
     up = [n for n, e in events.items() if e.get("opening_duel_won") is True and n in won_by_round]
     down = [n for n, e in events.items() if e.get("opening_duel_won") is False and n in won_by_round]
@@ -188,6 +195,7 @@ def opening_lines(summary: dict[str, Any]) -> list[str]:
 
 def clutch_lines(events: dict[int, dict], ours: Optional[set[str]], display: dict[str, str]) -> list[str]:
     out = []
+    events = ordered(events)
     for n in sorted(events):
         who = events[n].get("clutch_player") or ""
         if who and (ours is None or norm(who) in ours):
@@ -200,7 +208,7 @@ def clutch_lines(events: dict[int, dict], ours: Optional[set[str]], display: dic
 def opening_counts(events: dict[int, dict]) -> dict[str, dict[str, int]]:
     """{player: {'first_kills': n, 'first_deaths': n}} from the kill feed."""
     out: dict[str, dict[str, int]] = {}
-    for e in events.values():
+    for e in ordered(events).values():
         killer, victim = e.get("first_blood_killer") or "", e.get("first_blood_victim") or ""
         if killer:
             out.setdefault(norm(killer), {"first_kills": 0, "first_deaths": 0})["first_kills"] += 1

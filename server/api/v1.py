@@ -402,6 +402,21 @@ def join_whoami(principal: VoicePrincipal = Depends(verify_voice_token)) -> dict
     return {"kind": principal.kind, "username": principal.username, "server_time": time.time()}
 
 
+@router.get("/join/mystats")
+def join_mystats(principal: VoicePrincipal = Depends(verify_voice_token)) -> dict:
+    """A player's own numbers from the team's stored matches, for their invite link. Only an invite (one
+    named player) can call it, and it only reads what is already stored: no analysis, no AI."""
+    if principal.kind != "invite" or not principal.username:
+        raise HTTPException(status_code=403, detail="Only a player's own invite link can see their stats.")
+    from server.match_db import get_match_repo
+    from server.services.player_stats import player_stats
+    try:
+        return player_stats(get_match_repo(), principal.username)
+    except Exception as e:
+        print(f"[MyStats] {principal.username}: {e}")
+        raise HTTPException(status_code=503, detail="Stats are unavailable right now.")
+
+
 # ── Browser-recorder invite links (host only) ────────────────────────────
 
 def _invite_links(created: dict) -> dict:
