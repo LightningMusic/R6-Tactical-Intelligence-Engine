@@ -88,6 +88,15 @@ def backfill_session(session_id: str, log=print) -> dict[str, Any]:
     repo = get_match_repo()
     with repo.db.get_connection() as conn:
         done = apply_round_updates(conn, match_id, result.rounds)
+        # Which players were ours (the recorder's team, from the replay). Matches analysed before this was
+        # stored had no team at all, which kept them out of "your usual" and every player's My stats.
+        ours = CommsService.our_players_from_rounds(getattr(result, "timeline_rounds", None) or [])
+        if ours:
+            conn.execute("DELETE FROM derived_metrics WHERE match_id = ? AND metric_name = 'our_players'", (match_id,))
+            conn.execute("INSERT INTO derived_metrics (match_id, metric_name, metric_value, is_ai_generated, metric_text) "
+                         "VALUES (?, 'our_players', ?, 0, ?)", (match_id, len(ours), json.dumps(sorted(ours))))
+            conn.commit()
+            done["our_players"] = len(ours)
     log(f"[Backfill] match {match_id}: updated {done['stats']} player-round rows and {done['events']} rounds of events.")
 
     # A round whose "our team" could not be worked out (2026-10-05: stray player ids) was also left out

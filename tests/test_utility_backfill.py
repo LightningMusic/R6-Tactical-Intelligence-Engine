@@ -77,17 +77,23 @@ def _run_backfill(monkeypatch, tmp_path, host_utterances, timeline_rounds):
         def save_rounds(sid, rounds, mid): calls.append(("save_rounds", rounds, mid))
         @staticmethod
         def build(sid): calls.append(("build",)); return {"flags": []}
+        our_players_from_rounds = staticmethod(comms.CommsService.our_players_from_rounds)
+
+    store = sqlite3.connect(":memory:")
+    store.execute("CREATE TABLE derived_metrics (match_id INT, metric_name TEXT, metric_value REAL, is_ai_generated INT, metric_text TEXT)")
 
     class FakeRepo:
         class db:
             @staticmethod
             @contextlib.contextmanager
-            def get_connection(): yield object()
+            def get_connection(): yield store
 
     monkeypatch.setattr(rec_importer, "RecImporter", FakeImporter)
     monkeypatch.setattr(comms, "CommsService", FakeComms)
     monkeypatch.setattr(match_db, "get_match_repo", lambda: FakeRepo)
-    return ub.backfill_session("session_x", log=lambda m: None), calls
+    result = ub.backfill_session("session_x", log=lambda m: None)
+    calls.append(("stored", [tuple(r) for r in store.execute("SELECT match_id, metric_name, metric_text FROM derived_metrics")]))
+    return result, calls
 
 
 def _fake_server_db(match_id):
@@ -135,12 +141,20 @@ def test_a_session_with_a_transcript_gets_its_rounds_and_timeline_refreshed(monk
     rounds = [{"round": 1, "ours": ["Me"]}]
     result, calls = _run_backfill(monkeypatch, tmp_path, [{"text": "hi"}], rounds)
     assert result["match_id"] == 22 and result["timeline_rebuilt"] is True
-    assert calls == [("save_rounds", rounds, 22), ("build",)]
+    assert calls[:2] == [("save_rounds", rounds, 22), ("build",)]
 
 
 def test_a_session_without_a_transcript_is_left_for_the_normal_pipeline(monkeypatch, tmp_path):
     result, calls = _run_backfill(monkeypatch, tmp_path, [], [{"round": 1}])
-    assert "timeline_rebuilt" not in result and calls == []
+    assert "timeline_rebuilt" not in result and calls == [("stored", [])]
+
+
+def test_a_reread_records_which_players_were_ours(monkeypatch, tmp_path):
+    rounds = [{"round": 1, "ours": ["Me", "Mate"]}, {"round": 2, "ours": ["me", "Third"]}]
+    result, calls = _run_backfill(monkeypatch, tmp_path, [], rounds)
+    stored = dict(calls)["stored"]
+    assert result["our_players"] == 3
+    assert stored == [(22, "our_players", json.dumps(["Mate", "Me", "Third"]))]
 
 
 def test_events_are_replaced_not_duplicated_and_unknown_rounds_are_skipped():

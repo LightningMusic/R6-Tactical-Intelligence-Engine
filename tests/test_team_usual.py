@@ -62,6 +62,34 @@ def test_a_night_that_wins_the_first_kill_is_called_out_against_the_usual():
     assert all(line.startswith("- ") for line in lines)
 
 
+def test_trades_plants_and_sites_are_compared_too():
+    blank = {"rounds": 9, "won": 7, "fk": 0, "fk_won": 0, "conc": 0, "conc_won": 0, "k": 0, "d": 0,
+             "player_rounds": 0, "survived": 0}
+    this = {**blank, "deaths": 10, "traded": 4, "atk": 4, "planted": 3, "planted_won": 3, "unplanted_won": 0,
+            "sites": {"defense|B Wine Cellar": [3, 2], "attack|2F Office": [2, 1]}}
+    base = {**blank, "matches": 20, "deaths": 600, "traded": 54, "atk": 80, "planted": 25, "planted_won": 23,
+            "unplanted_won": 21, "sites": {"defense|B Wine Cellar": [9, 2], "attack|2F Office": [3, 1]}}
+    text = "\n".join(tf.usual_lines(this, base))
+    assert "Trades: 4 of our 10 deaths were avenged within seconds (40%), well above your usual 9%" in text
+    assert "won 92% of the attack rounds where you planted and 38% of those where you didn't" in text
+    assert "Defending B Wine Cellar: 2-1 here; 2-7 in earlier matches." in text
+    assert "2F Office" not in text                                     # only 3 earlier rounds there: too few to quote
+
+
+def test_match_record_counts_traded_deaths_plants_and_sites_from_the_replay():
+    m, ev = big_night()
+    for r in m.rounds:
+        r.site = "B Wine Cellar"
+    ev[1]["kills"] = [{"victim": "Hector", "trade": True}, {"victim": "Enemy", "trade": True}, {"victim": "Elijah"}]
+    ev[2]["bomb_planted"] = True
+    rec = tf.match_record(m, OURS, ev)
+    assert (rec["deaths"], rec["traded"]) == (2, 1)
+    assert (rec["atk"], rec["planted"], rec["planted_won"]) == (4, 1, 1)
+    assert rec["sites"]["attack|B Wine Cellar"] == [4, 4]
+    base = tf.usual_baseline([rec, rec, rec])
+    assert base["sites"]["attack|B Wine Cellar"] == [12, 12] and base["deaths"] == 6
+
+
 def test_the_section_appears_in_the_report_after_round_patterns():
     m, ev = big_night()
     facts = tf.build_match_facts(m, OURS, ev, {}, usual=baseline())

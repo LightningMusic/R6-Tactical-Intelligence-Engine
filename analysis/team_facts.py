@@ -229,6 +229,20 @@ def match_record(match: Any, ours: Optional[set[str]], events: dict[int, dict]) 
     table = player_table(match, ours)
     team = team_totals(table)
     op = opening_summary(match, events)
+    deaths = traded = 0
+    for e in ordered(events).values():
+        for k in e.get("kills") or []:
+            if ours is not None and norm(k.get("victim")) in ours:
+                deaths += 1
+                traded += bool(k.get("trade"))           # its killer was killed within a few seconds
+    atk = [r for r in match.rounds if r.side == "attack"]
+    planted = [r for r in atk if events.get(int(r.round_number), {}).get("bomb_planted")]
+    sites: dict[str, list[int]] = {}
+    for r in match.rounds:
+        if getattr(r, "site", None):
+            s = sites.setdefault(f"{r.side}|{r.site}", [0, 0])
+            s[0] += 1
+            s[1] += r.outcome == "win"
     return {
         "rounds": len(match.rounds), "won": sum(1 for r in match.rounds if r.outcome == "win"),
         "fk": op["first_kill_rounds"], "fk_won": op["first_kill_wins"],
@@ -236,15 +250,26 @@ def match_record(match: Any, ours: Optional[set[str]], events: dict[int, dict]) 
         "k": team["k"], "d": team["d"],
         "player_rounds": sum(r["rounds"] for r in table.values()),
         "survived": sum(r["survived"] for r in table.values()),
+        "deaths": deaths, "traded": traded,
+        "atk": len(atk), "planted": len(planted), "planted_won": sum(r.outcome == "win" for r in planted),
+        "unplanted_won": sum(r.outcome == "win" for r in atk if r not in planted),
+        "sites": sites,
     }
 
 
-def usual_baseline(records: Iterable[Optional[dict[str, int]]]) -> Optional[dict[str, int]]:
+def usual_baseline(records: Iterable[Optional[dict[str, Any]]]) -> Optional[dict[str, Any]]:
     """Totals over the earlier matches, or None when there are too few to call anything usual."""
     recs = [r for r in records if r and r["rounds"] >= USUAL_MIN_THIS_ROUNDS]
     if len(recs) < USUAL_MIN_MATCHES or sum(r["rounds"] for r in recs) < USUAL_MIN_ROUNDS:
         return None
-    out = {k: sum(r[k] for r in recs) for k in recs[0]}
+    out: dict[str, Any] = {k: sum(r.get(k, 0) for r in recs) for k in recs[0] if k != "sites"}
+    sites: dict[str, list[int]] = {}
+    for r in recs:
+        for key, (n, w) in (r.get("sites") or {}).items():
+            s = sites.setdefault(key, [0, 0])
+            s[0] += n
+            s[1] += w
+    out["sites"] = sites
     out["matches"] = len(recs)
     return out
 
@@ -275,6 +300,21 @@ def usual_lines(this: Optional[dict[str, int]], base: Optional[dict[str, int]]) 
     if this["d"] and base["d"]:
         here, usual = _kd(this["k"], this["d"]), _kd(base["k"], base["d"])
         out.append(f"- Team K/D {here:.2f}, {band_ratio(here, usual).lower()} your usual {usual:.2f}.")
+    if this.get("deaths", 0) >= 8 and base.get("deaths", 0) >= 30:
+        here, usual = this["traded"] / this["deaths"], base["traded"] / base["deaths"]
+        out.append(f"- Trades: {this['traded']} of our {this['deaths']} deaths were avenged within seconds ({here:.0%}), "
+                   f"{band_points(here, usual).lower()} your usual {usual:.0%}. An untraded death leaves the team a player down.")
+    unpl = base.get("atk", 0) - base.get("planted", 0)
+    if this.get("atk", 0) >= 3 and base.get("planted", 0) >= 5 and unpl >= 5:
+        out.append(f"- Plants: we planted in {this['planted']} of {this['atk']} attack rounds and won {this['planted_won']} of those. "
+                   f"In earlier matches you won {base['planted_won'] / base['planted']:.0%} of the attack rounds where you planted "
+                   f"and {base['unplanted_won'] / unpl:.0%} of those where you didn't.")
+    for key, (n, w) in sorted((this.get("sites") or {}).items()):
+        before = (base.get("sites") or {}).get(key)
+        if before and before[0] >= 4:
+            side, site = key.split("|", 1)
+            out.append(f"- {'Defending' if side == 'defense' else 'Attacking'} {site}: {w}-{n - w} here; "
+                       f"{before[1]}-{before[0] - before[1]} in earlier matches.")
     return out
 
 

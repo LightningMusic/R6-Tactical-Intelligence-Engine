@@ -135,6 +135,9 @@ class RoundEvents:
             "kills": [
                 {
                     "time":       k.time_str,
+                    # seconds since prep began (None when unknown): keeps timing questions (how early do we
+                    # make contact, how fast are trades) answerable without the replay
+                    "t":          round(k.time_sec, 1) if k.time_sec >= 0 else None,
                     "killer":     k.killer,
                     "victim":     k.victim,
                     "headshot":   k.headshot,

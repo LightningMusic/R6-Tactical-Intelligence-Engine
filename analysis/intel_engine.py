@@ -996,6 +996,13 @@ class IntelEngine:
                 if str(data["player"].name).lower() in facts["ours"]
             }
 
+        from analysis.siege_roles import READING_GUIDE, roles_text
+        played: dict[str, list[tuple[str, str]]] = {}
+        for r in match.rounds:
+            for s in r.player_stats:
+                op = str(getattr(getattr(s, "operator", None), "name", "") or "")
+                if op:
+                    played.setdefault(str(s.player.name).lower(), []).append((op, r.side))
         player_lines = []
         sorted_players = sorted(
             players_with_stats.items(),
@@ -1019,6 +1026,8 @@ class IntelEngine:
                 f"(KD {kd:.2f}  EWR {ew:.0%}  Survival {sr:.0%}  "
                 f"TPS {score:.2f})  "
                 f"{rp} rounds"
+                + (f"  roles: {roles_text(played.get(str(data['player'].name).lower(), []))}"
+                   if roles_text(played.get(str(data["player"].name).lower(), [])) else "")
             )
 
         no_stats_note = ""
@@ -1087,6 +1096,8 @@ STRICT RULES — violating these makes the analysis worthless:
 - Base observations only on patterns visible in multiple rounds, not single-round anomalies.
 - The opponent is "{opponent}" — use that wording. The player table lists OUR team only.
 - The map is "{match.map}".
+
+{READING_GUIDE}
 
 ════════════════════════════════════════════════════════════════
 MATCH DATA  (this is everything the system knows — nothing more)
