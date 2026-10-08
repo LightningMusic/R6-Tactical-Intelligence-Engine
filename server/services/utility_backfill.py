@@ -105,6 +105,10 @@ def backfill_session(session_id: str, log=print) -> dict[str, Any]:
     try:
         if row and json.loads(row["host_utterances_json"] or "[]") and getattr(result, "timeline_rounds", None):
             CommsService.save_rounds(session_id, result.timeline_rounds, match_id)
+            try:
+                CommsService.detect_bleed(session_id)            # host-mic lines that were the teammate beside him
+            except Exception as e:                               # noqa: BLE001 - a refinement, never fatal
+                log(f"[Backfill] match {match_id}: host-mic check skipped: {e}")
             if CommsService.build(session_id) is not None:
                 done["timeline_rebuilt"] = True
                 log(f"[Backfill] match {match_id}: comms timeline rebuilt.")

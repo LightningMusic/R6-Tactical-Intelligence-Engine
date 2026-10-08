@@ -28,6 +28,7 @@ import shutil
 import tempfile
 import threading
 import time
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -67,6 +68,73 @@ def _load_audio(path: Path):
 
 def _local_utc_offset() -> float:
     return float(time.localtime().tm_gmtoff)
+
+
+BLEED_RATIO = 2.0       # a host-mic line this much louder (relative to each person's normal level) on a
+                        # teammate's mic was said by the teammate
+
+
+def _rms(x) -> float:
+    import numpy as np
+    return float(np.sqrt(np.mean(np.asarray(x, dtype=np.float64) ** 2))) if len(x) else 0.0
+
+
+def loud_elsewhere(host_lines: list[dict], mine, theirs, clip_start: float, offset_sec: float,
+                   their_lines: list[dict], sr: int = SR) -> list[list[float]]:
+    """Lines on the host's own mic that the teammate actually said: the host sits next to them, so the host's
+    mic hears them too and Whisper writes their words down as the host's. Whoever speaks is loud on their own
+    mic and quiet on the other, relative to each person's normal speaking level, which is what this compares
+    (a learned voice can't tell two people apart on one mic: 2026-10-07 the scores were within a few points).
+    `theirs` is the teammate's recording on THEIR clock; their time = clip time - offset_sec.
+    Returns [start, end] (epoch) of each host line that belongs to the teammate."""
+    import numpy as np
+    seg_mine = lambda u: mine[max(0, int((u["start"] - clip_start) * sr)):max(0, int((u["end"] - clip_start) * sr))]
+    seg_theirs = lambda u: theirs[max(0, int((u["start"] - clip_start - offset_sec) * sr)):
+                                  max(0, int((u["end"] - clip_start - offset_sec) * sr))]
+    my_levels = [_rms(seg_mine(u)) for u in host_lines if u["end"] - u["start"] >= 1.0]
+    their_levels = [_rms(theirs[max(0, int((u["start"] - clip_start - offset_sec) * sr)):
+                                max(0, int((u["end"] - clip_start - offset_sec) * sr))])
+                    for u in their_lines if u["end"] - u["start"] >= 1.0]
+    my_levels = [x for x in my_levels if x > 0]
+    their_levels = [x for x in their_levels if x > 0]
+    if len(my_levels) < 5 or len(their_levels) < 5:
+        return []                      # too little to know either person's normal level
+    my_med, their_med = float(np.median(my_levels)), float(np.median(their_levels))
+    out = []
+    for u in host_lines:
+        if u["end"] - u["start"] < 0.6:
+            continue
+        b = seg_theirs(u)
+        if not len(b) or not np.any(b):
+            continue                   # their recording doesn't cover this moment
+        ratio = (_rms(b) / their_med) / max(_rms(seg_mine(u)) / my_med, 1e-6)
+        if ratio > BLEED_RATIO:
+            out.append([round(float(u["start"]), 2), round(float(u["end"]), 2)])
+    return out
+
+
+def reassign_bleed(own: list[dict], bleed_by_user: dict[str, list], voice: list[dict]) -> tuple[list[dict], int, int]:
+    """Host-mic lines marked as a teammate's (detect_bleed): dropped when the teammate's own track already has
+    the same words at that moment, otherwise kept under the teammate's name. Returns (lines, moved, dropped)."""
+    import difflib
+    import re
+    words = lambda t: re.sub(r"[^a-z0-9 ]", "", str(t).lower()).split()
+    owner = {(round(float(s), 2), round(float(e), 2)): user for user, spans in bleed_by_user.items() for s, e in spans}
+    out, moved, dropped = [], 0, 0
+    for u in own:
+        user = owner.get((round(float(u["start"]), 2), round(float(u["end"]), 2)))
+        if not user:
+            out.append(u)
+            continue
+        theirs = [v for v in voice if str(v.get("username", "")).lower() == user.lower()]
+        if any(min(u["end"], v["end"]) - max(u["start"], v["start"]) > -0.5
+               and difflib.SequenceMatcher(None, words(u["text"]), words(v["text"])).ratio() >= 0.5 for v in theirs):
+            dropped += 1                 # their own track already has it, in their own voice
+            continue
+        speaker = next((v.get("speaker") for v in theirs if v.get("speaker")), user)
+        out.append({**u, "speaker": speaker, "username": user, "source": "voice", "via": "host mic"})
+        moved += 1
+    return out, moved, dropped
 
 
 def voice_id_exclusions(aligned: set, rounds: list[dict], profiles: dict) -> set:
@@ -188,6 +256,10 @@ class CommsService:
                                         self_user if source == "self" else ""))
             if source in ("team", "mixed"):
                 shutil.copy2(path, comms_dir / f"team{path.suffix}")
+            elif source == "self":
+                # Kept so a teammate's recording can later show which of these lines were really them,
+                # heard through the host's mic from the next seat (see detect_bleed).
+                shutil.copy2(path, comms_dir / f"self{path.suffix}")
             print(f"[Comms] {session_id[:16]} {source} track: {len(segments)} lines")
 
         audio_meta["pieces"] = pieces
@@ -295,6 +367,10 @@ class CommsService:
             print(f"[Comms] {session_id[:16]} {username}: {info.get('status')} -- {len(utts)} lines")
             changed = True
         if changed:
+            try:
+                cls.detect_bleed(session_id)
+            except Exception as e:                               # a refinement, never a reason to fail
+                print(f"[Comms] {session_id[:16]}: host-mic check skipped: {e}")
             cls.build(session_id)
         return changed
 
@@ -368,6 +444,85 @@ class CommsService:
             print(f"[VoiceID] learning skipped for {username}: {e}")
         return _utterances(on_discord, clock, "voice", speaker, username, time_map=a.to_ref), info
 
+    @classmethod
+    def _self_clip(cls, session_id: str) -> Optional[Path]:
+        """The host's own mic track: kept in the comms folder since 2026-10-08; older sessions still have it
+        inside their uploaded package."""
+        comms_dir = server_settings.COMMS_DIR / session_id
+        clip = next(iter(sorted(comms_dir.glob("self.*"))), None)
+        if clip is not None:
+            return clip
+        try:
+            from server.services.utility_backfill import package_path
+            pkg = package_path(session_id)
+            if pkg is None or not pkg.exists():
+                return None
+            with zipfile.ZipFile(pkg) as z:
+                name = next((n for n in z.namelist() if n.startswith("audio/self.")), None)
+                if name is None:
+                    return None
+                comms_dir.mkdir(parents=True, exist_ok=True)
+                target = comms_dir / f"self{Path(name).suffix}"
+                target.write_bytes(z.read(name))
+                return target
+        except Exception as e:
+            print(f"[Comms] {session_id[:16]}: host mic track not available: {e}")
+            return None
+
+    @classmethod
+    def detect_bleed(cls, session_id: str) -> int:
+        """For every teammate whose own recording lined up with this session, mark the lines on the host's mic
+        that were really that teammate (sitting next to the host). Saved in their alignment info as "bleed";
+        build() then moves those lines to the teammate (or drops them when the teammate's own track already
+        has them). Returns how many lines were marked. Reads stored audio only: no transcription."""
+        import numpy as np
+        import soundfile as sf
+        row = cls._get(session_id)
+        if not row or row["window_start"] is None:
+            return 0
+        meta = json.loads(row["audio_meta_json"] or "{}")
+        host_self = [u for u in json.loads(row["host_utterances_json"] or "[]") if u.get("source") == "self"]
+        with server_db.get_connection() as conn:
+            voice_rows = [dict(r) for r in conn.execute(
+                "SELECT username, alignment_json, utterances_json FROM session_voice WHERE session_id=?", (session_id,))]
+        aligned = [r for r in voice_rows if json.loads(r["alignment_json"] or "{}").get("status") == "aligned"]
+        if not host_self or not aligned:
+            return 0
+        clip = cls._self_clip(session_id)
+        if clip is None:
+            return 0
+        mine = _load_audio(clip)
+        clock = ClipClock(meta.get("pieces") or [[float(row["window_start"]), 0.0]])
+        ws, we = float(row["window_start"]), float(row["window_end"])
+        chunks_by_user = cls.voice_chunks_for_window(ws, we)
+        marked = 0
+        for r in aligned:
+            info = json.loads(r["alignment_json"] or "{}")
+            theirs = np.zeros(len(mine), dtype=np.float32)
+            for c in chunks_by_user.get(r["username"], []):
+                try:
+                    data, sr = sf.read(c["file_path"], dtype="float32", always_2d=False)
+                except Exception:
+                    continue
+                if data.ndim > 1:
+                    data = data.mean(axis=1)
+                if sr != SR:
+                    data = np.interp(np.arange(0, len(data), sr / SR), np.arange(len(data)), data).astype(np.float32)
+                at = int(round((float(c["start_epoch"]) - clock.start) * SR))
+                lo, hi = max(0, at), min(len(theirs), at + len(data))
+                if hi > lo:
+                    theirs[lo:hi] = data[lo - at:hi - at]
+            bleed = loud_elsewhere(host_self, mine, theirs, clock.start, float(info.get("offset_sec") or 0.0),
+                                   json.loads(r["utterances_json"] or "[]"))
+            info["bleed"] = bleed
+            marked += len(bleed)
+            with server_db.get_connection() as conn:
+                conn.execute("UPDATE session_voice SET alignment_json=? WHERE session_id=? AND username=?",
+                             (json.dumps(info), session_id, r["username"]))
+                conn.commit()
+            print(f"[Comms] {session_id[:16]}: {len(bleed)} line(s) on the host's mic were really {r['username']}.")
+        return marked
+
     # ── 4. Build ──────────────────────────────────────────────────────
 
     @classmethod
@@ -394,6 +549,10 @@ class CommsService:
             # so "you" can't be told apart from the team: use the Discord
             # track alone rather than invent talk-overs between two copies.
             own = []
+        bleed = {r["username"]: json.loads(r["alignment_json"] or "{}").get("bleed") or [] for r in voice_rows}
+        if any(bleed.values()):
+            own, moved, dropped = reassign_bleed(own, bleed, voice)
+            print(f"[Comms] {session_id[:16]}: host-mic lines that were a teammate: {moved} moved, {dropped} duplicates dropped.")
         team = drop_team_duplicates(team_all, voice)
         voice_id_stats = None
         try:
