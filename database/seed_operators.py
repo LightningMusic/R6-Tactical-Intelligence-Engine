@@ -606,24 +606,21 @@ def seed_database(db: DatabaseManager):
         # 4️⃣ Default Team Players
         # --------------------------------------
 
-        DEFAULT_TEAM_PLAYERS = [
-            "Player1",
-            "Player2",
-            "Player3",
-            "Player4",
-            "Player5",
-        ]
-
-
-        # Seed Team Players
-        for name in DEFAULT_TEAM_PLAYERS:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO players (name, is_team_member)
-                VALUES (?, 1)
-                """,
-                (name,)
-            )
+        # No placeholder team any more. "Player1".."Player5" used to be seeded as team members on every
+        # start, so they sat in every player dropdown next to the real team (and "INSERT OR REPLACE"
+        # gave them new ids each time). The team is set in Settings > Players; placeholders that were
+        # seeded earlier are removed here, but only while they have no stats or aliases of their own.
+        has_aliases = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'player_aliases'").fetchone()
+        conn.execute(
+            """
+            DELETE FROM players
+            WHERE is_team_member = 1 AND name GLOB 'Player[0-9]*'
+              AND NOT EXISTS (SELECT 1 FROM player_round_stats s WHERE s.player_id = players.player_id)
+            """
+            + ("AND NOT EXISTS (SELECT 1 FROM player_aliases a WHERE a.player_id = players.player_id)"
+               if has_aliases else "")
+        )
         for map_name in MAPS:
             conn.execute(
                 """

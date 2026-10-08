@@ -10,6 +10,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, QObject, Signal
 from app.config import settings
 
+MAIN_PLAYERS = 5        # the five who play
+TEAM_SLOTS = 6          # ...plus a sub
+
 
 class _TestConnectionWorker(QObject):
     """Runs SessionUploader.test_connection() off the UI thread. Pure Qt
@@ -216,7 +219,7 @@ class SettingsView(QWidget):
         layout.setSpacing(12)
 
         intro = QLabel(
-            "Team player names (5 players). \"Aliases\" are other in-game "
+            "Team player names: the five who play, plus a sub. \"Aliases\" are other in-game "
             "usernames/tags this same person has played under — list them "
             "comma-separated and imports will tie that username to this "
             "player automatically instead of creating a duplicate."
@@ -226,9 +229,10 @@ class SettingsView(QWidget):
 
         grid = QFormLayout()
         grid.setSpacing(8)
-        for i in range(5):
+        for i in range(TEAM_SLOTS):
+            sub = i >= MAIN_PLAYERS
             name_edit = QLineEdit()
-            name_edit.setPlaceholderText(f"Player {i+1} name")
+            name_edit.setPlaceholderText("Sub name" if sub else f"Player {i+1} name")
             alias_edit = QLineEdit()
             alias_edit.setPlaceholderText("aliases, comma, separated (optional)")
 
@@ -238,7 +242,7 @@ class SettingsView(QWidget):
             pair_widget = QWidget()
             pair_widget.setLayout(pair)
 
-            grid.addRow(f"Player {i+1}:", pair_widget)
+            grid.addRow("Sub:" if sub else f"Player {i+1}:", pair_widget)
             self._player_edits.append({
                 "player_id": None,
                 "name": name_edit,
