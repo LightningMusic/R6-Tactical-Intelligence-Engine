@@ -102,7 +102,8 @@ def test_the_host_app_log_says_a_silent_last_recording_was_silent():
          "last_recording": {"silent": True, "seconds": 6149, "start_epoch": 1791327592.0, "finished": 1}}
     line = CompanionLink.describe(c, {"comp_user": "Pat"})
     assert "Pat (Comp_User)" in line and "last recording" in line and "SILENT" in line
-    assert "102 min" in line and "headset" in line
+    assert "102 min" in line and "switches to a working mic by itself" in line
+    assert "need to pick" not in line                     # teammates are never asked to do anything
 
 
 def test_while_a_recording_is_still_going_the_host_log_says_so_in_the_present_tense():

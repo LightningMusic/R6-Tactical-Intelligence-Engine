@@ -617,3 +617,22 @@ def test_host_log_lines_only_when_something_changes():
     assert link.changed_lines(names) == ["James (Teddy_Dance): recording ✓ 10 min"]
     assert link.changed_lines(names) == []                      # just a minute longer: not news
     assert "not checking in" in link.changed_lines(names)[0]
+
+
+def test_a_stick_left_at_home_is_reported_once_not_every_minute():
+    from app.companion_link import CompanionLink
+    link = CompanionLink()
+    seen = iter(range(80_700, 85_000, 60))                      # 2026-10-07: 1345 min, 1346 min, ...
+    link.status = lambda: {"companions": [{"device_id": "d", "username": "Stick_Owner", "seconds_since_seen": next(seen),
+                                           "status": {"recording": False}}]}
+    lines = [line for _ in range(70) for line in link.changed_lines({"stick_owner": "Pat"})]
+    assert len(lines) == 1 and "not checking in" in lines[0]
+
+
+def test_the_host_hears_when_a_recorder_switched_mics_by_itself():
+    from app.companion_link import CompanionLink
+    line = CompanionLink.describe({"username": "Zander_Web", "seconds_since_seen": 1,
+                                   "status": {"kind": "browser", "started": True, "recording": True, "since": time.time(),
+                                              "mic_ok": True, "mic_healed": "Microphone (USB Audio Device)"}})
+    assert "switched to a working mic by itself: Microphone (USB Audio Device)" in line
+    assert "pick the headset" not in line

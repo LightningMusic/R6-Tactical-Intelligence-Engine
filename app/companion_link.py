@@ -123,12 +123,17 @@ class CompanionLink:
         if not silent and last.get("silent") and float(last.get("seconds") or 0) >= 60:
             when = time.strftime("%a %H:%M", time.localtime(float(last.get("start_epoch") or now)))
             mins = int(float(last["seconds"]) // 60)
+            # Their recorder now looks for a working microphone by itself, so the note is for the host:
+            # what happened, and what to look at if it happens again.
             if last.get("finished"):
-                silent = (f" -- but their last recording ({when}, {mins} min) was SILENT: that mic picked up "
-                          f"nothing, so they need to pick the headset they use for Discord")
+                silent = (f" -- their last recording ({when}, {mins} min) was SILENT; the recorder now switches to a "
+                          f"working mic by itself, so watch for a 'mic looks silent' line")
             else:
-                silent = (f" -- the audio uploaded so far ({mins} min) is SILENT: that mic is picking up nothing, "
-                          f"so they need to pick the headset they use for Discord")
+                silent = (f" -- the audio uploaded so far ({mins} min) is SILENT: no mic on that PC is picking up "
+                          f"anything (headset unplugged or muted?)")
+        healed = s.get("mic_healed")
+        if healed and s.get("mic_ok") is not False:
+            silent += f" -- switched to a working mic by itself: {healed}"
         if s.get("recording"):
             secs = int(now - float(s.get("since") or now))
             extra = f", {s['free_gb']} GB free" if s.get("free_gb") is not None and s["free_gb"] < 5 else ""
@@ -154,7 +159,9 @@ class CompanionLink:
         for c in data.get("companions") or []:
             line = self.describe(c, names)
             key = c.get("device_id", "")
-            gist = line.split(" ✓")[0]
+            # Durations and "last seen N min ago" don't count as a change (2026-10-07: a stick left at home
+            # was reported 75 times in one practice, once a minute, because its minute count kept changing).
+            gist = line.split(" ✓")[0].split(" (last seen")[0]
             if self._last_lines.get(key) != gist:
                 self._last_lines[key] = gist
                 out.append(line)
