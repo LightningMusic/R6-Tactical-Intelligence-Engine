@@ -69,6 +69,18 @@ def _local_utc_offset() -> float:
     return float(time.localtime().tm_gmtoff)
 
 
+def voice_id_exclusions(aligned: set, rounds: list[dict], profiles: dict) -> set:
+    """Learned voices that must NOT be used to name a Discord line in this match: anyone whose own recording
+    already covers it (`aligned`), and anyone who was not on our side in this match. With a single learned
+    voice there is nobody to compare against, so 2026-10-07's Border named a line "Zander" although he sat
+    that match out (his page was still recording at home). When the rounds don't say who played, only
+    `aligned` is excluded, as before."""
+    present = {str(u).lower() for rnd in rounds or [] for u in (rnd.get("ours") or [])}
+    if not present:
+        return set(aligned)
+    return set(aligned) | {name for name in profiles if str(name).lower() not in present}
+
+
 class ClipClock:
     """Maps seconds into a clip onto epoch time. A clip can be stitched from
     several recording files (pieces), each starting at its own epoch."""
@@ -393,6 +405,7 @@ class CommsService:
             if team and clip is not None and voice_id.enabled() and voice_id.load_profiles():
                 aligned = {r["username"] for r in voice_rows
                            if json.loads(r["alignment_json"] or "{}").get("status") == "aligned"}
+                aligned = voice_id_exclusions(aligned, rounds, voice_id.load_profiles())
                 display = {str(k).lower(): v for k, v in (meta.get("roster") or {}).items()}
                 display.update(cls.team_context(row["match_id"])[1])
                 team, voice_id_stats = voice_id.label_team_lines(
