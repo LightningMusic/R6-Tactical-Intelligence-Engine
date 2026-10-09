@@ -144,6 +144,8 @@
   // whole practice was recorded as silence while the tab sat minimized with only a small note inside it.
   const DEAD_PEAK = 0.0002;
   const DEAD_MS = 6 * 1000;
+  const GAP_FILL_MS = 250;                   // a block this much later than its samples say: fill the hole with silence
+  const PROBE_BACK_MS = 3000;                // the microphone healed away from has carried sound this long: go back to it
   const RATIO_MIN_SEC = 60;                  // judge the audio's speed only after a minute of recording
   const RATIO_OK = [0.93, 1.07];
   const TITLE = "R6 Team Recorder";
@@ -165,8 +167,9 @@
     hostWantsRecording: false, always: false,
     started: false, paused: false, recording: false,
     ctx: null, stream: null, node: null, source: null, sink: null,
-    recordingId: null, chunkIndex: 0, cycleStartEpoch: 0, cycleSamples: 0,
+    recordingId: null, chunkIndex: 0, cycleStartEpoch: 0, cycleSamples: 0, cyclePerfStart: 0, gapFilledSec: 0,
     buf: [], bufSamples: 0, haveT0: false, totalSamples: 0,
+    probe: null,                                         // the microphone healed away from, listened to in the background
     uploaded: 0, queued: 0,
     level: 0, lastAliveAt: 0, lastSoundAt: 0, micLabel: "", micNote: "", fatal: "",
     healing: false, healAfter: 0, healedTo: "", healFailed: false, needsTap: false, autoStarted: false,
@@ -257,7 +260,8 @@
     class Tap extends AudioWorkletProcessor {
       process(inputs) {
         const ch = inputs[0] && inputs[0][0];
-        if (ch && ch.length) this.port.postMessage({ t: currentTime, d: ch.slice(0) });
+        // A microphone that stops supplying frames still takes up time: forward silence, never nothing.
+        this.port.postMessage({ t: currentTime, d: ch && ch.length ? ch.slice(0) : new Float32Array(128) });
         return true;
       }
     }
@@ -299,16 +303,34 @@
 
   // The audio clock's time -> seconds on the server's clock. getOutputTimestamp pairs one audio-clock reading
   // with one performance.now() reading; everything else is offset arithmetic from there.
-  function audioToServerEpoch(audioT, fallbackBlockLen) {
+  function audioToPerfMs(audioT) {
     try {
       const ts = S.ctx.getOutputTimestamp();
       if (ts && ts.contextTime > 0 && ts.performanceTime > 0) {
         const perfMs = ts.performanceTime + (audioT - ts.contextTime) * 1000;
-        const epoch = wallNow() - (performance.now() - perfMs) / 1000 + S.clockOffset;
-        if (Math.abs(epoch - serverNow()) < 10) return epoch;
+        if (Math.abs(perfMs - performance.now()) < 10000) return perfMs;
       }
     } catch (e) {}
+    return null;
+  }
+  function audioToServerEpoch(audioT, fallbackBlockLen) {
+    const perfMs = audioToPerfMs(audioT);
+    if (perfMs !== null) return wallNow() - (performance.now() - perfMs) / 1000 + S.clockOffset;
     return serverNow() - fallbackBlockLen / S.ctx.sampleRate;
+  }
+
+  // Keep the recording on the real clock. Chunk times are counted in samples, so audio the browser never delivered
+  // (a busy PC's audio thread missing its turns: on 2026-10-06 and -08 one teammate's page delivered 66% of real
+  // time) used to pull every later chunk earlier, 35 minutes adrift by the end, and the track could not be lined
+  // up with the match. When a block arrives later than the samples so far say it should, the hole is filled with
+  // silence first: the lost audio stays lost, but everything after it is where it belongs.
+  function fillGap(audioT) {
+    const perfMs = audioToPerfMs(audioT);
+    if (perfMs === null) return;
+    const lagMs = perfMs - (S.cyclePerfStart + (S.cycleSamples + S.bufSamples) / SR * 1000);
+    if (lagMs < GAP_FILL_MS) return;
+    const n = Math.round(lagMs / 1000 * SR);
+    S.buf.push(new Int16Array(n)); S.bufSamples += n; S.gapFilledSec += n / SR;
   }
 
   function onBlock(msg) {
@@ -322,7 +344,11 @@
     if (!S.recording || S.paused) return;
     if (!S.haveT0) {
       S.cycleStartEpoch = audioToServerEpoch(msg.t, frames.length);
+      const perfMs = audioToPerfMs(msg.t);
+      S.cyclePerfStart = perfMs !== null ? perfMs : performance.now() - frames.length / S.ctx.sampleRate * 1000;
       S.haveT0 = true; S.cycleSamples = 0;
+    } else {
+      fillGap(msg.t);
     }
     const pcm = toPcm16(frames, S.ctx.sampleRate);
     S.buf.push(pcm); S.bufSamples += pcm.length;
@@ -392,7 +418,7 @@
   // ───────── recording cycles (follow the host) ─────────
   function startCycle() {
     S.recording = true; S.recordingId = hex(16); S.chunkIndex = 0;
-    S.haveT0 = false; S.cycleSamples = 0; S.buf = []; S.bufSamples = 0; S.totalSamples = 0;
+    S.haveT0 = false; S.cycleSamples = 0; S.buf = []; S.bufSamples = 0; S.totalSamples = 0; S.gapFilledSec = 0;
     resetResampler();
   }
   function endCycle() {
@@ -415,7 +441,7 @@
     if (!S.recording || !S.haveT0) return null;
     const wall = serverNow() - S.cycleStartEpoch;
     if (wall < RATIO_MIN_SEC) return null;
-    return ((S.cycleSamples + S.bufSamples) / SR) / wall;
+    return ((S.cycleSamples + S.bufSamples) / SR - S.gapFilledSec) / wall;      // delivered audio, not the filled holes
   }
 
   // ───────── heartbeat ─────────
@@ -425,6 +451,8 @@
     const ratio = audioRatio();
     const status = {
       audio_ratio: ratio === null ? null : +ratio.toFixed(2),
+      gap_filled: S.recording ? Math.round(S.gapFilledSec) : null,     // seconds of audio the browser never delivered
+      mic_probe: S.probe ? S.probe.label : null,
       ctx: S.ctx ? S.ctx.state : null, ctx_rate: S.ctx ? S.ctx.sampleRate : null,
       visible: document.visibilityState === "visible",
       started: S.started, recording: S.recording, paused: S.paused, mode: S.always ? "always" : "follow",
@@ -526,6 +554,7 @@
   async function healMic() {
     if (S.healing || !S.started) return;
     S.healing = true;
+    stopProbe();
     const original = currentMicId();
     const deadIds = new Set([original]), deadGroups = new Set();
     try {
@@ -544,6 +573,7 @@
           S.healedTo = S.micLabel || d.label || "another microphone"; S.healFailed = false;
           ls.set(LS_MIC, d.deviceId);
           await listMics();
+          startProbe(original, (here && here.label) || "the first microphone");
           return;
         }
         deadIds.add(d.deviceId); if (d.groupId) deadGroups.add(d.groupId);
@@ -562,6 +592,50 @@
     if (!S.started || S.paused || S.fatal || S.healing || reacquiring) return;
     if (performance.now() - S.lastSoundAt <= DEAD_MS || performance.now() < S.healAfter) return;
     healMic();
+  }
+
+  // After a heal, the microphone that went quiet is still listened to in the background, and the page goes back
+  // to it once it carries sound again. A wireless headset that slept or was muted for a moment wakes up; the
+  // microphone found instead may only hear the room (2026-10-08: a headset was swapped for a USB adapter's input
+  // for a whole practice, and the teammate's voice was barely on the recording).
+  async function startProbe(deviceId, label) {
+    stopProbe();
+    if (!S.ctx || !S.sink || !deviceId) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+        deviceId: { exact: deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
+      const src = S.ctx.createMediaStreamSource(stream);
+      const an = S.ctx.createAnalyser();
+      an.fftSize = 2048;
+      src.connect(an); an.connect(S.sink);                 // the sink's gain is 0: pulled, never heard
+      S.probe = { id: deviceId, label, stream, src, an, data: new Float32Array(an.fftSize), aliveSince: 0 };
+    } catch (e) { S.probe = null; }
+  }
+  function stopProbe() {
+    const p = S.probe;
+    if (!p) return;
+    S.probe = null;
+    try { p.src.disconnect(); p.an.disconnect(); } catch (e) {}
+    p.stream.getTracks().forEach((t) => t.stop());
+  }
+  async function checkProbe() {
+    const p = S.probe;
+    if (!p) return;
+    if (!S.started) { stopProbe(); return; }
+    if (S.healing || reacquiring) return;
+    p.an.getFloatTimeDomainData(p.data);
+    let peak = 0;
+    for (let i = 0; i < p.data.length; i++) { const a = Math.abs(p.data[i]); if (a > peak) peak = a; }
+    if (peak <= DEAD_PEAK) { p.aliveSince = 0; return; }
+    if (!p.aliveSince) p.aliveSince = performance.now();
+    if (performance.now() - p.aliveSince < PROBE_BACK_MS) return;
+    stopProbe();
+    try {
+      await openMic(p.id);
+      S.healedTo = ""; ls.set(LS_MIC, p.id);
+      await listMics();
+    } catch (e) {}
+    render();
   }
 
   let reacquiring = false;
@@ -664,7 +738,7 @@
       || (S.needsTap ? "Click anywhere on this page once to finish starting the recording (your browser wants one touch)." : "")
       || (searching ? "Your microphone isn't sending sound: looking for one that works..." : "")
       || (S.healedTo && !dead ? "Your microphone wasn't sending sound, so this page switched to \"" + S.healedTo + "\" by itself." : "")
-      || (slow ? "This computer is delivering your microphone audio at " + Math.round(ratio * 100) + "% of normal speed, so the recording won't line up with the match. Tell the host; closing other programs that use audio, or using Chrome or Edge, may help." : "")
+      || (slow ? "This computer is delivering your microphone audio at " + Math.round(ratio * 100) + "% of normal speed, so part of what you say is missing from the recording (it still lines up with the match). Tell the host; closing other programs that use audio, or using Chrome or Edge, may help." : "")
       || (silent ? "Your mic has been silent for a while. Check it isn't muted and that the right headset is selected." : "")
       || (!S.online ? "Can't reach the server - your audio is being kept safely and uploads when it's back." : ""));
 
@@ -787,6 +861,7 @@
     setInterval(heartbeat, HEARTBEAT_MS);
     setInterval(render, 500);
     setInterval(watchMic, 2000);
+    setInterval(checkProbe, 1000);
     setInterval(() => { if (S.started) takeWakeLock(); }, 30000);
     setInterval(() => { if (S.started) syncClock(3, true); }, CLOCK_RESYNC_MS);
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.started) takeWakeLock(); });
@@ -813,7 +888,7 @@
     username: S.username, rate: S.ctx && S.ctx.sampleRate, clockOffset: S.clockOffset, fatal: S.fatal, auth: S.authFailed,
     dead: S.started && !S.paused && performance.now() - S.lastSoundAt > DEAD_MS, mic: S.micLabel, title: document.title,
     ratio: audioRatio(), healing: S.healing, healed: S.healedTo, healFailed: S.healFailed, needsTap: S.needsTap,
-    autoStarted: S.autoStarted, ctx: S.ctx ? S.ctx.state : null }),
+    autoStarted: S.autoStarted, ctx: S.ctx ? S.ctx.state : null, gapFilled: S.gapFilledSec, probe: S.probe ? S.probe.label : null }),
     // Test-only: pretend `sec` seconds of audio went missing from this recording (e2e_silent_mic.py uses it,
     // because a fake microphone always delivers in perfect real time).
     testLoseAudio: (sec) => { S.cycleSamples = Math.max(0, S.cycleSamples - Math.round(sec * SR)); } };

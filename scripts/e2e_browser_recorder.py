@@ -113,6 +113,14 @@ def main() -> int:
                 print("No Edge/Chrome available.")
                 return 2
             ctx = browser.new_context(permissions=["microphone"])
+            # Test hook: with window.__dropEvery = n, every nth message from the audio worklet is lost before the
+            # page sees it, as when a busy PC's audio thread misses its turns.
+            ctx.add_init_script("""
+                const d = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage');
+                Object.defineProperty(MessagePort.prototype, 'onmessage', { configurable: true,
+                    get() { return d.get.call(this); },
+                    set(fn) { let k = 0; d.set.call(this, (e) => { if (window.__dropEvery && (++k % window.__dropEvery === 0)) return; fn(e); }); } });
+            """)
             page = ctx.new_page()
             errors: list[str] = []
             page.on("pageerror", lambda e: errors.append(str(e)))
@@ -172,8 +180,31 @@ def main() -> int:
             check(ok_audio, "stored chunks are Opus files that decode at 16 kHz with the right length")
             check(burst, "stored audio contains the fake mic's tone bursts and silences (real audio, not zeros)")
 
+            print("\n[3b] a starved audio thread: a third of the audio never arrives, the recording still keeps real time")
+            page.evaluate("window.__dropEvery = 3")
+            before3 = {r["recording_id"] for r in chunk_rows(db)}
+            control(True)
+            wait_for(lambda: state()["recording"], 12, "recording for the starvation test")
+            t_rec3 = time.time()
+            time.sleep(65)                                             # the page judges its speed after a minute
+            st3 = state()
+            t_stop3 = time.time()
+            control(False)
+            wait_for(lambda: not state()["recording"] and state()["queued"] == 0, 30, "starvation cycle uploaded")
+            page.evaluate("window.__dropEvery = 0")
+            rows3 = [r for r in chunk_rows(db) if r["recording_id"] not in before3]
+            span3 = sum(r["duration_sec"] for r in rows3)
+            check(abs(span3 - (t_stop3 - t_rec3)) < 6,
+                  f"recording spans {span3:.1f}s for a {t_stop3 - t_rec3:.1f}s session although a third of the audio was dropped")
+            check(st3 and 0.55 < (st3.get("ratio") or 0) < 0.8,
+                  f"the page reports the audio delivered per real second (got {st3 and st3.get('ratio')})")
+            check(st3 and (st3.get("gapFilled") or 0) >= 8, f"the page reports the silence it put in (got {st3 and st3.get('gapFilled')} s)")
+            g3 = [rows3[i + 1]["start_epoch"] - (rows3[i]["start_epoch"] + rows3[i]["duration_sec"]) for i in range(len(rows3) - 1)]
+            check(all(abs(g) < 0.005 for g in g3), "chunks still tile exactly")
+
             print("\n[4] offline: audio is kept in the browser, then uploaded when the network returns")
             before = len(chunk_rows(db))
+            seen_ids = {r["recording_id"] for r in chunk_rows(db)}
             control(True)
             wait_for(lambda: state()["recording"], 12, "recording again")
             ctx.set_offline(True)
@@ -185,7 +216,7 @@ def main() -> int:
             wait_for(lambda: state()["queued"] == 0 and not state()["recording"], 40, "queue drained after reconnect")
             after = chunk_rows(db)
             check(len(after) > before + 1, f"offline audio arrived after reconnect ({len(after) - before} new chunks)")
-            new = [r for r in after if r["recording_id"] != rows[0]["recording_id"]]
+            new = [r for r in after if r["recording_id"] not in seen_ids]
             check(len({r["recording_id"] for r in new}) == 1, "second cycle got its own recording id")
             g2 = [new[i + 1]["start_epoch"] - (new[i]["start_epoch"] + new[i]["duration_sec"]) for i in range(len(new) - 1)]
             check(all(abs(g) < 0.005 for g in g2), "chunks still tile exactly after an outage")
