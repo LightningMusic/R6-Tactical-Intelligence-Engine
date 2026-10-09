@@ -59,7 +59,10 @@ MIC_DEAD_PEAK = 0.0003
 MIC_TRY_SEC = 14.0             # how long each alternative gets (OBS needs a moment to open a device)
 MIC_TRY_SKIP_SEC = 3.0
 MIC_MAX_TRIES = 4
-MIC_HEAL_RETRY_SEC = 300.0     # after a round that found nothing, look again this much later
+# After a search that found nothing, look again this much later. 2026-10-08: a teammate's recording was silent
+# for its first 25 minutes (most of a match) at a 5-minute interval; a headset plugged in or unmuted late is
+# picked up within a minute now.
+MIC_HEAL_RETRY_SEC = 60.0
 
 
 def in_use(path: Path) -> bool:
@@ -130,6 +133,7 @@ class Companion:
         self._mic_probe_at = 0.0
         self._healing = False
         self._heal_after = 0.0
+        self._heal_failed: set[str] = set()          # mics a search this recording already found silent
         self._stop = False
         self._export_lock = threading.Lock()
 
@@ -256,8 +260,13 @@ class Companion:
                 devices = self.obs.microphones()
             except Exception:
                 devices = []
-            tried = [original]
-            options = candidates(devices, tried)[:MIC_MAX_TRIES]
+            # Each search goes on down the list past the mics earlier ones found silent (it used to try the same
+            # top four every time, so a working headset ranked fifth was never reached); once every mic has had
+            # its turn, start over.
+            options = candidates(devices, [original, *self._heal_failed])[:MIC_MAX_TRIES]
+            if not options and self._heal_failed:
+                self._heal_failed.clear()
+                options = candidates(devices, [original])[:MIC_MAX_TRIES]
             if options:
                 self.log("Looking for a microphone that works...")
             for dev_id, name in options:
@@ -274,8 +283,11 @@ class Companion:
                     self.save_settings(mic_device=dev_id, mic_name=name)
                     self.obs.set_up = True                  # already applied; don't redo OBS's setup mid-recording
                     self.mic_ok, self.mic_peak, self.mic_healed = True, round(peak, 4), name
+                    self._heal_failed.clear()
                     self.log(f"Switched to another microphone automatically: {name}.")
                     return True
+                if peak is not None:
+                    self._heal_failed.add(dev_id)           # proven silent; a session ending mid-try proves nothing
             if options:
                 self.obs.set_mic(original)
             if self.recording:
@@ -308,6 +320,7 @@ class Companion:
                              else "Recording started.")
                     if not self.recording:
                         self.recording_since = time.time()
+                        self._heal_failed.clear()
                     rec = True
                 else:
                     self.obs_status = self.obs.last_error

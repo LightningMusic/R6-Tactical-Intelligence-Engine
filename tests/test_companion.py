@@ -481,8 +481,36 @@ def test_when_no_microphone_works_the_original_is_put_back_and_the_host_is_told(
     assert comp.obs.set_mic_calls == ["default", "{b}", "{c}", "{orig}"]      # everything tried, then back where it was
     assert comp.mic_ok is False and comp.status()["mic_ok"] is False
     assert any("No microphone on this PC is delivering sound" in line for line in logs)
-    # and it doesn't hammer OBS: the next look is a few minutes away
+    # and it doesn't hammer OBS: the next look is a minute away
     assert comp._heal_after >= core.time.time() + core.MIC_HEAL_RETRY_SEC - 5
+
+
+def test_a_later_search_goes_on_down_the_list_instead_of_retrying_the_same_four(comp, monkeypatch):
+    import core
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    # the mic in use, then four silent spares, then one more silent and finally one that works
+    now, calls = recording_now(comp, monkeypatch, [0.0] * 6 + [0.3])
+    comp.obs.mics = [("default", "Default"), ("{a}", "Headset Microphone (A)"), ("{b}", "Headset Microphone (B)"),
+                     ("{c}", "Headset Microphone (C)"), ("{d}", "Microphone (D)"), ("{e}", "Microphone (E)")]
+    comp.obs.mic_device = "{orig}"
+    comp.log = lambda line: None
+    assert comp.check_mic(now) is False
+    assert comp.obs.set_mic_calls == ["default", "{a}", "{b}", "{c}", "{orig}"]
+    assert comp.heal_mic() is True                                             # a minute later
+    assert comp.obs.set_mic_calls[5:] == ["{d}", "{e}"] and comp.mic_healed == "Microphone (E)"
+    assert core.MIC_HEAL_RETRY_SEC <= 60
+
+
+def test_once_every_microphone_has_had_its_turn_the_search_starts_over(comp, monkeypatch):
+    import core
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    now, calls = recording_now(comp, monkeypatch, [0.0] * 3 + [0.2])
+    comp.obs.mics = [("default", "Default"), ("{a}", "Headset Microphone (A)")]
+    comp.obs.mic_device = "{orig}"
+    comp.log = lambda line: None
+    assert comp.check_mic(now) is False                                        # both silent (headset still asleep)
+    assert comp.heal_mic() is True                                             # nothing new: tries them again
+    assert comp.obs.set_mic_calls[-1] == "default"
 
 
 def test_a_merely_quiet_microphone_is_flagged_but_never_swapped(comp, monkeypatch):
