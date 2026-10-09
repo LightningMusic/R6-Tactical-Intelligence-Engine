@@ -541,7 +541,7 @@ def setup_lines(s: dict[str, list[dict]], display: Optional[dict[str, str]] = No
         start = sum(x["start"] for x in d)
         low = min(d, key=lambda x: x["used"])
         line = (f"- Reinforcements on defense: {used} of {start} used over {len(d)} round(s)"
-                f" (fewest: R{low['round']:02d}, {low['used']} of {low['start']}).")
+                + (f" (fewest: R{low['round']:02d}, {low['used']} of {low['start']})." if len(d) > 1 else "."))
         late = [x for x in d if x["late"]]
         if late:
             line += (f" {sum(x['late'] for x in late)} went up after the action had started: "
