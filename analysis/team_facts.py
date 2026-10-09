@@ -443,6 +443,144 @@ def death_places(match: Any, ours: Optional[set[str]], positions: dict[int, dict
     return [f"- Where our players died most: {top}."]
 
 
+# ── site setup and breaches (integration/walls.py) ────────────────────────
+
+ON_WALL_M = 2.0             # a breach this close to a reinforced spot (same floor) went through that wall
+COVERED_M = 1.5             # a reinforcement this close to one of the site's usual walls covered it
+HARD_READ = {"thermite", "ace"}          # hard breachers whose charges the replay names (walls.GADGETS)
+
+
+def _near(spots: list[dict], x: float, y: float, z: float, dist: float) -> Optional[dict]:
+    best = min(((math.dist((s["x"], s["y"]), (x, y)), s) for s in spots
+                if s.get("x") is not None and abs(s["z"] - z) < FLOOR_STEP), default=None, key=lambda c: c[0])
+    return best[1] if best and best[0] < dist else None
+
+
+def _ops(r: Any, ours: Optional[set[str]], mine: bool) -> set[str]:
+    return {norm(getattr(getattr(s, "operator", None), "name", "") or "") for s in r.player_stats
+            if ours is not None and (norm(s.player.name) in ours) == mine} - {""}
+
+
+def setup(match: Any, ours: Optional[set[str]], positions: dict[int, dict],
+          usual: Optional[dict[str, dict]] = None) -> dict[str, list[dict]]:
+    """Per round, from the replays' wall data: on defense, how many of the 10 reinforcements went up, how many
+    after prep, who put them up, which of the site's usual walls stayed open, and which hard breach charges went
+    off on a wall we reinforced; on attack, what our hard breach opened."""
+    from analysis.places import usual_walls
+    from integration.positions import PREP_SEC
+    out: dict[str, list[dict]] = {"defense": [], "attack": []}
+    for r in sorted(match.rounds, key=lambda x: x.round_number):
+        rn = int(r.round_number)
+        w = (positions.get(rn) or {}).get("walls")
+        if not w or r.side not in ("attack", "defense"):
+            continue
+        reinf = w.get("reinforcements") or []
+        hard = [b for b in w.get("breaches") or [] if b.get("kind") == "hard"]
+        if r.side == "defense":
+            missed = total = 0
+            for u in usual_walls(usual or {}, r.site or ""):
+                total += 1
+                missed += _near(reinf, u["x"], u["y"], u["z"], COVERED_M) is None
+            through, other = [], []
+            for b in hard:
+                s = _near(reinf, b["x"], b["y"], b["z"], ON_WALL_M)
+                (through if s else other).append({**b, "wall_by": s.get("who") if s else None})
+            out["defense"].append({
+                "round": rn, "site": r.site or "", "used": w["start"] - w["end"], "start": w["start"],
+                "late": sum(1 for s in reinf if s["t"] > PREP_SEC),
+                "by": collections.Counter(s["who"] for s in reinf if s.get("who") and (ours is None or norm(s["who"]) in ours)),
+                "unclear": sum(1 for s in reinf if not s.get("who")),
+                "usual": total, "missed": missed, "through": through, "other": other,
+                "their_hard": sorted(_ops(r, ours, False) & HARD_BREACH)})
+        else:
+            opened, other = [], []
+            for b in hard:
+                (opened if _near(reinf, b["x"], b["y"], b["z"], ON_WALL_M) else other).append(b)
+            out["attack"].append({"round": rn, "opened": opened, "other": other,
+                                  "our_hard": sorted(_ops(r, ours, True) & HARD_BREACH)})
+    return out
+
+
+def _charges(bs: list[dict]) -> str:
+    """'Thermite at 2:11 left' / 'Thermite (2 charges) from 2:12 left' / 'Ace (5 blasts) from 1:42 left'
+    (each S.E.L.M.A. blasts more than once; earliest first)."""
+    from integration.walls import clock_left
+    by: dict[str, list[float]] = collections.defaultdict(list)
+    for b in bs:
+        by[b["op"]].append(b["t"])
+    return ", ".join(f"{op} at {clock_left(ts[0])}" if len(ts) == 1
+                     else f"{op} ({len(ts)} {'blasts' if op == 'Ace' else 'charges'}) from {clock_left(min(ts))}"
+                     for op, ts in sorted(by.items(), key=lambda kv: min(kv[1])))
+
+
+def setup_lines(s: dict[str, list[dict]], display: Optional[dict[str, str]] = None) -> list[str]:
+    from analysis.places import short_site
+    display = display or {}
+    name = lambda n: display.get(norm(n), n)
+    out = []
+    d = s.get("defense") or []
+    if d:
+        used = sum(x["used"] for x in d)
+        start = sum(x["start"] for x in d)
+        low = min(d, key=lambda x: x["used"])
+        line = (f"- Reinforcements on defense: {used} of {start} used over {len(d)} round(s)"
+                f" (fewest: R{low['round']:02d}, {low['used']} of {low['start']}).")
+        late = [x for x in d if x["late"]]
+        if late:
+            line += (f" {sum(x['late'] for x in late)} went up after the action had started: "
+                     + ", ".join(f"R{x['round']:02d}" + (f" x{x['late']}" if x["late"] > 1 else "") for x in late) + ".")
+        out.append(line)
+        by: collections.Counter = collections.Counter()
+        for x in d:
+            by.update(x["by"])
+        if by:
+            unclear = sum(x["unclear"] for x in d)
+            out.append("- Who put them up: " + ", ".join(f"{name(n)} {k}" for n, k in by.most_common())
+                       + (f" ({unclear} not clear from the replay)" if unclear else "") + ".")
+        judged = [x for x in d if x["usual"]]
+        if judged:
+            missed = [x for x in judged if x["missed"]]
+            if missed:
+                out.append("- Walls usually reinforced on that site but left open: " + "; ".join(
+                    f"R{x['round']:02d} ({short_site(x['site'])}) {x['missed']} of {x['usual']}" for x in missed) + ".")
+            else:
+                out.append(f"- Every usual wall of the site was reinforced in all {len(judged)} round(s) where that is known.")
+        through = [x for x in d if x["through"]]
+        if through:
+            out.append(f"- Their hard breach went through walls we reinforced in {len(through)} of {len(d)} defense round(s): "
+                       + "; ".join(f"R{x['round']:02d} {_charges(x['through'])}"
+                                   + (f" ({', '.join(sorted({name(b['wall_by']) for b in x['through'] if b['wall_by']}))}'s wall)"
+                                      if any(b["wall_by"] for b in x["through"]) else "")
+                                   for x in through) + ".")
+        other = [x for x in d if x["other"]]
+        if other:
+            out.append("- Their hard breach also opened walls we had not reinforced: "
+                       + "; ".join(f"R{x['round']:02d} {_charges(x['other'])}" for x in other) + ".")
+        faced = [x for x in d if set(x["their_hard"]) & HARD_READ]
+        held = [x for x in faced if not x["through"] and not x["other"]]
+        if held:
+            out.append(f"- They had a hard breacher but no charge went off in {len(held)} of {len(faced)} such round(s): "
+                       + ", ".join(f"R{x['round']:02d}" for x in held) + " (denied, never placed, or never reached).")
+    a = s.get("attack") or []
+    rows = []
+    for x in a:
+        if x["opened"]:
+            rows.append(f"R{x['round']:02d} {_charges(x['opened'])} on reinforced walls")
+        if x["other"]:
+            rows.append(f"R{x['round']:02d} {_charges(x['other'])} on walls that were not reinforced")
+        readable = set(x["our_hard"]) & HARD_READ
+        if readable and not x["opened"] and not x["other"]:
+            rows.append(f"R{x['round']:02d} {'/'.join(o.capitalize() for o in sorted(readable))} in the lineup but no charge went off")
+    if rows:
+        out.append("- Our hard breach: " + "; ".join(rows) + "."
+                   + (" (No charge going off: denied, never placed, or the breacher died first.)"
+                      if any("no charge went off" in r for r in rows) else ""))
+    unread = sorted({o for x in a for o in x["our_hard"]} - HARD_READ)
+    if unread:
+        out.append(f"- ({', '.join(o.capitalize() for o in unread)}: charges are not read from the replay yet.)")
+    return out
+
+
 # ── objective play, utility and operators ─────────────────────────────────
 
 HARD_BREACH = {"thermite", "hibana", "ace", "maverick"}
@@ -936,7 +1074,8 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
                       places: Optional[tuple[dict, list]] = None) -> dict[str, Any]:
     """`ours`: our whole team (team numbers). `report_players`: who is listed by name (the saved team list).
     `usual`: totals over the team's earlier matches (usual_baseline), when there are enough.
-    `positions`: {round: player paths} from the replays; `places`: (site model, floors[, walk map]) for this map."""
+    `positions`: {round: player paths} from the replays; `places`: (site model, floors[, walk map[, usual walls]])
+    for this map."""
     table = player_table(match, ours)
     team = team_totals(table)
     opening = opening_summary(match, events)
@@ -970,9 +1109,17 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
                 pos_lines += death_places(match, ours, positions, places[0], places[1])
         except Exception:                                  # a nicety: never a reason to lose the debrief
             pos_lines = []
+    wall_lines: list[str] = []
+    if positions and ours:
+        try:
+            spots = places[3] if places and len(places) > 3 else None
+            wall_lines = setup_lines(setup(match, ours, positions, spots), display)
+        except Exception:
+            wall_lines = []
 
     return {
         "positioning_lines": pos_lines,
+        "setup_lines": wall_lines,
         "ours": ours,
         "table": table,
         "team": team,
@@ -1014,6 +1161,7 @@ def assemble_report(model_text: str, facts: dict[str, Any], focus: str) -> str:
         ("COMPARED WITH YOUR USUAL", "\n".join(facts.get("usual_lines") or [])),
         ("OBJECTIVE PLAY", objective),
         ("POSITIONING", "\n".join(facts.get("positioning_lines") or [])),
+        ("SITE SETUP & BREACHES", "\n".join(facts.get("setup_lines") or [])),
         ("UTILITY & OPERATORS", "\n".join(utility)),
         ("WHAT TO FOCUS ON NEXT", focus),
         ("COMMUNICATION", section_body(model_text, "COMMUNICATION") or "No comms data recorded."),

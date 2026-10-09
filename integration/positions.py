@@ -33,9 +33,9 @@ import json
 import math
 import re
 import struct
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-FC = bytes([0x60, 0x73, 0x85, 0xFE])
+FC =bytes([0x60, 0x73, 0x85, 0xFE])
 CLOCK = bytes([0x1F, 0x07, 0xEF, 0xC9])
 HAS_POS, HAS_ROT = 0x0100, 0x0200
 BODY = (0xB0, 0xB8)
@@ -162,14 +162,21 @@ def decode_round(data: bytes, dissect: dict, hz: float = 2.0) -> Optional[dict[s
     """Every player's path through one round: {"v", "hz", "def_team", "linked", "died": {name: t},
     "players": {name: {"team": i, "pts": [[t, x, y, z, yaw or None], ...]}}} with t in seconds since prep began.
     None when the replay has no readable movement or doesn't say which side defends."""
+    return decode_round_timed(data, dissect, hz)[0]
+
+
+def decode_round_timed(data: bytes, dissect: dict,
+                       hz: float = 2.0) -> tuple[Optional[dict[str, Any]], Optional[Callable[[int], float]]]:
+    """decode_round, plus the clock it built for the movement stream (byte offset -> seconds since prep began),
+    for timing other packets that ride in that stream (walls.py)."""
     players = {p.get("username"): p for p in dissect.get("players") or [] if p.get("username")}
     def_team = next((i for i, t in enumerate(dissect.get("teams") or []) if t.get("role") == "Defense"), None)
     if not players or def_team is None:
-        return None
+        return None, None
     tracks, deaths = movement(data)
     bodies = {r: p for r, p in tracks.items() if len(p) >= MIN_SAMPLES}
     if not bodies:
-        return None
+        return None, None
     team_of = lambda n: players[n].get("teamIndex")
     names = link_bodies(data, list(players.values()), bodies)
     linked = len(names)
@@ -254,7 +261,8 @@ def decode_round(data: bytes, dissect: dict, hz: float = 2.0) -> Optional[dict[s
         if cut is not None:
             died[n] = round(t_at(cut), 2)
         out_players[n] = {"team": team_of(n), "pts": thin}
-    return {"v": FORMAT_VERSION, "hz": hz, "def_team": def_team, "linked": linked, "died": died, "players": out_players}
+    out = {"v": FORMAT_VERSION, "hz": hz, "def_team": def_team, "linked": linked, "died": died, "players": out_players}
+    return out, t_at
 
 
 def encode(positions: dict) -> str:

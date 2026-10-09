@@ -214,6 +214,49 @@ def walk_map(rounds: list[dict], fl) -> WalkMap:
     return wm
 
 
+WALL_SAME_M = 1.2            # reinforcements this close (same floor) are on the same wall
+USUAL_WALL_SHARE = 0.5       # reinforced in at least this share of a site's rounds: one of its usual walls
+USUAL_WALL_ROUNDS = 3        # rounds on a site needed before anything is "usual" there
+
+
+def wall_spots(rounds: list[dict]) -> dict[str, dict]:
+    """site -> {"rounds": n, "walls": [{"x", "y", "z", "rounds": k}]}: the walls defenders reinforce on each
+    site and in how many of its n stored rounds, from the reinforcement spots in the positions' "walls" (any
+    team: a site's standard walls are the same whoever defends it)."""
+    by_site: dict[str, list[list[tuple]]] = collections.defaultdict(list)
+    for r in rounds:
+        w = (r.get("positions") or {}).get("walls")
+        spots = [(s["x"], s["y"], s["z"]) for s in (w or {}).get("reinforcements") or [] if s.get("x") is not None]
+        if r.get("site") and spots:
+            by_site[r["site"]].append(spots)
+    out = {}
+    for site, per_round in by_site.items():
+        walls: list[dict] = []
+        for k, spots in enumerate(per_round):
+            for x, y, z in spots:
+                c = next((c for c in walls if math.dist((c["x"], c["y"]), (x, y)) < WALL_SAME_M
+                          and abs(c["z"] - z) < FLOOR_GAP), None)
+                if c is None:
+                    c = {"x": x, "y": y, "z": z, "n": 0, "seen": set()}
+                    walls.append(c)
+                c["x"] = (c["x"] * c["n"] + x) / (c["n"] + 1)
+                c["y"] = (c["y"] * c["n"] + y) / (c["n"] + 1)
+                c["n"] += 1
+                c["seen"].add(k)
+        out[site] = {"rounds": len(per_round),
+                     "walls": sorted(({"x": round(c["x"], 2), "y": round(c["y"], 2), "z": c["z"], "rounds": len(c["seen"])}
+                                      for c in walls), key=lambda c: -c["rounds"])}
+    return out
+
+
+def usual_walls(spots: dict[str, dict], site: str) -> list[dict]:
+    """The walls reinforced in at least USUAL_WALL_SHARE of the site's stored rounds ([] with too few rounds)."""
+    s = spots.get(site)
+    if not s or s["rounds"] < USUAL_WALL_ROUNDS:
+        return []
+    return [w for w in s["walls"] if w["rounds"] / s["rounds"] >= USUAL_WALL_SHARE]
+
+
 def area(model, fl, x, y, z) -> str:
     """A coarse place for grouping: on a site, near one (within 20 m), or just the floor."""
     name = floor_of(fl, z)[1].rstrip("?")

@@ -583,7 +583,8 @@ class IntelEngine:
             return {}
 
     def _map_places(self, repo, match) -> Optional[tuple]:
-        """(site model, floors, walk map) learned from every stored round on this match's map; None with too few."""
+        """(site model, floors, walk map, usual walls per site) learned from every stored round on this match's
+        map; None with too few."""
         try:
             from analysis import places
             with repo.db.get_connection() as conn:
@@ -597,7 +598,7 @@ class IntelEngine:
             if sum(1 for r in rounds if r["site"]) < 3:
                 return None
             fl = places.floors(rounds)
-            return places.site_model(rounds, fl), fl, places.walk_map(rounds, fl)
+            return places.site_model(rounds, fl), fl, places.walk_map(rounds, fl), places.wall_spots(rounds)
         except Exception as e:
             print(f"[AI] Places for {getattr(match, 'map', '?')} unavailable: {e}")
             return None
@@ -1096,6 +1097,8 @@ class IntelEngine:
             for line in facts.get("usual_lines") or []:
                 team_metrics_text += f"  {line.lstrip('- ')}\n"
             for line in facts.get("positioning_lines") or []:
+                team_metrics_text += f"  {line.lstrip('- ')}\n"
+            for line in facts.get("setup_lines") or []:
                 team_metrics_text += f"  {line.lstrip('- ')}\n"
             for line in facts.get("objective_lines", [])[:2]:
                 team_metrics_text += f"  {line.lstrip('- ')}\n"

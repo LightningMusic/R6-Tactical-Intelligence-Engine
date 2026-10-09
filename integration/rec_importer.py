@@ -230,12 +230,24 @@ class RecImporter:
         """Where every player was through the round, from the replay's movement stream. Optional: a replay
         that can't be read this way just has no positions."""
         try:
-            from integration.positions import decode_round
+            from integration.positions import decode_round_timed
             from integration.replay_utility import read_rec
+            data = read_rec(rec_file)
             # 4 samples a second (~50 KB a round): fine enough for the walkable map to follow corners
-            round_obj.positions = decode_round(read_rec(rec_file), raw, hz=4.0)
+            round_obj.positions, t_at = decode_round_timed(data, raw, hz=4.0)
         except Exception as e:                                       # noqa: BLE001 - optional enrichment
             self._log(f"  (positions unavailable for {rec_file.name}: {e})")
+            return
+        if round_obj.positions is None:
+            return
+        try:
+            # Reinforcements and breaches ride in the positions blob: stored, re-read and loaded with it.
+            from integration.walls import decode_walls
+            walls = decode_walls(data, raw, round_obj.positions, t_at)
+            if walls:
+                round_obj.positions["walls"] = walls
+        except Exception as e:                                       # noqa: BLE001 - optional enrichment
+            self._log(f"  (wall data unavailable for {rec_file.name}: {e})")
 
     @classmethod
     def timeline_round(cls, data: dict, round_number: int) -> dict:
