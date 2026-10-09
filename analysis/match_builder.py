@@ -151,6 +151,11 @@ def build_matches_from_import_results(
                         total_events_saved += 1
                     except Exception as ev_err:
                         log(f"    Could not save events for R{round_obj.round_number}: {ev_err}")
+                if getattr(round_obj, "positions", None):
+                    try:
+                        save_round_positions(repo.db, match_id, round_obj.round_number, round_obj.positions)
+                    except Exception as pos_err:
+                        log(f"    Could not save positions for R{round_obj.round_number}: {pos_err}")
 
             log(
                 f"  ✓ Created match {match_id}: {map_name} "
@@ -161,6 +166,34 @@ def build_matches_from_import_results(
 
         except Exception as e:
             log(f"  ✗ Failed to create match record: {e}")
+
+
+def save_round_positions(db, match_id: int, round_number: int, positions: dict) -> None:
+    """One round's player paths, compressed, as derived metric round_<n>_positions (about 25 KB a round)."""
+    from integration.positions import encode
+    name = f"round_{int(round_number)}_positions"
+    with db.get_connection() as conn:
+        conn.execute("DELETE FROM derived_metrics WHERE match_id = ? AND metric_name = ?", (match_id, name))
+        conn.execute("INSERT INTO derived_metrics (match_id, metric_name, metric_value, is_ai_generated, metric_text) "
+                     "VALUES (?, ?, 0, 0, ?)", (match_id, name, encode(positions)))
+        conn.commit()
+
+
+def load_round_positions(db, match_id: int) -> dict[int, dict]:
+    """{round number: positions} for one match (rounds stored before positions existed are simply absent)."""
+    from integration.positions import decode_blob
+    out: dict[int, dict] = {}
+    with db.get_connection() as conn:
+        rows = conn.execute("SELECT metric_name, metric_text FROM derived_metrics WHERE match_id = ? "
+                            "AND metric_name LIKE 'round_%_positions' AND metric_text IS NOT NULL", (match_id,)).fetchall()
+    for name, text in rows:
+        try:
+            pos = decode_blob(text)
+            if pos:
+                out[int(str(name).split("_")[1])] = pos
+        except (ValueError, IndexError):
+            continue
+    return out
 
 
 def save_raw_player_stats(

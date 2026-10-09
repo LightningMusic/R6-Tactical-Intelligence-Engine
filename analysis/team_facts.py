@@ -8,7 +8,10 @@ Everything here is pure (no database, no model) so it can be tested directly.
 """
 from __future__ import annotations
 
+import collections
+import math
 import re
+import statistics
 from typing import Any, Iterable, Optional
 
 MIN_BASELINE_MATCHES = 3
@@ -224,8 +227,10 @@ USUAL_MIN_ROUNDS = 20
 USUAL_MIN_THIS_ROUNDS = 4    # a one- or two-round package says nothing about how a night went
 
 
-def match_record(match: Any, ours: Optional[set[str]], events: dict[int, dict]) -> dict[str, int]:
+def match_record(match: Any, ours: Optional[set[str]], events: dict[int, dict],
+                 positions: Optional[dict[int, dict]] = None) -> dict[str, int]:
     """The counts one match adds to (or is compared with) the team's usual."""
+    pos = positioning(match, ours, positions) if positions else {"deaths": 0, "isolated": 0}
     table = player_table(match, ours)
     team = team_totals(table)
     op = opening_summary(match, events)
@@ -254,6 +259,7 @@ def match_record(match: Any, ours: Optional[set[str]], events: dict[int, dict]) 
         "atk": len(atk), "planted": len(planted), "planted_won": sum(r.outcome == "win" for r in planted),
         "unplanted_won": sum(r.outcome == "win" for r in atk if r not in planted),
         "sites": sites,
+        "pos_deaths": pos["deaths"], "pos_isolated": pos["isolated"],
     }
 
 
@@ -316,6 +322,98 @@ def usual_lines(this: Optional[dict[str, int]], base: Optional[dict[str, int]]) 
             out.append(f"- {'Defending' if side == 'defense' else 'Attacking'} {site}: {w}-{n - w} here; "
                        f"{before[1]}-{before[0] - before[1]} in earlier matches.")
     return out
+
+
+# ── positions (where everyone was, from the replay's movement stream) ──────
+
+ISOLATION_M = 10.0          # a death with no teammate within this distance could not be traded
+APART_M = 10.0              # the last two of us further apart than this were fighting separate fights
+FLOOR_STEP = 2.0            # a height difference larger than this is another floor
+
+
+def _gap(a, b) -> float:
+    """Distance between two samples [t, x, y, z, yaw]; another floor counts as far away."""
+    return math.dist(a[1:3], b[1:3]) + (100.0 if abs(a[3] - b[3]) > FLOOR_STEP else 0.0)
+
+
+def positioning(match: Any, ours: Optional[set[str]], positions: dict[int, dict]) -> dict[str, Any]:
+    """From each round's player paths: our deaths with nobody close enough to trade them, and the rounds
+    that came down to two of us (how far apart they were, and whether they went down together)."""
+    from integration.positions import at
+    deaths = isolated = 0
+    last_two: list[dict] = []
+    outcome = {int(r.round_number): r.outcome for r in match.rounds}
+    for rn, pos in sorted(positions.items()):
+        players = pos.get("players") or {}
+        mine = [n for n in players if ours is None or norm(n) in ours]
+        if len(mine) < 2:
+            continue
+        died = {n: t for n, t in (pos.get("died") or {}).items() if n in mine}
+        for n, t in died.items():
+            me = at(players[n]["pts"], t - 0.5)
+            if me is None:
+                continue
+            others = [p for p in (at(players[o]["pts"], t - 0.5) for o in mine if o != n and died.get(o, 1e9) > t)
+                      if p is not None]
+            if not others:
+                continue                     # the last of us: nobody left to trade, says nothing about spacing
+            near = min(_gap(me, o) for o in others)
+            deaths += 1
+            isolated += near > ISOLATION_M
+        order = sorted(died.items(), key=lambda kv: kv[1])
+        alive = list(mine)
+        for n, t in order:
+            alive.remove(n)
+            if len(alive) == 2:
+                a, b = alive
+                end = min(died.get(a, 1e9), died.get(b, 1e9),
+                          max(p[0] for x in (a, b) for p in players[x]["pts"][-1:]))
+                ds = [_gap(pa, pb) for s in range(int(t), int(end) + 1)
+                      if (pa := at(players[a]["pts"], s)) is not None and (pb := at(players[b]["pts"], s)) is not None]
+                if ds:
+                    da, db = died.get(a), died.get(b)
+                    last_two.append({"round": rn, "median_m": statistics.median(ds), "outcome": outcome.get(rn),
+                                     "died_apart_s": abs(da - db) if da is not None and db is not None else None})
+                break
+    return {"deaths": deaths, "isolated": isolated, "last_two": last_two}
+
+
+def positioning_lines(p: dict[str, Any], usual: Optional[dict[str, Any]] = None) -> list[str]:
+    out = []
+    if p.get("deaths"):
+        line = (f"- Deaths with no teammate within {ISOLATION_M:.0f} m on the same floor (nobody close enough to trade them): "
+                f"{p['isolated']} of {p['deaths']} ({p['isolated'] / p['deaths']:.0%}).")
+        if usual and usual.get("pos_deaths", 0) >= 20:
+            u = usual["pos_isolated"] / usual["pos_deaths"]
+            line += f" Your usual: {u:.0%}."
+        out.append(line)
+    two = p.get("last_two") or []
+    if two:
+        apart = [x for x in two if x["median_m"] > APART_M]
+        detail = "; ".join(f"R{x['round']:02d} " + ("on different floors" if x["median_m"] >= 100 else f"{x['median_m']:.0f} m apart")
+                           + (f", down {x['died_apart_s']:.0f} s apart" if x["died_apart_s"] is not None else "")
+                           + (" (won)" if x["outcome"] == "win" else "") for x in two)
+        out.append(f"- It came down to two of us in {len(two)} round(s); in {len(apart)} of them the two were more "
+                   f"than {APART_M:.0f} m apart, fighting separate fights: {detail}.")
+    return out
+
+
+def death_places(match: Any, ours: Optional[set[str]], positions: dict[int, dict], model: dict, fl: list) -> list[str]:
+    """Where our players died, as places ('2F at Armory Lockers / Archives'), most common first."""
+    from analysis.places import area
+    from integration.positions import at
+    counts: collections.Counter = collections.Counter()
+    for pos in positions.values():
+        players = pos.get("players") or {}
+        for n, t in (pos.get("died") or {}).items():
+            if (ours is None or norm(n) in ours) and n in players:
+                p = at(players[n]["pts"], t - 0.5)
+                if p is not None:
+                    counts[area(model, fl, p[1], p[2], p[3])] += 1
+    if not counts:
+        return []
+    top = ", ".join(f"{place} x{n}" for place, n in counts.most_common(3))
+    return [f"- Where our players died most: {top}."]
 
 
 # ── objective play, utility and operators ─────────────────────────────────
@@ -807,9 +905,11 @@ def focus_points(match: Any, facts: dict[str, Any]) -> str:
 
 def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, dict],
                       display: dict[str, str], report_players: Optional[set[str]] = None,
-                      usual: Optional[dict[str, int]] = None) -> dict[str, Any]:
+                      usual: Optional[dict[str, int]] = None, positions: Optional[dict[int, dict]] = None,
+                      places: Optional[tuple[dict, list]] = None) -> dict[str, Any]:
     """`ours`: our whole team (team numbers). `report_players`: who is listed by name (the saved team list).
-    `usual`: totals over the team's earlier matches (usual_baseline), when there are enough."""
+    `usual`: totals over the team's earlier matches (usual_baseline), when there are enough.
+    `positions`: {round: player paths} from the replays; `places`: (site model, floors) learned for this map."""
     table = player_table(match, ours)
     team = team_totals(table)
     opening = opening_summary(match, events)
@@ -834,13 +934,23 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
                 gaps.append((display.get(norm(name), name), side, s["used_rounds"], s["rounds"]))
     gaps.sort(key=lambda g: (g[2] / g[3], -g[3]))
 
+    pos_lines: list[str] = []
+    if positions and ours:
+        try:
+            pos_lines = positioning_lines(positioning(match, ours, positions), usual)
+            if places and places[0]:
+                pos_lines += death_places(match, ours, positions, places[0], places[1])
+        except Exception:                                  # a nicety: never a reason to lose the debrief
+            pos_lines = []
+
     return {
+        "positioning_lines": pos_lines,
         "ours": ours,
         "table": table,
         "team": team,
         "round_patterns": round_patterns(match),
         "round_kda": round_kda(match, ours),
-        "usual_lines": usual_lines(match_record(match, ours, events), usual) if ours else [],
+        "usual_lines": usual_lines(match_record(match, ours, events, positions), usual) if ours else [],
         "opening": opening,
         "opening_lines": opening_lines(opening),
         "clutches": clutch_lines(events, ours, display),
@@ -875,6 +985,7 @@ def assemble_report(model_text: str, facts: dict[str, Any], focus: str) -> str:
         ("ROUND PATTERNS", facts["round_patterns"]),
         ("COMPARED WITH YOUR USUAL", "\n".join(facts.get("usual_lines") or [])),
         ("OBJECTIVE PLAY", objective),
+        ("POSITIONING", "\n".join(facts.get("positioning_lines") or [])),
         ("UTILITY & OPERATORS", "\n".join(utility)),
         ("WHAT TO FOCUS ON NEXT", focus),
         ("COMMUNICATION", section_body(model_text, "COMMUNICATION") or "No comms data recorded."),

@@ -573,6 +573,35 @@ class IntelEngine:
             }
         return out
 
+    @staticmethod
+    def _round_positions(repo, match_id: int) -> dict:
+        """{round number: player paths} stored for a match ({} for matches imported before positions)."""
+        try:
+            from analysis.match_builder import load_round_positions
+            return load_round_positions(repo.db, match_id)
+        except Exception:
+            return {}
+
+    def _map_places(self, repo, match) -> Optional[tuple[dict, list]]:
+        """(site model, floors) learned from every stored round on this match's map; None with too few."""
+        try:
+            from analysis import places
+            with repo.db.get_connection() as conn:
+                ids = [r[0] for r in conn.execute("SELECT match_id FROM matches WHERE map = ?", (match.map,))]
+                sites = {(r[0], int(r[1])): r[2] for r in conn.execute(
+                    f"SELECT match_id, round_number, site FROM rounds WHERE match_id IN ({','.join('?' * len(ids))})", ids)} if ids else {}
+            rounds = []
+            for mid in ids:
+                for rn, pos in self._round_positions(repo, mid).items():
+                    rounds.append({"site": sites.get((mid, rn)) or "", "positions": pos})
+            if sum(1 for r in rounds if r["site"]) < 3:
+                return None
+            fl = places.floors(rounds)
+            return places.site_model(rounds, fl), fl
+        except Exception as e:
+            print(f"[AI] Places for {getattr(match, 'map', '?')} unavailable: {e}")
+            return None
+
     def _team_usual(self, repo, match_id: int) -> Optional[dict]:
         """Totals over every OTHER stored match whose team is known, so a night can be judged against the
         team's own normal. None when there are too few to call anything usual (or on any trouble: this is a
@@ -592,7 +621,8 @@ class IntelEngine:
                 names = team_facts.ours_set(json.loads(teams[mid])) if mid in teams else None
                 other = repo.get_match_full(mid) if names else None
                 if other is not None and other.rounds:
-                    records.append(team_facts.match_record(other, names, self._get_round_events(mid)))
+                    records.append(team_facts.match_record(other, names, self._get_round_events(mid),
+                                                           self._round_positions(repo, mid)))
             except Exception:
                 continue
         return team_facts.usual_baseline(records)
@@ -615,9 +645,12 @@ class IntelEngine:
 
         ours    = self._resolve_ours(repo, match_id, match, our_players)
         display = {str(k).lower(): v for k, v in (display_names or {}).items()}
+        positions = self._round_positions(repo, match_id)
         facts   = (team_facts.build_match_facts(match, ours, self._get_round_events(match_id), display,
                                                 report_players=team_facts.ours_set(report_players),
-                                                usual=self._team_usual(repo, match_id))
+                                                usual=self._team_usual(repo, match_id),
+                                                positions=positions,
+                                                places=self._map_places(repo, match) if positions else None)
                    if ours else None)
         if facts:
             facts["comms_counts"] = self._comms_counts(repo, match_id)
@@ -1061,6 +1094,8 @@ class IntelEngine:
             for line in facts["opening_lines"]:
                 team_metrics_text += f"  {line}\n"
             for line in facts.get("usual_lines") or []:
+                team_metrics_text += f"  {line.lstrip('- ')}\n"
+            for line in facts.get("positioning_lines") or []:
                 team_metrics_text += f"  {line.lstrip('- ')}\n"
             for line in facts.get("objective_lines", [])[:2]:
                 team_metrics_text += f"  {line.lstrip('- ')}\n"

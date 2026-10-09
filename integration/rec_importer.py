@@ -87,6 +87,7 @@ class RecImporter:
                 round_obj, meta = self._parse_round(raw)
                 parsed_rounds.append(round_obj)
                 self._attach_gadget_usage(rec_file, round_obj)
+                self._attach_positions(rec_file, raw, round_obj)
                 try:
                     timeline_rounds.append(self.timeline_round(raw, round_obj.round_number))
                 except Exception as tl_err:
@@ -224,6 +225,16 @@ class RecImporter:
                 ev.our_role,
                 getattr(round_obj, "outcome", None),
             )
+
+    def _attach_positions(self, rec_file: Path, raw: dict, round_obj: Round) -> None:
+        """Where every player was through the round, from the replay's movement stream. Optional: a replay
+        that can't be read this way just has no positions."""
+        try:
+            from integration.positions import decode_round
+            from integration.replay_utility import read_rec
+            round_obj.positions = decode_round(read_rec(rec_file), raw)
+        except Exception as e:                                       # noqa: BLE001 - optional enrichment
+            self._log(f"  (positions unavailable for {rec_file.name}: {e})")
 
     @classmethod
     def timeline_round(cls, data: dict, round_number: int) -> dict:

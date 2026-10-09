@@ -35,6 +35,9 @@ class Round:
     # Structured kill feed events parsed from matchFeedback
     round_events: Optional["RoundEvents"] = field(default=None)
 
+    # Every player's path through the round (integration.positions.decode_round), when the replay has it
+    positions: Optional[dict] = field(default=None)
+
     # ----------------------------------
     # Validation Layer
     # ----------------------------------

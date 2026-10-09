@@ -23,8 +23,8 @@ def package_path(session_id: str) -> Optional[Path]:
 
 
 def apply_round_updates(conn, match_id: int, rounds: list[Any]) -> dict[str, int]:
-    """Writes each re-read round's gadget numbers and events onto the already-stored match."""
-    stats_updated = events_updated = 0
+    """Writes each re-read round's gadget numbers, events and player positions onto the already-stored match."""
+    stats_updated = events_updated = positions_updated = 0
     for rnd in rounds:
         row = conn.execute("SELECT round_id FROM rounds WHERE match_id = ? AND round_number = ?",
                            (match_id, int(rnd.round_number))).fetchone()
@@ -39,6 +39,13 @@ def apply_round_updates(conn, match_id: int, rounds: list[Any]) -> dict[str, int
                 (int(raw["gadget_start"]), int(raw.get("gadget_used", 0) or 0), row[0], raw.get("username", "")),
             )
             stats_updated += cur.rowcount
+        if getattr(rnd, "positions", None):
+            from integration.positions import encode
+            pname = f"round_{int(rnd.round_number)}_positions"
+            conn.execute("DELETE FROM derived_metrics WHERE match_id = ? AND metric_name = ?", (match_id, pname))
+            conn.execute("INSERT INTO derived_metrics (match_id, metric_name, metric_value, is_ai_generated, metric_text) "
+                         "VALUES (?, ?, 0, 0, ?)", (match_id, pname, encode(rnd.positions)))
+            positions_updated += 1
         if rnd.round_events is not None:
             name = f"round_{int(rnd.round_number)}_events"
             conn.execute("DELETE FROM derived_metrics WHERE match_id = ? AND metric_name = ?", (match_id, name))
@@ -46,7 +53,7 @@ def apply_round_updates(conn, match_id: int, rounds: list[Any]) -> dict[str, int
                          "VALUES (?, ?, 0, 0, ?)", (match_id, name, json.dumps(rnd.round_events.to_dict())))
             events_updated += 1
     conn.commit()
-    return {"stats": stats_updated, "events": events_updated}
+    return {"stats": stats_updated, "events": events_updated, "positions": positions_updated}
 
 
 def stored_match_id(session_id: str, comms_row: Any = None) -> Optional[int]:
