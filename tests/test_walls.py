@@ -154,7 +154,36 @@ def test_a_hard_breacher_with_no_charge_going_off():
     match = NS(rounds=[NS(round_number=3, side="defense", site="", outcome="win",
                           player_stats=[stat("Me", "Kaid"), stat("Them", "Ace")])])
     lines = tf.setup_lines(tf.setup(match, {"me"}, {3: {"walls": walls([(5, "Me", 1.0, 1.0)])}}))
-    assert any("They had a hard breacher but no charge went off in 1 of 1 such round(s): R03" in l for l in lines)
+    assert any("They had a hard breacher but no charge went off in 1 round(s): R03" in l for l in lines)
+
+
+def test_placed_charges_are_matched_to_what_went_off():
+    charges = [{"t": 83.3, "op": "Thermite"}, {"t": 109.3, "op": "Thermite"}, {"t": 141.1, "op": "Thermite"},
+               {"t": 124.0, "op": "Ace"}, {"t": 200.0, "op": "Ace"}]
+    known = [{"t": 144.3, "op": "Thermite"}, {"t": 122.6, "op": "Ace"}, {"t": 127.6, "op": "Ace"}]
+    W.match_charges(charges, known)
+    # Thermite: one breach per charge, so the 144 s breach is the 141 s charge's, not the 109 s one's (fuse 60 s)
+    assert [c["went_off"] for c in charges] == [False, True, False, True, False]
+
+
+def test_charges_that_never_went_off_are_reported_both_ways():
+    ours = {"me"}
+    match = NS(rounds=[
+        NS(round_number=1, side="defense", site="", outcome="win", player_stats=[stat("Me", "Bandit"), stat("Them", "Thermite")]),
+        NS(round_number=2, side="attack", site="", outcome="loss", player_stats=[stat("Me", "Thermite")]),
+        NS(round_number=3, side="defense", site="", outcome="win", player_stats=[stat("Me", "Kaid"), stat("Them", "Ace")]),
+    ])
+    w1 = walls([(5, "Me", 1.0, 1.0)])
+    w1["charges"] = [{"t": t, "op": "Thermite", "who": "Them", "went_off": False} for t in (83.3, 88.9, 105.4)]
+    w2 = walls([(5, "Them", 1.0, 1.0)])
+    w2["charges"] = [{"t": 70.0, "op": "Thermite", "who": "Me", "went_off": False},
+                     {"t": 90.0, "op": "Thermite", "who": "Me", "went_off": True}]
+    w3 = walls([(5, "Me", 1.0, 1.0)])
+    w3["charges"] = []
+    text = "\n".join(tf.setup_lines(tf.setup(match, ours, {1: {"walls": w1}, 2: {"walls": w2}, 3: {"walls": w3}})))
+    assert "never went off (destroyed by our denial, or the breacher died first): R01 Thermite: 3 placed, none went off." in text
+    assert "- Their hard breacher never placed a charge in: R03." in text
+    assert "- Our hard breach: R02 Thermite: 2 placed, 1 never went off." in text
 
 
 def test_usual_walls_are_learned_per_site():

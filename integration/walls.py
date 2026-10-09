@@ -14,6 +14,8 @@ Three things in the replay (decompressed with replay_utility.read_rec):
     rotation, type); each later change to one is a `60 73 85 FE` packet keyed by that id, carrying the entity that
     caused it and a resource id for the weapon or gadget. Resource ids are the same in every replay, so they
     name the gadget (GADGETS). A charge leaves these records only when it goes off.
+  * Charges placed: a hard breacher's gadget counter (replay_utility) drops when a charge is placed; one with no
+    breach after it never went off (destroyed by Bandit, Kaid, Mute... or the breacher died first).
 
 Checked on 37 rounds over four maps (2026-10-07/08): the pool started at 10 in every round; 88% of
 reinforcements had a clear owner; the same walls came out round after round (within ~0.5 m); 8 of 11 Thermite
@@ -213,10 +215,65 @@ def breaches(data: bytes, t_at: Callable[[int], float]) -> tuple[list[dict], lis
     return known, other
 
 
+# A placed charge that goes off does so within this many seconds (Thermite is set off by hand; a S.E.L.M.A.
+# blasts by itself), and whether each charge accounts for exactly one entry in breaches (Thermite) or for
+# up to three blasts (Ace).
+FUSE_S = {"Thermite": (60.0, True), "Ace": (15.0, False)}
+SKEW_S = 3.0                         # the event stream's and the movement stream's clocks agree within this
+
+
+def _operator(p: dict) -> Optional[str]:
+    op = p.get("operator")
+    return op.get("name") if isinstance(op, dict) else op
+
+
+def placed_charges(data: bytes, dissect: dict, tk: list[int]) -> list[dict[str, Any]]:
+    """[{"t", "op", "who"}] for every hard-breach charge placed in the action phase: a drop in that player's
+    gadget counter (replay_utility's reader), timed by the round clock."""
+    players = dissect.get("players") or []
+    hard = {p["username"]: _operator(p) for p in players if p.get("username") and _operator(p) in FUSE_S}
+    if not hard:
+        return []
+    items = RU.operator_gadget_items(data, RU.loadout_owners(data, [p["username"] for p in players if p.get("username")]))
+    owner_of = {r: u for u in hard for r in items.get(u, [])}
+    series: dict[int, list[tuple[int, int]]] = collections.defaultdict(list)
+    i = data.find(RU.PRIMARY_GADGET_COUNT)
+    while i != -1:
+        if data[i + 4:i + 5] == b"\x04" and i + 9 <= len(data):
+            ref = RU._record_ref(data, i)
+            if ref in owner_of:
+                series[ref].append((i, struct.unpack_from("<I", data, i + 5)[0]))
+        i = data.find(RU.PRIMARY_GADGET_COUNT, i + 4)
+    out = []
+    for user in hard:
+        refs = [r for r in items.get(user, []) if r in series]
+        if not refs:
+            continue
+        s = max((series[r] for r in refs), key=len)
+        for (_, a), (off, b) in zip(s, s[1:]):
+            t = event_seconds(tk, off)
+            if b < a <= RU.MAX_COUNT and t > PREP_SEC:
+                out += [{"t": round(t, 1), "op": hard[user], "who": user}] * (a - b)
+    return sorted(out, key=lambda c: c["t"])
+
+
+def match_charges(charges: list[dict], known: list[dict]) -> None:
+    """Marks each placed charge went_off when a breach by that gadget follows it in time (in place)."""
+    used: set[int] = set()
+    for c in charges:
+        fuse, one_each = FUSE_S[c["op"]]
+        hits = [k for k, b in enumerate(known) if b["op"] == c["op"] and k not in used
+                and c["t"] - SKEW_S <= b["t"] <= c["t"] + fuse]
+        c["went_off"] = bool(hits)
+        if hits and one_each:
+            used.add(hits[0])
+
+
 def decode_walls(data: bytes, dissect: dict, positions: Optional[dict],
                  t_at: Optional[Callable[[int], float]]) -> Optional[dict[str, Any]]:
-    """{"v", "start", "end", "reinforcements": [{"t", "who", "x", "y", "z"}], "breaches": [...], "other": [...]}
-    with t in seconds since prep began (prep is the first 45). None when the replay has no pool to read."""
+    """{"v", "start", "end", "reinforcements": [{"t", "who", "x", "y", "z"}], "breaches": [...], "other": [...],
+    "charges": [{"t", "op", "who", "went_off", "x", "y", "z"}]} with t in seconds since prep began (prep is the
+    first 45). None when the replay has no pool to read."""
     tk = ticks(data)
     series = pool_series(data)
     if not tk or not series:
@@ -228,8 +285,13 @@ def decode_walls(data: bytes, dissect: dict, positions: Optional[dict],
         reinf.append({"t": r["t"], "who": r["who"], "x": spot[0] if spot else None,
                       "y": spot[1] if spot else None, "z": spot[2] if spot else None})
     known, other = breaches(data, t_at) if t_at is not None else ([], [])
+    charges = placed_charges(data, dissect, tk)
+    match_charges(charges, known)
+    for c in charges:
+        spot = wall_spot(players.get(c["who"], {}).get("pts") or [], c["t"])
+        c.update({"x": spot[0] if spot else None, "y": spot[1] if spot else None, "z": spot[2] if spot else None})
     return {"v": FORMAT_VERSION, "start": series[0][1], "end": series[-1][1], "reinforcements": reinf,
-            "breaches": known, "other": other}
+            "breaches": known, "other": other, "charges": charges}
 
 
 def clock_left(t: float) -> str:

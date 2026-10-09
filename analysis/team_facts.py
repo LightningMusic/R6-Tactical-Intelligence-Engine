@@ -476,6 +476,8 @@ def setup(match: Any, ours: Optional[set[str]], positions: dict[int, dict],
             continue
         reinf = w.get("reinforcements") or []
         hard = [b for b in w.get("breaches") or [] if b.get("kind") == "hard"]
+        charges = w.get("charges")               # None: stored before charges were read
+        mine = lambda c: ours is not None and norm(c.get("who") or "") in ours
         if r.side == "defense":
             missed = total = 0
             for u in usual_walls(usual or {}, r.site or ""):
@@ -491,13 +493,15 @@ def setup(match: Any, ours: Optional[set[str]], positions: dict[int, dict],
                 "by": collections.Counter(s["who"] for s in reinf if s.get("who") and (ours is None or norm(s["who"]) in ours)),
                 "unclear": sum(1 for s in reinf if not s.get("who")),
                 "usual": total, "missed": missed, "through": through, "other": other,
-                "their_hard": sorted(_ops(r, ours, False) & HARD_BREACH)})
+                "their_hard": sorted(_ops(r, ours, False) & HARD_BREACH),
+                "charges": None if charges is None else [c for c in charges if not mine(c)]})
         else:
             opened, other = [], []
             for b in hard:
                 (opened if _near(reinf, b["x"], b["y"], b["z"], ON_WALL_M) else other).append(b)
             out["attack"].append({"round": rn, "opened": opened, "other": other,
-                                  "our_hard": sorted(_ops(r, ours, True) & HARD_BREACH)})
+                                  "our_hard": sorted(_ops(r, ours, True) & HARD_BREACH),
+                                  "charges": None if charges is None else [c for c in charges if mine(c)]})
     return out
 
 
@@ -511,6 +515,19 @@ def _charges(bs: list[dict]) -> str:
     return ", ".join(f"{op} at {clock_left(ts[0])}" if len(ts) == 1
                      else f"{op} ({len(ts)} {'blasts' if op == 'Ace' else 'charges'}) from {clock_left(min(ts))}"
                      for op, ts in sorted(by.items(), key=lambda kv: min(kv[1])))
+
+
+def _unfired(cs: list[dict]) -> str:
+    """'Thermite: 3 placed, none went off' / 'Thermite: 2 placed, 1 never went off'."""
+    by: dict[str, list[dict]] = collections.defaultdict(list)
+    for c in cs:
+        by[c["op"]].append(c)
+    parts = []
+    for op, xs in sorted(by.items()):
+        k = sum(1 for c in xs if not c.get("went_off"))
+        if k:
+            parts.append(f"{op}: {len(xs)} placed, " + ("none went off" if k == len(xs) else f"{k} never went off"))
+    return ", ".join(parts)
 
 
 def setup_lines(s: dict[str, list[dict]], display: Optional[dict[str, str]] = None) -> list[str]:
@@ -557,10 +574,18 @@ def setup_lines(s: dict[str, list[dict]], display: Optional[dict[str, str]] = No
             out.append("- Their hard breach also opened walls we had not reinforced: "
                        + "; ".join(f"R{x['round']:02d} {_charges(x['other'])}" for x in other) + ".")
         faced = [x for x in d if set(x["their_hard"]) & HARD_READ]
-        held = [x for x in faced if not x["through"] and not x["other"]]
-        if held:
-            out.append(f"- They had a hard breacher but no charge went off in {len(held)} of {len(faced)} such round(s): "
-                       + ", ".join(f"R{x['round']:02d}" for x in held) + " (denied, never placed, or never reached).")
+        denied = [x for x in d if x["charges"] and any(not c.get("went_off") for c in x["charges"])]
+        if denied:
+            out.append("- Their hard breach charges that never went off (destroyed by our denial, or the breacher died "
+                       "first): " + "; ".join(f"R{x['round']:02d} {_unfired(x['charges'])}" for x in denied) + ".")
+        idle = [x for x in faced if not x["through"] and not x["other"]]
+        never = [x for x in idle if x["charges"] is not None and not x["charges"]]
+        if never:
+            out.append("- Their hard breacher never placed a charge in: " + ", ".join(f"R{x['round']:02d}" for x in never) + ".")
+        unknown = [x for x in idle if x["charges"] is None]
+        if unknown:
+            out.append(f"- They had a hard breacher but no charge went off in {len(unknown)} round(s): "
+                       + ", ".join(f"R{x['round']:02d}" for x in unknown) + " (denied, never placed, or never reached).")
     a = s.get("attack") or []
     rows = []
     for x in a:
@@ -568,13 +593,20 @@ def setup_lines(s: dict[str, list[dict]], display: Optional[dict[str, str]] = No
             rows.append(f"R{x['round']:02d} {_charges(x['opened'])} on reinforced walls")
         if x["other"]:
             rows.append(f"R{x['round']:02d} {_charges(x['other'])} on walls that were not reinforced")
+        cs = x["charges"]
+        if cs and any(not c.get("went_off") for c in cs):
+            rows.append(f"R{x['round']:02d} {_unfired(cs)}")
         readable = set(x["our_hard"]) & HARD_READ
         if readable and not x["opened"] and not x["other"]:
-            rows.append(f"R{x['round']:02d} {'/'.join(o.capitalize() for o in sorted(readable))} in the lineup but no charge went off")
+            ops = "/".join(o.capitalize() for o in sorted(readable))
+            if cs is None:
+                rows.append(f"R{x['round']:02d} {ops} in the lineup but no charge went off")
+            elif not cs:
+                rows.append(f"R{x['round']:02d} {ops} never placed a charge")
     if rows:
         out.append("- Our hard breach: " + "; ".join(rows) + "."
-                   + (" (No charge going off: denied, never placed, or the breacher died first.)"
-                      if any("no charge went off" in r for r in rows) else ""))
+                   + (" (A charge that never went off was destroyed by their denial, or our breacher died first.)"
+                      if any("went off" in r for r in rows) else ""))
     unread = sorted({o for x in a for o in x["our_hard"]} - HARD_READ)
     if unread:
         out.append(f"- ({', '.join(o.capitalize() for o in unread)}: charges are not read from the replay yet.)")

@@ -7,10 +7,13 @@ itself. It relies on three facts about the replay's state stream (the format
 knowledge is documented by the wnc-replay/replay-tool project; this is an
 independent implementation, verified against real Y11S3 replays):
 
-  1. Each player has a handle (the 4 bytes after the id indicator in their
-     player record). Their own entity sits at handle - 7, and a property
-     (hash 0xC7A0D64C) on that entity points at the entity of their OPERATOR
-     GADGET item.
+  1. Each player's controller (found by the marker before their player record,
+     as for plants) has a property (hash 0x39E5D1E8) pointing at the entity that
+     holds their loadout, and a property (hash 0xC7A0D64C) on that entity points
+     at the entity of their OPERATOR GADGET item. (This used to assume the
+     loadout entity sat at the player's handle - 7, which holds for only some
+     players: in 35 rounds it found 128 of 348 players' gadgets, the controller
+     link 282, the rest being operators without a counted gadget.)
   2. The item entity carries a live charge counter, re-sent whenever it
      changes: [marker][entity ref][0 0 0 0] ... [hash 0x4FBDD114][0x04][count u32].
      Records appear in time order, so the series is the gadget's history. Its
@@ -39,6 +42,7 @@ ZSTD_MAGIC = bytes([0x28, 0xB5, 0x2F, 0xFD])
 ID_INDICATOR = bytes([0x33, 0xD8, 0x3D, 0x4F, 0x23])
 OWNER_ITEM_HASH = bytes.fromhex("4cd6a0c7")          # 0xC7A0D64C, little-endian: player -> operator-gadget item
 SECONDARY_ITEM_HASH = bytes.fromhex("d890b5f7")      # 0xF7B590D8: player -> secondary-gadget item
+LOADOUT_LINK = struct.pack("<I", 0x39E5D1E8)          # controller -> the entity holding the loadout slots
 RECORD_MARKERS = (0x1A, 0x1B, 0x22, 0x23)
 PRIMARY_GADGET_COUNT = struct.pack("<I", 0x4FBDD114)  # the count property of either gadget slot's item
 MAX_COUNT = 16
@@ -96,11 +100,30 @@ def find_handles(data: bytes, usernames: Iterable[str]) -> dict[str, int]:
     return handles
 
 
-def operator_gadget_items(data: bytes, handles: dict[str, int],
+def loadout_owners(data: bytes, usernames: Iterable[str]) -> dict[str, int]:
+    """username -> the entity holding their loadout slots: their controller's property 0x39E5D1E8 points at it.
+    Players the link isn't found for fall back to handle - 7 (right for some players only)."""
+    names = list(usernames)
+    ctrl = find_controllers(data, names)
+    out: dict[str, int] = {}
+    i = data.find(LOADOUT_LINK)
+    while i != -1:
+        if i >= 9 and data[i - 9] in RECORD_MARKERS and data[i - 4:i] == b"\0\0\0\0" and i + 8 <= len(data):
+            user = ctrl.get(_u32(data, i - 8))
+            owner = _u32(data, i + 4)
+            if user is not None and owner >> 24 == 0xF0:
+                out.setdefault(user, owner)
+        i = data.find(LOADOUT_LINK, i + 4)
+    for user, h in find_handles(data, names).items():
+        out.setdefault(user, h - 7)
+    return out
+
+
+def operator_gadget_items(data: bytes, owners: dict[str, int],
                           slot_hash: bytes = OWNER_ITEM_HASH) -> dict[str, list[int]]:
-    """username -> entity refs of the item(s) in one of their loadout slots: the operator gadget by
-    default, the secondary gadget (frag, claymore, wire...) with SECONDARY_ITEM_HASH."""
-    by_owner = {h - 7: u for u, h in handles.items()}
+    """username -> entity refs of the item(s) in one of their loadout slots (owners: loadout_owners): the
+    operator gadget by default, the secondary gadget (frag, claymore, wire...) with SECONDARY_ITEM_HASH."""
+    by_owner = {o: u for u, o in owners.items()}
     items: dict[str, list[int]] = {}
     i = 0
     while True:
@@ -144,8 +167,7 @@ def count_series(data: bytes, wanted: set[int]) -> dict[int, list[int]]:
 
 
 def _usage(data: bytes, usernames: Iterable[str], slot_hash: bytes) -> dict[str, GadgetUse]:
-    handles = find_handles(data, usernames)
-    items = operator_gadget_items(data, handles, slot_hash)
+    items = operator_gadget_items(data, loadout_owners(data, usernames), slot_hash)
     wanted = {ref for refs in items.values() for ref in refs}
     series = count_series(data, wanted) if wanted else {}
     out: dict[str, GadgetUse] = {}

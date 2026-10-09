@@ -53,6 +53,18 @@ def test_a_recharging_gadget_counts_each_drop():
     assert usage({ITEM_A: [1, 2, 1, 0, 1, 0]})["Alice"].used == 3
 
 
+def test_the_controller_link_finds_a_loadout_that_is_not_at_handle_minus_7():
+    # Bob's loadout entity sits far from his handle; only his controller's 0x39E5D1E8 property says where it is.
+    ctrl_b, owner_b = 0xF00CB180, 0xF00CBE4E
+    data = bytearray(ru.CONTROLLER_INDICATOR + struct.pack("<I", ctrl_b) + b"\x00" * 8)
+    data += build({"Alice": H_A, "Bob": H_B}, [(H_A - 7, ITEM_A), (owner_b, ITEM_B)],
+                  [(ITEM_A, 2), (ITEM_A, 1), (ITEM_B, 4), (ITEM_B, 3)])[64:]
+    data += b"\x1b" + struct.pack("<I", ctrl_b) + b"\x00" * 4 + ru.LOADOUT_LINK + struct.pack("<I", owner_b) + b"\x00" * 8
+    u = ru.gadget_usage(bytes(data), ["Alice", "Bob"])
+    assert (u["Alice"].used, u["Bob"].start, u["Bob"].used) == (1, 4, 1)
+    assert ru.loadout_owners(bytes(data), ["Alice", "Bob"]) == {"Bob": owner_b, "Alice": H_A - 7}
+
+
 def test_players_are_kept_apart():
     u = usage({ITEM_A: [2, 1, 0], ITEM_B: [1, 1], ITEM_C: [3, 2]})
     assert (u["Alice"].used, u["Bob"].used, u["Cara"].used) == (2, 0, 1)
