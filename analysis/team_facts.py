@@ -336,9 +336,11 @@ def _gap(a, b) -> float:
     return math.dist(a[1:3], b[1:3]) + (100.0 if abs(a[3] - b[3]) > FLOOR_STEP else 0.0)
 
 
-def positioning(match: Any, ours: Optional[set[str]], positions: dict[int, dict]) -> dict[str, Any]:
-    """From each round's player paths: our deaths with nobody close enough to trade them, and the rounds
-    that came down to two of us (how far apart they were, and whether they went down together)."""
+def positioning(match: Any, ours: Optional[set[str]], positions: dict[int, dict], walk: Any = None) -> dict[str, Any]:
+    """From each round's player paths: our deaths with nobody close enough to trade them (straight line on the
+    same floor: a trade needs a line of sight, and this matched real trades best), and the rounds that came
+    down to two of us: how far apart they were (WALKING distance when `walk` is given, so a wall between them
+    counts) and whether they went down together."""
     from integration.positions import at
     deaths = isolated = 0
     last_two: list[dict] = []
@@ -368,12 +370,19 @@ def positioning(match: Any, ours: Optional[set[str]], positions: dict[int, dict]
                 a, b = alive
                 end = min(died.get(a, 1e9), died.get(b, 1e9),
                           max(p[0] for x in (a, b) for p in players[x]["pts"][-1:]))
-                ds = [_gap(pa, pb) for s in range(int(t), int(end) + 1)
-                      if (pa := at(players[a]["pts"], s)) is not None and (pb := at(players[b]["pts"], s)) is not None]
+                pairs = [(pa, pb) for s in range(int(t), int(end) + 1)
+                         if (pa := at(players[a]["pts"], s)) is not None and (pb := at(players[b]["pts"], s)) is not None]
+                ds = [_gap(pa, pb) for pa, pb in pairs]
                 if ds:
                     da, db = died.get(a), died.get(b)
-                    last_two.append({"round": rn, "median_m": statistics.median(ds), "outcome": outcome.get(rn),
-                                     "died_apart_s": abs(da - db) if da is not None and db is not None else None})
+                    entry = {"round": rn, "median_m": statistics.median(ds), "outcome": outcome.get(rn),
+                             "died_apart_s": abs(da - db) if da is not None and db is not None else None}
+                    if walk is not None:
+                        # a few moments are enough (each is a path search): start, middle, end of the 2-alive spell
+                        picks = [pairs[0], pairs[len(pairs) // 2], pairs[-1]] if len(pairs) > 2 else pairs
+                        w = [walk.distance(pa[1:4], pb[1:4]) for pa, pb in picks]
+                        entry["walk_m"] = statistics.median(w)
+                    last_two.append(entry)
                 break
     return {"deaths": deaths, "isolated": isolated, "last_two": last_two}
 
@@ -389,12 +398,30 @@ def positioning_lines(p: dict[str, Any], usual: Optional[dict[str, Any]] = None)
         out.append(line)
     two = p.get("last_two") or []
     if two:
-        apart = [x for x in two if x["median_m"] > APART_M]
-        detail = "; ".join(f"R{x['round']:02d} " + ("on different floors" if x["median_m"] >= 100 else f"{x['median_m']:.0f} m apart")
-                           + (f", down {x['died_apart_s']:.0f} s apart" if x["died_apart_s"] is not None else "")
-                           + (" (won)" if x["outcome"] == "win" else "") for x in two)
-        out.append(f"- It came down to two of us in {len(two)} round(s); in {len(apart)} of them the two were more "
-                   f"than {APART_M:.0f} m apart, fighting separate fights: {detail}.")
+        walked = all("walk_m" in x for x in two)
+
+        def sep(x):
+            return x["walk_m"] if walked else x["median_m"]
+
+        def describe(x):
+            if walked:
+                if x["walk_m"] == math.inf:
+                    s = "no walkable way between them"
+                else:
+                    s = f"{x['walk_m']:.0f} m to walk between them"
+                    if x["median_m"] < APART_M < x["walk_m"]:
+                        s += f" (only {x['median_m']:.0f} m in a straight line: a wall between)"
+                    elif x["median_m"] >= 100:
+                        s += " (on different floors)"
+            else:
+                s = "on different floors" if x["median_m"] >= 100 else f"{x['median_m']:.0f} m apart"
+            return (f"R{x['round']:02d} {s}" + (f", down {x['died_apart_s']:.0f} s apart" if x["died_apart_s"] is not None else "")
+                    + (" (won)" if x["outcome"] == "win" else ""))
+
+        apart = [x for x in two if sep(x) > APART_M]
+        how = "a walk of more than" if walked else "more than"
+        out.append(f"- It came down to two of us in {len(two)} round(s); in {len(apart)} of them the two were {how} "
+                   f"{APART_M:.0f} m apart, fighting separate fights: {'; '.join(describe(x) for x in two)}.")
     return out
 
 
@@ -909,7 +936,7 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
                       places: Optional[tuple[dict, list]] = None) -> dict[str, Any]:
     """`ours`: our whole team (team numbers). `report_players`: who is listed by name (the saved team list).
     `usual`: totals over the team's earlier matches (usual_baseline), when there are enough.
-    `positions`: {round: player paths} from the replays; `places`: (site model, floors) learned for this map."""
+    `positions`: {round: player paths} from the replays; `places`: (site model, floors[, walk map]) for this map."""
     table = player_table(match, ours)
     team = team_totals(table)
     opening = opening_summary(match, events)
@@ -937,7 +964,8 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
     pos_lines: list[str] = []
     if positions and ours:
         try:
-            pos_lines = positioning_lines(positioning(match, ours, positions), usual)
+            walk = places[2] if places and len(places) > 2 else None
+            pos_lines = positioning_lines(positioning(match, ours, positions, walk), usual)
             if places and places[0]:
                 pos_lines += death_places(match, ours, positions, places[0], places[1])
         except Exception:                                  # a nicety: never a reason to lose the debrief

@@ -232,7 +232,8 @@ class RecImporter:
         try:
             from integration.positions import decode_round
             from integration.replay_utility import read_rec
-            round_obj.positions = decode_round(read_rec(rec_file), raw)
+            # 4 samples a second (~50 KB a round): fine enough for the walkable map to follow corners
+            round_obj.positions = decode_round(read_rec(rec_file), raw, hz=4.0)
         except Exception as e:                                       # noqa: BLE001 - optional enrichment
             self._log(f"  (positions unavailable for {rec_file.name}: {e})")
 

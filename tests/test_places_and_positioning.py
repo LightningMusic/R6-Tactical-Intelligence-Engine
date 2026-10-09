@@ -69,6 +69,45 @@ def test_untradeable_deaths_and_the_last_two_fighting_apart():
     assert "R01 25 m apart, down 20 s apart" in lines[1] and "R02 on different floors (won)" in lines[1]
 
 
+def corridor(x0, x1, y, z=0.0, t0=0.0):
+    """A walked straight line, 4 samples a second at ~1.5 m/s."""
+    n = int(abs(x1 - x0) / 0.375)
+    return [[t0 + k * 0.25, x0 + (x1 - x0) * k / n, y, z, None] for k in range(n + 1)]
+
+
+def walls_between():
+    """Two parallel corridors 1 m apart (a wall between), joined only by a doorway at x = 20; plus stairs at
+    x = 0 up to a floor 4 m higher."""
+    fl = [(0.0, "1F"), (4.0, "2F")]
+    wm = PL.WalkMap(fl)
+    wm.add_path(corridor(0, 20, 0.0))
+    wm.add_path(corridor(0, 20, 1.0))
+    wm.add_path([[0, 20, 0.0, 0.0, None], [0.25, 20, 0.33, 0.0, None], [0.5, 20, 0.66, 0.0, None], [0.75, 20, 1.0, 0.0, None]])
+    wm.add_path([[0, 0.0, 0.0, 0.0, None], [0.25, 0.5, 0.0, 2.0, None], [0.5, 1.0, 0.0, 4.0, None]])
+    wm.add_path(corridor(1.0, 10.0, 0.0, z=4.0))
+    return wm
+
+
+def test_walking_distance_goes_around_walls_and_up_stairs():
+    wm = walls_between()
+    assert abs(wm.distance((2, 0, 0), (2, 1, 0)) - 37) < 3       # 1 m through the wall, ~37 m via the doorway
+    assert wm.distance((18, 0, 0), (18, 1, 0)) < 6                # next to the doorway: a short walk
+    assert wm.distance((2, 0, 0), (8, 0, 4.0)) < 15               # up the stairs at x = 0
+    assert wm.distance((2, 0, 0), (50, 50, 0)) == float("inf")    # nobody ever walked there
+
+
+def test_the_last_two_are_judged_by_walking_distance_when_a_walk_map_exists():
+    wm = walls_between()
+    pos = {1: {"died": {"Third": 10.0, "Me": 20.0, "Mate": 21.0},
+               "players": {"Me": {"team": 1, "pts": still(2, 0, 0, t1=20)},
+                           "Mate": {"team": 1, "pts": still(2, 1, 0, t1=21)},
+                           "Third": {"team": 1, "pts": still(5, 0, 0, t1=10)}}}}
+    p = tf.positioning(match_of("loss"), {"me", "mate", "third"}, pos, walk=wm)
+    line = tf.positioning_lines(p)[-1]
+    assert "in 1 of them the two were a walk of more than 10 m apart" in line
+    assert "m to walk between them (only 1 m in a straight line: a wall between)" in line
+
+
 def test_where_our_players_died_most():
     fl = PL.floors(ROUNDS)
     model = PL.site_model(ROUNDS, fl)

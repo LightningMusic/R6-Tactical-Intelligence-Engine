@@ -13,6 +13,7 @@ setups came out right; floors were named correctly on all four maps.
 from __future__ import annotations
 
 import collections
+import heapq
 import math
 import statistics
 from typing import Optional
@@ -126,6 +127,91 @@ def where(model, fl, x, y, z) -> str:
     if d <= model[site]["r"]:
         return f"{name}, at {short_site(site)}"
     return f"{name}, {d:.0f} m from {short_site(site)}"
+
+
+class WalkMap:
+    """Walking distance, from a walkable map learned from every path walked on the map.
+
+    Nobody walks through an unbreakable or reinforced wall, so every spot anyone stood on is floor and every
+    opening anyone passed through (door, stairs, hatch, an opened soft wall) is a connection: two players 1 m
+    apart on either side of a solid wall are a long walk apart. Limits: a soft wall opened in any stored round
+    counts as open in all of them, and this is walking, not line of sight (a trade needs a line of sight,
+    which can run through a doorway or murder hole; straight-line distance on the same floor matched real
+    trades better, 16% vs 4%, than walking distance did, 13% vs 5%, over 310 deaths)."""
+
+    CELL = 0.25            # finer than a wall is thick: a ~0.3 m wall must stay a gap
+    STEP_MAX = 3.0         # samples further apart than this weren't walked (vault, rappel, glitch)
+
+    def __init__(self, fl: list[tuple[float, str]]):
+        self.levels = [z for z, _ in fl]
+        self.cells: set[tuple[int, int, int]] = set()
+        self.links: dict[tuple, set] = collections.defaultdict(set)
+
+    def level(self, z: float) -> int:
+        return min(range(len(self.levels)), key=lambda i: abs(self.levels[i] - z)) if self.levels else 0
+
+    def _key(self, x, y, z):
+        return (self.level(z), int(round(x / self.CELL)), int(round(y / self.CELL)))
+
+    def add_path(self, pts: list) -> None:
+        """pts: stored samples [t, x, y, z, yaw] in time order."""
+        for a, b in zip(pts, pts[1:]):
+            if b[0] - a[0] > 0.8:
+                continue
+            d = math.dist(a[1:3], b[1:3])
+            if d > self.STEP_MAX:
+                continue
+            la, lb = self.level(a[3]), self.level(b[3])
+            if la == lb:
+                n = max(1, int(d / (self.CELL / 2)))
+                for k in range(n + 1):
+                    self.cells.add((la, int(round((a[1] + (b[1] - a[1]) * k / n) / self.CELL)),
+                                    int(round((a[2] + (b[2] - a[2]) * k / n) / self.CELL))))
+            else:
+                ka, kb = self._key(*a[1:4]), self._key(*b[1:4])
+                self.cells.update((ka, kb))
+                self.links[ka].add(kb)
+                self.links[kb].add(ka)
+
+    def _nearest(self, x, y, z, reach=6):
+        l, i, j = self._key(x, y, z)
+        best = None
+        for di in range(-reach, reach + 1):
+            for dj in range(-reach, reach + 1):
+                if (l, i + di, j + dj) in self.cells and (best is None or di * di + dj * dj < best[0]):
+                    best = (di * di + dj * dj, (l, i + di, j + dj))
+        return best[1] if best else None
+
+    def distance(self, a, b, limit: float = 60.0) -> float:
+        """Metres to walk from a to b, each (x, y, z); inf when not connected within `limit`."""
+        s, g = self._nearest(*a), self._nearest(*b)
+        if s is None or g is None:
+            return math.inf
+        lim, diag = limit / self.CELL, math.sqrt(2)
+        dist = {s: 0.0}
+        heap = [(0.0, s)]
+        while heap:
+            d, c = heapq.heappop(heap)
+            if c == g:
+                return d * self.CELL
+            if d > dist.get(c, math.inf) or d > lim:
+                continue
+            l, i, j = c
+            steps = [((l, i + di, j + dj), diag if di and dj else 1.0) for di in (-1, 0, 1) for dj in (-1, 0, 1) if di or dj]
+            steps += [(n, 3.0 / self.CELL) for n in self.links.get(c, ())]
+            for n, w in steps:
+                if n in self.cells and d + w < dist.get(n, math.inf):
+                    dist[n] = d + w
+                    heapq.heappush(heap, (d + w, n))
+        return math.inf
+
+
+def walk_map(rounds: list[dict], fl) -> WalkMap:
+    wm = WalkMap(fl)
+    for r in rounds:
+        for pl in (r["positions"].get("players") or {}).values():
+            wm.add_path(pl["pts"])
+    return wm
 
 
 def area(model, fl, x, y, z) -> str:

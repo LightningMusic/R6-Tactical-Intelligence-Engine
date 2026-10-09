@@ -582,8 +582,8 @@ class IntelEngine:
         except Exception:
             return {}
 
-    def _map_places(self, repo, match) -> Optional[tuple[dict, list]]:
-        """(site model, floors) learned from every stored round on this match's map; None with too few."""
+    def _map_places(self, repo, match) -> Optional[tuple]:
+        """(site model, floors, walk map) learned from every stored round on this match's map; None with too few."""
         try:
             from analysis import places
             with repo.db.get_connection() as conn:
@@ -597,7 +597,7 @@ class IntelEngine:
             if sum(1 for r in rounds if r["site"]) < 3:
                 return None
             fl = places.floors(rounds)
-            return places.site_model(rounds, fl), fl
+            return places.site_model(rounds, fl), fl, places.walk_map(rounds, fl)
         except Exception as e:
             print(f"[AI] Places for {getattr(match, 'map', '?')} unavailable: {e}")
             return None
