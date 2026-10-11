@@ -36,6 +36,15 @@ def serve_dashboard() -> HTMLResponse:
     return HTMLResponse(content=_load_dashboard_html())
 
 
+_REVIEW_HTML_PATH = Path(__file__).parent / "static" / "review.html"
+
+
+@router.get("/review", response_class=HTMLResponse, include_in_schema=False)
+def serve_review() -> HTMLResponse:
+    """Listen and mark: the host checks random comms lines (uses the dashboard's saved key)."""
+    return HTMLResponse(content=_REVIEW_HTML_PATH.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+
+
 _JOIN_HTML_PATH = Path(__file__).parent / "static" / "join.html"
 
 # The recorder page handles a bearer-like invite token (kept in the URL

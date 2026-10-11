@@ -448,6 +448,40 @@ def get_roster(_client: str = Depends(verify_api_token)) -> dict:
     return {"roster": roster.get_all()}
 
 
+@router.get("/review/comms/sample")
+def review_comms_sample(n: int = 30, _client: str = Depends(verify_api_token)) -> dict:
+    """Random comms lines nobody has marked yet, for the host to listen to and check (the /review page)."""
+    from server.services import comms_review
+    return comms_review.sample(max(1, min(int(n), 60)))
+
+
+@router.get("/review/comms/clip")
+def review_comms_clip(key: str, _client: str = Depends(verify_api_token)):
+    from fastapi.responses import Response
+    from server.services import comms_review
+    data = comms_review.clip(key)
+    if data is None:
+        raise HTTPException(status_code=404, detail="No audio for that line.")
+    return Response(content=data, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
+
+@router.post("/review/comms/answer")
+def review_comms_answer(body: dict, _client: str = Depends(verify_api_token)) -> dict:
+    """{"key": ..., "heard": "<who was really speaking>" | "Someone else" | "Can't tell",
+    "text": "right" | "mostly" | "wrong" | "cant_hear"}"""
+    from server.services import comms_review
+    try:
+        return comms_review.record(str(body.get("key", "")), str(body.get("heard", "")), str(body.get("text", "")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/review/comms/summary")
+def review_comms_summary(_client: str = Depends(verify_api_token)) -> dict:
+    from server.services import comms_review
+    return comms_review.summary()
+
+
 @router.put("/roster")
 def put_roster(body: dict, _client: str = Depends(verify_api_token)) -> dict:
     """{"roster": [{"username": "<in-game name>", "label": "<nickname>"}, ...]} replaces the saved list."""

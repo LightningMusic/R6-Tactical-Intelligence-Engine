@@ -18,6 +18,28 @@ def make_server_db(tmp_path: Path) -> ServerDatabase:
     return ServerDatabase(db_path=tmp_path / "server_matches.db")
 
 
+def test_a_connection_is_closed_when_its_with_block_ends(tmp_path):
+    # 2026-10-11: connections left open after `with` piled up until the server ran out of file handles.
+    import pytest
+    db = make_server_db(tmp_path)
+    with db.get_connection() as conn:
+        conn.execute("INSERT INTO team_roster (username, label, position) VALUES ('A', '', 0)")
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+    with db.get_connection() as conn2:                      # and the write was committed before closing
+        assert conn2.execute("SELECT COUNT(*) FROM team_roster").fetchone()[0] == 1
+    try:
+        with db.get_connection() as conn3:
+            conn3.execute("INSERT INTO team_roster (username, label, position) VALUES ('B', '', 1)")
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn3.execute("SELECT 1")
+    with db.get_connection() as conn4:                      # rolled back, then closed
+        assert conn4.execute("SELECT COUNT(*) FROM team_roster").fetchone()[0] == 1
+
+
 def test_the_server_database_uses_write_ahead_logging_and_a_long_wait(tmp_path):
     db = make_server_db(tmp_path)
     with db.get_connection() as conn:

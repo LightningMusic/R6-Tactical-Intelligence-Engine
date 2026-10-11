@@ -3,6 +3,20 @@ from pathlib import Path
 from server.config import server_settings
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """A connection that closes itself when its `with` block ends. sqlite3's own `with` only commits or rolls
+    back and leaves the connection (and its file handles) open until garbage collection gets to it, which on a
+    quiet server can be never: on 2026-10-11 the server process hit its 1,024 open-file limit after ~44 hours,
+    1,010 of them handles to this database, and from then on every request and the worker failed with
+    "unable to open database file"."""
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 class ServerDatabase:
     """
     Manages the server-side SQLite database connection and schema initialization.
@@ -23,7 +37,7 @@ class ServerDatabase:
         # wait and gives up after 5 s with "database is locked", which refused a teammate's browser
         # recorder as it checked its invite (2026-10-05). Write-ahead logging lets readers and one
         # writer coexist, and a long busy timeout makes the rare collision wait instead of fail.
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = sqlite3.connect(self.db_path, timeout=30, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 30000;")
         conn.execute("PRAGMA journal_mode = WAL;")
@@ -173,6 +187,19 @@ class ServerDatabase:
                     n_samples INTEGER NOT NULL DEFAULT 0,
                     seconds REAL NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL DEFAULT ''
+                );
+
+                -- The host's "listen and mark" answers (server/services/comms_review.py): who was really
+                -- speaking on a comms line and whether its words were right, per way the line got its name.
+                CREATE TABLE IF NOT EXISTS comms_review (
+                    line_key TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    claimed TEXT NOT NULL DEFAULT '',
+                    heard TEXT NOT NULL,
+                    text_verdict TEXT NOT NULL,
+                    line_text TEXT NOT NULL DEFAULT '',
+                    answered_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS server_transcripts (
