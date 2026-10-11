@@ -75,8 +75,11 @@ def level(wav_bytes, a, b, sr=16000):
 
 def test_the_clip_is_cut_from_the_right_track_at_the_right_moment(review):
     key = f"{SID}|3|20.00"                                     # "Kim", a Discord line
-    peak, dur = level(review.clip(key), 0.5, 2.3)
+    data = review.clip(key)
+    peak, dur = level(data, 0.5, 2.3)
     assert abs(dur - 2.8) < 0.05 and peak > 0.3               # the line plus 0.4 s either side, and the tone is in it
+    with wave.open(io.BytesIO(data)) as w:                    # and the header says how long it really is
+        assert abs(w.getnframes() / 16000 - 2.8) < 0.05
     peak, dur = level(review.clip(f"{SID}|3|5.00"), 0.5, 2.3)  # the host's own line plays from his mic's track
     assert peak > 0.3
     peak, _ = level(review.clip(f"{SID}|3|25.00"), 0.0, 2.8)   # nothing was said there on the Discord track here

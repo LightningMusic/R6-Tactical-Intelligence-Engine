@@ -17,9 +17,11 @@ wrongly, shows up as the wrong voice.
 from __future__ import annotations
 
 import collections
+import io
 import json
 import random
 import subprocess
+import wave
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -213,13 +215,21 @@ def clip(key: str) -> Optional[bytes]:
     length = min(float(item.get("end", item["t"])) - float(item["t"]) + 2 * PAD_SEC, MAX_CLIP_SEC)
     if start + length <= 0:
         return None
+    # Raw samples, with the WAV header written here: ffmpeg writing WAV to a pipe can't go back to fill in the
+    # length, and some phone browsers won't play a file whose header says it is 37 hours long.
     cmd = [_find_ffmpeg(), "-v", "quiet", "-ss", f"{max(0.0, start):.3f}", "-i", str(path), "-t", f"{length:.3f}",
-           "-ac", "1", "-ar", "16000", "-f", "wav", "-"]
+           "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
     try:
-        out = subprocess.run(cmd, capture_output=True, timeout=30).stdout
+        pcm = subprocess.run(cmd, capture_output=True, timeout=30).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    return out if len(out) > 44 else None
+    if len(pcm) < 2:
+        return None
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes(pcm[:len(pcm) // 2 * 2])
+    return buf.getvalue()
 
 
 def record(key: str, heard: str, text_verdict: str) -> dict[str, Any]:
