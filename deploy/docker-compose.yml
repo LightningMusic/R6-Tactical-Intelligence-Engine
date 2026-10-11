@@ -36,6 +36,7 @@ services:
       R6_SERVER_OLLAMA_MODEL: ${R6_OLLAMA_MODEL:-llama3.1:8b}
       R6_SERVER_OLLAMA_NUM_THREAD: ${R6_THREADS:-6}
       R6_SERVER_OLLAMA_NUM_GPU: "0"
+      R6_SERVER_SELF_RESTART: "1"          # broken but alive (e.g. out of file handles): exit so Docker restarts it
       OMP_NUM_THREADS: ${R6_THREADS:-6}
       MKL_NUM_THREADS: ${R6_THREADS:-6}
     cpus: ${R6_SERVER_CPUS:-6}

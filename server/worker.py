@@ -1,3 +1,4 @@
+import os
 import time
 import threading
 from pathlib import Path
@@ -9,6 +10,31 @@ from server.services.session_processing import SessionProcessingService
 from server.services.comms_service import CommsService
 
 COMMS_CHECK_INTERVAL = 30.0
+
+# A server that is alive but broken is never restarted by Docker ("unless-stopped" only acts when the process
+# exits). On 2026-10-11 it ran out of file handles and answered nothing for ~12 hours. In the container
+# (R6_SERVER_SELF_RESTART=1, set by deploy/docker-compose.yml) the worker exits instead, so Docker starts it
+# afresh; a job cut short is put back in the queue on startup.
+SELF_RESTART_ENV = "R6_SERVER_SELF_RESTART"
+FD_SHARE = 0.9                 # this share of the open-file limit in use: restart before it runs out
+STUCK_SEC = 600.0              # the worker loop failing non-stop this long: restart
+
+
+def open_files() -> Optional[tuple[int, int]]:
+    """(open file handles, limit) for this process; None where that can't be read (not Linux)."""
+    try:
+        import resource
+        return len(os.listdir("/proc/self/fd")), int(resource.getrlimit(resource.RLIMIT_NOFILE)[0])
+    except Exception:
+        return None
+
+
+def restart_reason(fds: Optional[tuple[int, int]], failing_since: Optional[float], now: float) -> Optional[str]:
+    if fds and fds[1] > 0 and fds[0] >= FD_SHARE * fds[1]:
+        return f"{fds[0]} of {fds[1]} file handles in use"
+    if failing_since is not None and now - failing_since >= STUCK_SEC:
+        return f"the worker has failed for {int(now - failing_since)} s in a row"
+    return None
 
 
 class ServerWorker:
@@ -82,7 +108,12 @@ class ServerWorker:
             # each instead of on every poll.
             was_paused = False
             last_comms_check = 0.0
+            failing_since: Optional[float] = None
             while self._running:
+                reason = restart_reason(open_files(), failing_since, time.time())
+                if reason and os.environ.get(SELF_RESTART_ENV) == "1":
+                    print(f"[ServerWorker] Restarting the server: {reason}.", flush=True)
+                    os._exit(3)
                 try:
                     # Checked before claim_next_queued_job(), not inside
                     # process_single_job(): claiming first would leave the
@@ -111,10 +142,12 @@ class ServerWorker:
                             processed = CommsService.process_pending()
                         except Exception as e:
                             print(f"[ServerWorker] Comms rebuild error: {e}")
+                    failing_since = None
                     if not processed:
                         time.sleep(server_settings.WORKER_POLL_INTERVAL)
                 except Exception as e:
                     print(f"[ServerWorker] Loop error: {e}")
+                    failing_since = failing_since or time.time()
                     time.sleep(server_settings.WORKER_POLL_INTERVAL)
 
         self._thread = threading.Thread(target=_worker_loop, daemon=True, name="ServerWorker")
