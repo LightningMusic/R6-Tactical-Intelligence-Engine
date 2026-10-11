@@ -102,6 +102,14 @@ def test_answers_add_up_per_way_of_naming(review):
     assert left == {f"{SID}|3|10.00"}                          # only the one nobody has marked
 
 
+def test_lines_with_nothing_to_play_them_from_are_not_offered(review, monkeypatch):
+    (server_settings.COMMS_DIR / SID / "self.wav").unlink()           # an older session: no copy of the host's mic
+    monkeypatch.setattr(review, "_TRACKS", {})
+    monkeypatch.setattr("server.services.utility_backfill.package_path", lambda sid: None)
+    cats = {x["category"] for x in review.sample(n=10, seed=1)["items"]}
+    assert "your_mic" not in cats and "bleed" not in cats and "voice_id" in cats
+
+
 def test_a_bad_answer_is_refused(review):
     with pytest.raises(ValueError):
         review.record(f"{SID}|3|20.00", "Kim", "great")

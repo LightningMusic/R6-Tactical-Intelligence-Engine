@@ -71,6 +71,23 @@ def _sessions(conn, limit: int = RECENT_SESSIONS) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+_TRACKS: dict[str, set[str]] = {}
+
+
+def _tracks(session_id: str) -> set[str]:
+    """Which of the host's tracks a session can still play lines from ("team", "self"); remembered per session
+    (finding the host's mic in an older session's package unpacks it once)."""
+    if session_id not in _TRACKS:
+        from server.services.comms_service import CommsService
+        has = set()
+        if next(iter((server_settings.COMMS_DIR / session_id).glob("team.*")), None) is not None:
+            has.add("team")
+        if CommsService._self_clip(session_id) is not None:
+            has.add("self")
+        _TRACKS[session_id] = has
+    return _TRACKS[session_id]
+
+
 def lines(limit_sessions: int = RECENT_SESSIONS) -> list[dict[str, Any]]:
     """Every reviewable line of the latest sessions: [{"key", "session_id", "map", "round", "t", "end",
     "clock", "category", "claimed", "text", "source"}]."""
@@ -85,6 +102,7 @@ def lines(limit_sessions: int = RECENT_SESSIONS) -> list[dict[str, Any]]:
         except ValueError:
             continue
         host = _host_name(meta)
+        has = _tracks(s["session_id"])
         for rnd in tl.get("rounds") or []:
             for it in rnd.get("items") or []:
                 if it.get("kind") != "speech":
@@ -93,8 +111,9 @@ def lines(limit_sessions: int = RECENT_SESSIONS) -> list[dict[str, Any]]:
                 if float(it.get("end", it["t"])) - float(it["t"]) < MIN_LINE_SEC or len(text.split()) < MIN_WORDS:
                     continue
                 cat = _category(it, host, UNKNOWN_TEAM_SPEAKER)
-                if cat is None:
-                    continue
+                if cat is None or ("self" if it.get("source") == "self" else "team") not in has:
+                    continue                                  # nothing to play it from
+
                 out.append({"key": f"{s['session_id']}|{rnd.get('round_number')}|{float(it['t']):.2f}",
                             "session_id": s["session_id"], "map": s.get("map_name") or "",
                             "round": rnd.get("round_number"), "t": float(it["t"]), "end": float(it.get("end", it["t"])),
@@ -181,11 +200,13 @@ def clip(key: str) -> Optional[bytes]:
         return None
     item, rnd, meta = found
     session_id = key.rsplit("|", 2)[0]
-    track = "self" if item.get("source") == "self" else "team"
-    path = next(iter(sorted((server_settings.COMMS_DIR / session_id).glob(f"{track}.*"))), None)
+    from server.services.comms_service import ClipClock, CommsService
+    if item.get("source") == "self":
+        path = CommsService._self_clip(session_id)          # sessions before 2026-10-08 keep it only in the package
+    else:
+        path = next(iter(sorted((server_settings.COMMS_DIR / session_id).glob("team.*"))), None)
     if path is None:
         return None
-    from server.services.comms_service import ClipClock
     from integration.whisper_transcriber import _find_ffmpeg
     clock = ClipClock(meta.get("pieces") or [[float(rnd["start_epoch"]), 0.0]])
     start = clock.offset(float(rnd["start_epoch"]) + float(item["t"])) - PAD_SEC
