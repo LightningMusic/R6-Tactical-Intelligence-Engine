@@ -217,13 +217,19 @@ def clip(key: str) -> Optional[bytes]:
         return None
     # Raw samples, with the WAV header written here: ffmpeg writing WAV to a pipe can't go back to fill in the
     # length, and some phone browsers won't play a file whose header says it is 37 hours long.
-    cmd = [_find_ffmpeg(), "-v", "quiet", "-ss", f"{max(0.0, start):.3f}", "-i", str(path), "-t", f"{length:.3f}",
-           "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
-    try:
-        pcm = subprocess.run(cmd, capture_output=True, timeout=30).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
+    cmd = [_find_ffmpeg(), "-v", "error", "-nostdin", "-threads", "1", "-ss", f"{max(0.0, start):.3f}", "-i", str(path),
+           "-t", f"{length:.3f}", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
+    pcm, why = b"", ""
+    for _attempt in range(3):
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+            pcm, why = r.stdout, f"ffmpeg exit {r.returncode}: {r.stderr.decode(errors='replace').strip()[-200:]}"
+        except (OSError, subprocess.SubprocessError) as e:
+            why = f"{type(e).__name__}: {e}"
+        if len(pcm) >= 2:
+            break
     if len(pcm) < 2:
+        print(f"[Review] no audio for {key}: {why}")
         return None
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
