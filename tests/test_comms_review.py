@@ -113,6 +113,22 @@ def test_lines_with_nothing_to_play_them_from_are_not_offered(review, monkeypatc
     assert "your_mic" not in cats and "bleed" not in cats and "voice_id" in cats
 
 
+def test_an_identified_discord_line_teaches_that_persons_voice(review, monkeypatch):
+    from server import voice_id
+    monkeypatch.setattr("server.voice_id.server_db", review.server_db)
+    voice_id.set_encoder(lambda wav: [1.0, 0.0, 0.0] if len(wav) else None)
+    try:
+        out = review.record(f"{SID}|3|20.00", "Sam", "right")     # a Discord line, said by Sam (nickname)
+        assert out["learned"] == {"SamIGN": 1}
+        review.record(f"{SID}|3|5.00", "Alex", "right")           # the host's own mic: not a Discord voice sample
+        assert review.learn_voices() == {}                         # and nothing is learned twice
+        prof = {p["name"]: p for p in review.summary()["profiles"]}
+        assert prof["Sam"]["samples"] == 1 and prof["Sam"]["needs"] == voice_id.MIN_PROFILE_SAMPLES - 1
+        assert prof["Alex"]["samples"] == 0
+    finally:
+        voice_id.set_encoder(None)
+
+
 def test_a_bad_answer_is_refused(review):
     with pytest.raises(ValueError):
         review.record(f"{SID}|3|20.00", "Kim", "great")

@@ -30,7 +30,9 @@ from server.config import server_settings
 from server.database import server_db
 
 CATEGORIES = ("voice_id", "own_track", "bleed", "your_mic", "unassigned")
-QUOTA = {"voice_id": 10, "own_track": 6, "unassigned": 6, "your_mic": 5, "bleed": 3}   # of 30
+# Of 30. Unnamed lines get the most room: each one the host identifies teaches that person's voice (the only way
+# teammates who don't record, like Hector and Will, get a profile at all).
+QUOTA = {"unassigned": 11, "voice_id": 8, "own_track": 4, "your_mic": 4, "bleed": 3}
 RECENT_SESSIONS = 8          # lines are drawn from the latest sessions with a comms timeline
 MIN_LINE_SEC = 0.8
 MIN_WORDS = 2
@@ -274,6 +276,105 @@ def clip(key: str) -> Optional[bytes]:
     return buf.getvalue()
 
 
+# ── teaching voices from the answers ─────────────────────────────────────
+#
+# A Discord-track line the host has identified is that person's voice as Discord delivers it, the same kind of
+# sample voice_id learns from a teammate's own recording. Tested 2026-10-12 on 95 such lines (5-fold): profiles
+# that include them named 79 instead of 64, 96% of them right.
+
+LEARN_FROM = ("voice_id", "own_track", "unassigned")       # lines played from the Discord track
+
+
+def _usernames() -> dict[str, str]:
+    """name the host picks (nickname or in-game name, any case) -> in-game name."""
+    out: dict[str, str] = {}
+    try:
+        from server import roster
+        for e in roster.get_all():
+            for k in (e.get("label"), e.get("username")):
+                if k:
+                    out[k.lower()] = e["username"]
+    except Exception:
+        pass
+    return out
+
+
+def _discord_sample(key: str):
+    """The line's own stretch of the Discord track (no padding) as float samples, or None."""
+    import numpy as np
+    found = _find(key)
+    if not found:
+        return None
+    item, rnd, meta = found
+    path = next(iter(sorted((server_settings.COMMS_DIR / key.rsplit("|", 2)[0]).glob("team.*"))), None)
+    if path is None:
+        return None
+    from server.services.comms_service import ClipClock
+    from server import voice_id
+    clock = ClipClock(meta.get("pieces") or [])
+    t0 = clock.offset(float(rnd["start_epoch"]) + float(item["t"]))
+    t1 = min(t0 + voice_id.MAX_SEG_SEC, clock.offset(float(rnd["start_epoch"]) + float(item.get("end", item["t"]))))
+    if t0 < 0 or t1 - t0 < voice_id.MIN_SEG_SEC:
+        return None
+    with open(decoded(path), "rb") as f:
+        f.seek(int(t0 * SR) * 2)
+        pcm = f.read(int((t1 - t0) * SR) * 2)
+    return np.frombuffer(pcm[:len(pcm) // 2 * 2], dtype="<i2").astype(np.float32) / 32768
+
+
+def learn_voices(keys: Optional[list[str]] = None) -> dict[str, int]:
+    """Folds identified Discord lines not yet learned from into each person's voice profile. Returns
+    {in-game name: samples added}."""
+    from server import voice_id
+    if not voice_id.enabled():
+        return {}
+    names = _usernames()
+    with server_db.get_connection() as conn:
+        done = {r[0] for r in conn.execute("SELECT line_key FROM voice_review_used")}
+        q = "SELECT line_key, category, heard FROM comms_review"
+        rows = [dict(r) for r in conn.execute(q)]
+    rows = [r for r in rows if r["line_key"] not in done and r["category"] in LEARN_FROM
+            and (keys is None or r["line_key"] in keys) and r["heard"].lower() in names]
+    by_user: dict[str, list] = collections.defaultdict(list)
+    secs: dict[str, float] = collections.defaultdict(float)
+    used = []
+    for r in rows:
+        wav = _discord_sample(r["line_key"])
+        used.append(r["line_key"])                         # tried once; a line with no usable audio isn't retried
+        if wav is None:
+            continue
+        e = voice_id.embed(wav)
+        if e is not None:
+            user = names[r["heard"].lower()]
+            by_user[user].append(e)
+            secs[user] += len(wav) / SR
+    for user, embs in by_user.items():
+        voice_id.enroll(user, embs, secs[user])
+    if used:
+        with server_db.get_connection() as conn:
+            conn.executemany("INSERT OR IGNORE INTO voice_review_used (line_key) VALUES (?)", [(k,) for k in used])
+            conn.commit()
+    return {u: len(e) for u, e in by_user.items()}
+
+
+def profiles() -> list[dict[str, Any]]:
+    """Each team member's voice profile: how many samples, whether it is used yet."""
+    from server import voice_id
+    have = {p["username"].lower(): p for p in voice_id.list_profiles()}
+    out = []
+    try:
+        from server import roster
+        team = roster.get_all()
+    except Exception:
+        team = []
+    for e in team:
+        p = have.get(e["username"].lower())
+        out.append({"name": e.get("label") or e["username"], "username": e["username"],
+                    "samples": p["samples"] if p else 0, "seconds": p["seconds"] if p else 0.0,
+                    "usable": bool(p and p["usable"]), "needs": max(0, voice_id.MIN_PROFILE_SAMPLES - (p["samples"] if p else 0))})
+    return out
+
+
 def record(key: str, heard: str, text_verdict: str) -> dict[str, Any]:
     """Saves one answer (a second answer for the same line replaces the first)."""
     if text_verdict not in TEXT_VERDICTS:
@@ -294,7 +395,12 @@ def record(key: str, heard: str, text_verdict: str) -> dict[str, Any]:
                      (key, key.rsplit("|", 2)[0], cat, claimed, heard, text_verdict, (item.get("text") or "")[:500],
                       datetime.now(timezone.utc).isoformat()))
         conn.commit()
-    return {"ok": True, "answered": len(answered_keys())}
+    learned = {}
+    try:
+        learned = learn_voices([key])                      # the answer teaches that voice right away
+    except Exception as e:                                 # noqa: BLE001 - never lose an answer over this
+        print(f"[Review] could not learn from {key}: {type(e).__name__}: {e}")
+    return {"ok": True, "answered": len(answered_keys()), "learned": learned}
 
 
 def summary() -> dict[str, Any]:
@@ -319,7 +425,7 @@ def summary() -> dict[str, Any]:
     named = [r for r in rows if r["category"] != "unassigned" and r["heard"] != CANT_TELL]
     right = sum(1 for r in named if r["heard"].lower() == r["claimed"].lower())
     heard_text = [r for r in rows if r["text_verdict"] != "cant_hear"]
-    return {"answered": len(rows),
+    return {"answered": len(rows), "profiles": profiles(),
             "named_accuracy": round(right / len(named), 3) if named else None, "named_judged": len(named),
             "text_right_or_mostly": (round(sum(1 for r in heard_text if r["text_verdict"] in ("right", "mostly"))
                                            / len(heard_text), 3) if heard_text else None),

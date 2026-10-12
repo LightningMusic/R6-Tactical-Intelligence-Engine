@@ -33,7 +33,9 @@ SR = 16000
 MIN_SEG_SEC = 1.0           # shorter than this carries too little of a voice
 MAX_SEG_SEC = 12.0
 MATCH_MIN = 0.75            # cosine similarity needed to name a voice
-MARGIN_MIN = 0.05           # ...and the lead it must have over the next-best profile
+MARGIN_MIN = 0.03           # ...and the lead it must have over the next-best profile. Tuned 2026-10-12 on 95
+                            # Discord lines the host identified (5-fold): 0.05 named 64 (1 wrong), 0.03 named 79
+                            # (3 wrong) with profiles that include the host's answers
 MIN_PROFILE_SAMPLES = 5     # a profile built from fewer stretches than this is not used
 PROFILE_CAP = 300           # old samples stop outweighing new ones beyond this many
 MAX_ENROLL_PER_SESSION = 40

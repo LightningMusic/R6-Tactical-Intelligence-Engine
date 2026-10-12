@@ -202,6 +202,11 @@ class ServerDatabase:
                     answered_at TEXT NOT NULL
                 );
 
+                -- Review answers already folded into a voice profile (comms_review.learn_voices).
+                CREATE TABLE IF NOT EXISTS voice_review_used (
+                    line_key TEXT PRIMARY KEY
+                );
+
                 CREATE TABLE IF NOT EXISTS server_transcripts (
                     session_id TEXT PRIMARY KEY,
                     raw_text TEXT NOT NULL DEFAULT '',

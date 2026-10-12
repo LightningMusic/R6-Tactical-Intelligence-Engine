@@ -200,6 +200,9 @@
          <td class="n muted">${c[k].right}/${c[k].judged}</td></tr>`).join("");
       const un = c.unassigned && c.unassigned.answered
         ? Object.entries(c.unassigned.really || {}).map(([k, v]) => `${esc(k)} ${v}`).join(", ") : "";
+      const prof = (r.profiles || []).map((p) =>
+        `<tr><td>${esc(p.name)}</td><td class="n ${p.usable ? "good" : "meh"}">${p.usable ? "in use" : (p.samples ? "learning" : "none yet")}</td>
+         <td class="n muted">${p.samples} clips${p.usable ? "" : ` · ${p.needs} more`}</td></tr>`).join("");
       const mix = (r.mixups || []).map((m) => `<tr><td>Named ${esc(m.named)}, really ${esc(m.really)}</td><td class="n">${m.times}×</td></tr>`).join("");
       $("results").innerHTML = `
         ${note ? `<div class="panel muted">${esc(note)}</div>` : ""}
@@ -212,6 +215,9 @@
         ${rows ? `<div class="panel"><div class="q" style="margin-top:0">By how the name was given</div><table>${rows}</table></div>` : ""}
         ${un ? `<div class="panel"><div class="q" style="margin-top:0">Lines we couldn't name were really</div><div>${un}</div></div>` : ""}
         ${mix ? `<div class="panel"><div class="q" style="margin-top:0">Mix-ups</div><table>${mix}</table></div>` : ""}
+        ${prof ? `<div class="panel"><div class="q" style="margin-top:0">Voice profiles</div>
+          <div class="muted" style="margin-bottom:6px">Every Discord line you name teaches that person's voice, so later lines get named automatically.</div>
+          <table>${prof}</table></div>` : ""}
         <div class="row"><button class="go" id="moreBtn">Mark 30 more</button></div>
         <p class="muted">${r.answered} lines marked so far.</p>`;
       $("moreBtn").onclick = start;
