@@ -478,6 +478,7 @@ def setup(match: Any, ours: Optional[set[str]], positions: dict[int, dict],
         hard = [b for b in w.get("breaches") or [] if b.get("kind") == "hard"]
         charges = w.get("charges")               # None: stored before charges were read
         mine = lambda c: ours is not None and norm(c.get("who") or "") in ours
+        soft = sorted({b["op"] for b in w.get("breaches") or [] if b.get("kind") == "soft"})
         if r.side == "defense":
             missed = total = 0
             for u in usual_walls(usual or {}, r.site or ""):
@@ -494,14 +495,20 @@ def setup(match: Any, ours: Optional[set[str]], positions: dict[int, dict],
                 "unclear": sum(1 for s in reinf if not s.get("who")),
                 "usual": total, "missed": missed, "through": through, "other": other,
                 "their_hard": sorted(_ops(r, ours, False) & HARD_BREACH),
-                "charges": None if charges is None else [c for c in charges if not mine(c)]})
+                "charges": None if charges is None else [c for c in charges if not mine(c)], "soft": soft})
         else:
             opened, other = [], []
             for b in hard:
                 (opened if _near(reinf, b["x"], b["y"], b["z"], ON_WALL_M) else other).append(b)
+            pos = positions.get(rn) or {}
+            drones = pos.get("drones")
+            ours_thrown = [d for d in drones or [] if not d.get("prep") and d.get("who") and mine(d)]
+            first_death = min((t for t in (pos.get("died") or {}).values() if t >= PREP_SEC), default=None)
             out["attack"].append({"round": rn, "opened": opened, "other": other,
                                   "our_hard": sorted(_ops(r, ours, True) & HARD_BREACH),
-                                  "charges": None if charges is None else [c for c in charges if mine(c)]})
+                                  "charges": None if charges is None else [c for c in charges if mine(c)],
+                                  "soft": soft, "drones": None if drones is None else ours_thrown,
+                                  "first_death": first_death})
     return out
 
 
@@ -607,6 +614,25 @@ def setup_lines(s: dict[str, list[dict]], display: Optional[dict[str, str]] = No
         out.append("- Our hard breach: " + "; ".join(rows) + "."
                    + (" (A charge that never went off was destroyed by their denial, or our breacher died first.)"
                       if any("went off" in r for r in rows) else ""))
+    soft_a = [x for x in a if x.get("soft")]
+    if soft_a:
+        out.append("- Our soft breach opened walls or floors: " + "; ".join(
+            f"R{x['round']:02d} {', '.join(x['soft'])}" for x in soft_a) + ".")
+    soft_d = [x for x in d if x.get("soft")]
+    if soft_d:
+        out.append("- Their soft breach opened walls or floors on our defense: " + "; ".join(
+            f"R{x['round']:02d} {', '.join(x['soft'])}" for x in soft_d) + ".")
+    droned = [x for x in a if x.get("drones") is not None]
+    if droned:
+        by_p: collections.Counter = collections.Counter(dr["who"] for x in droned for dr in x["drones"])
+        line = (f"- Drones we threw during the action ({len(droned)} attack round(s)): "
+                + (", ".join(f"{name(p)} {k}" for p, k in by_p.most_common()) if by_p else "none") + ".")
+        blind = [x for x in droned if x["first_death"] is not None
+                 and not any(dr["t"] < x["first_death"] for dr in x["drones"])]
+        if blind:
+            line += (" No drone of ours went out before the first death in: "
+                     + ", ".join(f"R{x['round']:02d}" for x in blind) + ".")
+        out.append(line)
     unread = sorted({o for x in a for o in x["our_hard"]} - HARD_READ)
     if unread:
         out.append(f"- ({', '.join(o.capitalize() for o in unread)}: charges are not read from the replay yet.)")

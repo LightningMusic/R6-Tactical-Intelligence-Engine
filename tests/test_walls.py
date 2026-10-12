@@ -186,6 +186,32 @@ def test_charges_that_never_went_off_are_reported_both_ways():
     assert "- Our hard breach: R02 Thermite: 2 placed, 1 never went off." in text
 
 
+def test_a_drone_thrown_mid_round_is_credited_to_whoever_it_appears_next_to():
+    from integration.drones import thrower
+    pos = {"died": {"Gone": 50.0}, "players": {
+        "Me": {"pts": [[60.0, 10.0, 0.0, 4.0, 0.0]]}, "Mate": {"pts": [[60.0, 30.0, 0.0, 4.0, 0.0]]},
+        "Gone": {"pts": [[40.0, 10.5, 0.0, 4.0, 0.0]]}}}
+    assert thrower(pos, 60.0, 10.3, 0.0, 4.0) == "Me"             # the dead player beside it doesn't count
+    pos["players"]["Mate"]["pts"] = [[60.0, 11.0, 0.0, 4.0, 0.0]]
+    assert thrower(pos, 60.0, 10.3, 0.0, 4.0) is None              # two players right there: not clear
+    assert thrower(pos, 60.0, 30.0, 9.0, 4.0) is None              # nobody near
+
+
+def test_drone_and_soft_breach_lines():
+    ours = {"me", "mate"}
+    match = NS(rounds=[NS(round_number=1, side="attack", site="", outcome="win", player_stats=[stat("Me", "Sledge")]),
+                       NS(round_number=2, side="attack", site="", outcome="loss", player_stats=[stat("Me", "Ash")])])
+    w1, w2 = walls([]), walls([])
+    w1["breaches"] = [{"t": 60, "op": "Sledge", "kind": "soft", "x": 0, "y": 0, "z": 4.0, "objects": 3}]
+    pos = {1: {"walls": w1, "died": {"Them": 80.0}, "drones": [{"t": 50.0, "prep": False, "who": "Me", "path_m": 30},
+                                                               {"t": 5.0, "prep": True, "who": None, "path_m": 60}]},
+           2: {"walls": w2, "died": {"Me": 70.0}, "drones": [{"t": 90.0, "prep": False, "who": "Mate", "path_m": 10}]}}
+    text = "\n".join(tf.setup_lines(tf.setup(match, ours, pos), {"me": "Alex", "mate": "Sam"}))
+    assert "- Our soft breach opened walls or floors: R01 Sledge." in text
+    assert "Drones we threw during the action (2 attack round(s)): Alex 1, Sam 1." in text
+    assert "No drone of ours went out before the first death in: R02." in text
+
+
 def test_usual_walls_are_learned_per_site():
     def rnd(*xs):
         return {"site": "S", "positions": {"walls": {"reinforcements": [{"x": x, "y": 0.0, "z": 4.0} for x in xs]}}}

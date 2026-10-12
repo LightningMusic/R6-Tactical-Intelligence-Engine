@@ -248,6 +248,13 @@ class RecImporter:
                 round_obj.positions["walls"] = walls
         except Exception as e:                                       # noqa: BLE001 - optional enrichment
             self._log(f"  (wall data unavailable for {rec_file.name}: {e})")
+        try:
+            from integration.drones import decode_drones
+            drones = decode_drones(data, round_obj.positions, t_at)
+            if drones is not None:
+                round_obj.positions["drones"] = drones
+        except Exception as e:                                       # noqa: BLE001 - optional enrichment
+            self._log(f"  (drone data unavailable for {rec_file.name}: {e})")
 
     @classmethod
     def timeline_round(cls, data: dict, round_number: int) -> dict:
