@@ -21,6 +21,7 @@ import io
 import json
 import random
 import subprocess
+import threading
 import wave
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -169,6 +170,8 @@ def sample(n: int = 30, seed: Optional[int] = None) -> dict[str, Any]:
               "duration": round(min(x["end"] - x["t"] + 2 * PAD_SEC, MAX_CLIP_SEC), 1),
               "how": DESCRIBE[x["category"]]} for x in picked[:n]]
     left = collections.Counter(x["category"] for c in CATEGORIES for x in pool[c])
+    if items:
+        warm([x["key"] for x in items])
     return {"items": items, "choices": choices(sorted({x["claimed"] for x in items if x["claimed"]})),
             "left": dict(left)}
 
@@ -195,6 +198,45 @@ def _find(key: str) -> Optional[tuple[dict, dict, dict]]:
     return None
 
 
+SR = 16000
+_DECODE_LOCK = threading.Lock()
+
+
+def decoded(path) -> Any:
+    """The track as raw 16 kHz mono samples next to it (review_<name>.pcm), made once. Cutting each clip out of
+    the compressed file took up to 30 s while the server was busy transcribing (2026-10-12: clips timed out on
+    the host's phone); reading a slice of this is instant."""
+    from pathlib import Path
+    path = Path(path)
+    raw = path.with_name(f"review_{path.stem}.pcm")
+    with _DECODE_LOCK:
+        if raw.exists() and raw.stat().st_mtime >= path.stat().st_mtime and raw.stat().st_size > 0:
+            return raw
+        from integration.whisper_transcriber import _find_ffmpeg
+        tmp = raw.with_suffix(".tmp")
+        r = subprocess.run([_find_ffmpeg(), "-v", "error", "-nostdin", "-y", "-i", str(path), "-ac", "1", "-ar", str(SR),
+                            "-f", "s16le", str(tmp)], capture_output=True, timeout=900, stdin=subprocess.DEVNULL)
+        if r.returncode != 0 or not tmp.exists():
+            raise RuntimeError(f"ffmpeg exit {r.returncode}: {r.stderr.decode(errors='replace').strip()[-200:]}")
+        tmp.replace(raw)
+        return raw
+
+
+def warm(keys: list[str]) -> None:
+    """Decode, in the background, the tracks the given lines play from, so the first tap is already quick."""
+    def run() -> None:
+        from server.services.comms_service import CommsService
+        for sid in dict.fromkeys(k.rsplit("|", 2)[0] for k in keys):
+            for p in (next(iter(sorted((server_settings.COMMS_DIR / sid).glob("team.*"))), None),
+                      CommsService._self_clip(sid) if "self" in _tracks(sid) else None):
+                if p is not None:
+                    try:
+                        decoded(p)
+                    except Exception as e:                   # noqa: BLE001
+                        print(f"[Review] could not prepare {sid[:16]} {p.name}: {e}")
+    threading.Thread(target=run, daemon=True, name="review-warm").start()
+
+
 def clip(key: str) -> Optional[bytes]:
     """The line's audio as a 16 kHz mono WAV, a little padding either side."""
     found = _find(key)
@@ -209,27 +251,21 @@ def clip(key: str) -> Optional[bytes]:
         path = next(iter(sorted((server_settings.COMMS_DIR / session_id).glob("team.*"))), None)
     if path is None:
         return None
-    from integration.whisper_transcriber import _find_ffmpeg
     clock = ClipClock(meta.get("pieces") or [[float(rnd["start_epoch"]), 0.0]])
     start = clock.offset(float(rnd["start_epoch"]) + float(item["t"])) - PAD_SEC
     length = min(float(item.get("end", item["t"])) - float(item["t"]) + 2 * PAD_SEC, MAX_CLIP_SEC)
     if start + length <= 0:
         return None
-    # Raw samples, with the WAV header written here: ffmpeg writing WAV to a pipe can't go back to fill in the
-    # length, and some phone browsers won't play a file whose header says it is 37 hours long.
-    cmd = [_find_ffmpeg(), "-v", "error", "-nostdin", "-threads", "1", "-ss", f"{max(0.0, start):.3f}", "-i", str(path),
-           "-t", f"{length:.3f}", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
-    pcm, why = b"", ""
-    for _attempt in range(3):
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
-            pcm, why = r.stdout, f"ffmpeg exit {r.returncode}: {r.stderr.decode(errors='replace').strip()[-200:]}"
-        except (OSError, subprocess.SubprocessError) as e:
-            why = f"{type(e).__name__}: {e}"
-        if len(pcm) >= 2:
-            break
+    try:
+        raw = decoded(path)
+    except Exception as e:                                   # noqa: BLE001 - reported, the page shows "no audio"
+        print(f"[Review] no audio for {key}: {type(e).__name__}: {str(e)[:200]}")
+        return None
+    with open(raw, "rb") as f:
+        f.seek(int(max(0.0, start) * SR) * 2)
+        pcm = f.read(int((length + min(0.0, start)) * SR) * 2)
     if len(pcm) < 2:
-        print(f"[Review] no audio for {key}: {why}")
+        print(f"[Review] no audio for {key}: past the end of {path.name}")
         return None
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
