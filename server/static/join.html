@@ -146,6 +146,7 @@
   const DEAD_MS = 6 * 1000;
   const GAP_FILL_MS = 250;                   // a block this much later than its samples say: fill the hole with silence
   const PROBE_BACK_MS = 3000;                // the microphone healed away from has carried sound this long: go back to it
+  const PROBE_VERIFY_MS = 8000;              // ...and the recording itself must get sound from it within this long
   const RATIO_MIN_SEC = 60;                  // judge the audio's speed only after a minute of recording
   const RATIO_OK = [0.93, 1.07];
   const TITLE = "R6 Team Recorder";
@@ -170,6 +171,7 @@
     recordingId: null, chunkIndex: 0, cycleStartEpoch: 0, cycleSamples: 0, cyclePerfStart: 0, gapFilledSec: 0,
     buf: [], bufSamples: 0, haveT0: false, totalSamples: 0,
     probe: null,                                         // the microphone healed away from, listened to in the background
+    probeBanned: new Set(),                              // switched back to once and the recording got nothing: never again
     uploaded: 0, queued: 0,
     level: 0, lastAliveAt: 0, lastSoundAt: 0, micLabel: "", micNote: "", fatal: "",
     healing: false, healAfter: 0, healedTo: "", healFailed: false, needsTap: false, autoStarted: false,
@@ -584,7 +586,9 @@
       S.healFailed = true;
     } finally {
       S.healing = false;
-      S.healAfter = performance.now() + HEAL_RETRY_MS;
+      // Only a search that found nothing waits before the next one; after a good switch, a microphone that dies
+      // again is looked at straight away (it used to wait 5 minutes, recording silence).
+      S.healAfter = S.healFailed ? performance.now() + HEAL_RETRY_MS : 0;
       render();
     }
   }
@@ -600,7 +604,7 @@
   // for a whole practice, and the teammate's voice was barely on the recording).
   async function startProbe(deviceId, label) {
     stopProbe();
-    if (!S.ctx || !S.sink || !deviceId) return;
+    if (!S.ctx || !S.sink || !deviceId || S.probeBanned.has(deviceId)) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: {
         deviceId: { exact: deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
@@ -630,11 +634,24 @@
     if (!p.aliveSince) p.aliveSince = performance.now();
     if (performance.now() - p.aliveSince < PROBE_BACK_MS) return;
     stopProbe();
+    const healed = currentMicId(), healedLabel = S.healedTo;
     try {
       await openMic(p.id);
+    } catch (e) { render(); return; }
+    // A second capture of the same device can hear noise while the recording's own capture gets nothing
+    // (2026-10-12: a wireless headset did exactly that; the page kept going back to it and recorded ~80 minutes
+    // of digital silence). So the switch back only stands if the recording itself gets sound; otherwise go
+    // straight back to the microphone that worked and never try that one again this session.
+    const since = performance.now();
+    S.healing = true;                                     // keep the dead-mic watch out of it while checking
+    try { await sleep(PROBE_VERIFY_MS); } finally { S.healing = false; }
+    if (S.lastSoundAt > since) {
       S.healedTo = ""; ls.set(LS_MIC, p.id);
-      await listMics();
-    } catch (e) {}
+    } else {
+      S.probeBanned.add(p.id);
+      try { await openMic(healed); S.healedTo = healedLabel; } catch (e) { reacquireMic("The microphone was lost while switching back."); }
+    }
+    await listMics();
     render();
   }
 
