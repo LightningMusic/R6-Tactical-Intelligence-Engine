@@ -64,7 +64,15 @@ _JOIN_HEADERS = {
 }
 
 
+def join_page_version() -> str:
+    """A short fingerprint of the recorder page as deployed; pages compare it with their own and reload when
+    the server has a newer one."""
+    import hashlib
+    return hashlib.sha1(_JOIN_HTML_PATH.read_bytes()).hexdigest()[:12]
+
+
 @router.get("/join", response_class=HTMLResponse, include_in_schema=False)
 def serve_join() -> HTMLResponse:
     """Browser recorder for teammates: open the invite link, click Start."""
-    return HTMLResponse(content=_JOIN_HTML_PATH.read_text(encoding="utf-8"), headers=_JOIN_HEADERS)
+    html = _JOIN_HTML_PATH.read_text(encoding="utf-8").replace("__PAGE_VERSION__", join_page_version())
+    return HTMLResponse(content=html, headers=_JOIN_HEADERS)

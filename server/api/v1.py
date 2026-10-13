@@ -360,8 +360,13 @@ def upload_voice_chunk(
                 "SELECT COALESCE(SUM(duration_sec), 0) AS s FROM voice_chunks WHERE lower(username) = ? AND uploaded_at > ?",
                 (username.lower(), since),
             ).fetchone()["s"]
+            outside = not in_host_session(conn, start_epoch, duration_sec)
         if used + duration_sec > _INVITE_MAX_SEC_PER_DAY:
             raise HTTPException(status_code=429, detail="Daily recording limit reached for this link.")
+        if outside:
+            # 422: the page drops it instead of retrying. Only the host's sessions are recorded, whatever the
+            # page was set to.
+            raise HTTPException(status_code=422, detail="Recorded outside the host's sessions: not kept.")
 
     server_settings.VOICE_DIR.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(suffix=suffix, dir=server_settings.VOICE_DIR)
@@ -568,6 +573,23 @@ def _companion_control(conn) -> dict:
     return {"recording": rec, "changed_at": float(row["changed_at"]), "host_seen": float(row["host_seen"])}
 
 
+PERIOD_MARGIN_SEC = 120.0       # audio this close to a host session's edges still counts as in it
+
+
+def in_host_session(conn, start: float, duration: float) -> bool:
+    """Whether a stretch of a teammate's audio overlaps a time the host's app was recording. Audio from before the
+    first logged session is accepted (nothing is known about that time)."""
+    first = conn.execute("SELECT MIN(start) AS s FROM host_periods").fetchone()["s"]
+    if first is None or start + duration < float(first) - PERIOD_MARGIN_SEC:
+        return True
+    row = conn.execute("SELECT host_seen FROM companion_control WHERE id = 1").fetchone()
+    open_end = min(time.time(), float(row["host_seen"]) + HOST_SILENT_STOP_SEC) if row else time.time()
+    hit = conn.execute(
+        "SELECT 1 FROM host_periods WHERE start - ? < ? AND COALESCE(end, ?) + ? > ? LIMIT 1",
+        (PERIOD_MARGIN_SEC, start + duration, open_end, PERIOD_MARGIN_SEC, start)).fetchone()
+    return hit is not None
+
+
 @router.put("/companion/control")
 def set_companion_control(body: dict, _client: str = Depends(verify_api_token)) -> dict:
     """The host's app: {"recording": true|false}. Re-sent every minute or so
@@ -577,6 +599,11 @@ def set_companion_control(body: dict, _client: str = Depends(verify_api_token)) 
     with repo.db.get_connection() as conn:
         prev = conn.execute("SELECT recording FROM companion_control WHERE id = 1").fetchone()
         changed = prev is None or bool(prev["recording"]) != want
+        open_period = conn.execute("SELECT rowid FROM host_periods WHERE end IS NULL").fetchone()
+        if want and open_period is None:
+            conn.execute("INSERT INTO host_periods (start, end) VALUES (?, NULL)", (now,))
+        elif not want and open_period is not None:
+            conn.execute("UPDATE host_periods SET end = ? WHERE end IS NULL", (now,))
         conn.execute(
             """INSERT INTO companion_control (id, recording, changed_at, host_seen) VALUES (1, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET recording = excluded.recording, host_seen = excluded.host_seen,
@@ -611,7 +638,13 @@ def companion_heartbeat(body: dict, principal: VoicePrincipal = Depends(verify_v
             (device_id, username, status_json, time.time()),
         )
         conn.commit()
-        return {"control": _companion_control(conn), "server_time": time.time()}
+        reply = {"control": _companion_control(conn), "server_time": time.time()}
+    if principal.kind == "invite":
+        # The host decides, not the page: pages follow the host's sessions, and a page older than the one the
+        # server now serves reloads itself between sessions.
+        from server.dashboard_routes import join_page_version
+        reply.update(policy={"mode": "follow"}, page_version=join_page_version())
+    return reply
 
 
 @router.get("/companion/status")

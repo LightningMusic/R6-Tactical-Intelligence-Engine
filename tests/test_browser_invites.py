@@ -81,6 +81,33 @@ def _upload(client, token, body=None, username="Teddy_Dance", chunk_index=0, fil
                        data={k: str(v) for k, v in data.items()})
 
 
+def test_only_audio_from_the_hosts_sessions_is_kept(server):
+    # 2026-10-13: a page left on "record continuously" sent ~10 hours of a teammate who wasn't playing.
+    client, db = server
+    tok = _invite(client)["token"]
+    now = time.time()
+    assert _upload(client, tok, start_epoch=now - 30).status_code == 200      # no session logged yet: kept
+    client.put("/api/v1/companion/control", headers=_auth(API), json={"recording": True})
+    assert _upload(client, tok, chunk_index=1, start_epoch=time.time() - 5).status_code == 200
+    client.put("/api/v1/companion/control", headers=_auth(API), json={"recording": False})
+    later = time.time() + 600                                                 # 10 minutes after the session ended
+    r = _upload(client, tok, chunk_index=2, start_epoch=later)
+    assert r.status_code == 422 and "outside the host's sessions" in r.json()["detail"]
+    # the companion (voice key) follows the host by design and isn't held to this
+    assert _upload(client, VOICE, chunk_index=3, start_epoch=later).status_code == 200
+
+
+def test_check_ins_tell_the_page_to_follow_the_host_and_which_version_is_current(server):
+    client, _ = server
+    tok = _invite(client)["token"]
+    reply = client.post("/api/v1/companion/heartbeat", headers=_auth(tok),
+                        json={"device_id": "d1", "username": "Teddy_Dance", "status": {}}).json()
+    page = client.get("/join").text
+    assert reply["policy"] == {"mode": "follow"}
+    assert len(reply["page_version"]) == 12 and f'"{reply["page_version"]}"' in page
+    assert "__PAGE_VERSION__" not in page
+
+
 def test_host_creates_lists_and_the_token_is_never_stored(server):
     client, db = server
     made = _invite(client, label="James")

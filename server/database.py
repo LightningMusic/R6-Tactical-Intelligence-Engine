@@ -202,6 +202,14 @@ class ServerDatabase:
                     answered_at TEXT NOT NULL
                 );
 
+                -- When the host's app said "recording" (PUT /companion/control): browser recorders' audio is
+                -- kept only from inside these windows, so a page left on "record continuously" can't fill
+                -- the server with hours of a teammate who isn't playing (2026-10-13: ~10 hours of it).
+                CREATE TABLE IF NOT EXISTS host_periods (
+                    start REAL NOT NULL,
+                    end REAL
+                );
+
                 -- Review answers already folded into a voice profile (comms_review.learn_voices).
                 CREATE TABLE IF NOT EXISTS voice_review_used (
                     line_key TEXT PRIMARY KEY

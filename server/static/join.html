@@ -127,6 +127,7 @@
   const CLOCK_RESYNC_MS = 10 * 60 * 1000;
   const DB_NAME = "r6rec", STORE = "chunks";
   const LS_TOKEN = "r6rec.token", LS_DEVICE = "r6rec.device", LS_MIC = "r6rec.mic";
+  const PAGE_VERSION = "__PAGE_VERSION__";        // filled in by the server when it serves the page
   const LS_AUTO = "r6rec.auto", LS_ALWAYS = "r6rec.always";   // set by the first manual Start: later opens start by themselves
   // Nobody here is asked to pick a microphone or press anything. When the one in use sends only zeros, other
   // real microphones are tried in turn and the first that carries sound is kept (and remembered).
@@ -469,7 +470,20 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ device_id: S.deviceId, username: S.username, status }),
       });
-      if (r.ok) { const j = await r.json(); S.hostWantsRecording = !!(j.control && j.control.recording); S.online = true; }
+      if (r.ok) {
+        const j = await r.json(); S.hostWantsRecording = !!(j.control && j.control.recording); S.online = true;
+        // The host decides: a page someone set to "record continuously" goes back to following the host's
+        // sessions (2026-10-13: one recorded a teammate for ~10 hours).
+        if (j.policy && j.policy.mode === "follow" && S.always) {
+          S.always = false; ls.set(LS_ALWAYS, "0"); $("always").checked = false;
+        }
+        // A newer page on the server: reload between sessions (never mid-recording, nothing waiting to upload),
+        // so a fix reaches everyone without anyone reopening their link.
+        if (j.page_version && PAGE_VERSION.length === 12 && j.page_version !== PAGE_VERSION
+            && !S.recording && !S.queued && !S.flushing) {
+          location.reload();
+        }
+      }
     } catch (e) { S.online = false; }
     reconcile();
     if (S.queued) flushQueue();
