@@ -440,18 +440,23 @@ print('server_config.json updated (' + which + '); other settings kept')
 }
 
 function Cmd-Keepalive {
-    # Holds the WSL VM open and lowers its CPU priority so games always win.
-    $p = Start-Process wsl.exe -ArgumentList '-d', $Distro, '-u', 'root', '--exec', '/usr/bin/sleep', 'infinity' `
-        -WindowStyle Hidden -PassThru
-    for ($i = 0; $i -lt 60; $i++) {
-        $vm = Get-Process vmmemWSL -ErrorAction SilentlyContinue
-        if ($vm) {
-            foreach ($proc in $vm) { try { $proc.PriorityClass = 'BelowNormal' } catch { } }
-            break
+    # Holds the WSL VM open and lowers its CPU priority so games always win. Loops forever: on 2026-10-12 the
+    # held-open process ended (cleanly, so the scheduled task's restart-on-failure never fired), the VM shut
+    # down mid-transcription and the server was gone for ~12 hours.
+    while ($true) {
+        $p = Start-Process wsl.exe -ArgumentList '-d', $Distro, '-u', 'root', '--exec', '/usr/bin/sleep', 'infinity' `
+            -WindowStyle Hidden -PassThru
+        for ($i = 0; $i -lt 60; $i++) {
+            $vm = Get-Process vmmemWSL -ErrorAction SilentlyContinue
+            if ($vm) {
+                foreach ($proc in $vm) { try { $proc.PriorityClass = 'BelowNormal' } catch { } }
+                break
+            }
+            Start-Sleep -Seconds 2
         }
-        Start-Sleep -Seconds 2
+        $p.WaitForExit()
+        Start-Sleep -Seconds 10
     }
-    $p.WaitForExit()
 }
 
 function Cmd-Autostart {
