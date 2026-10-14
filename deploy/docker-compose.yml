@@ -74,7 +74,9 @@ services:
     hostname: ${TS_HOSTNAME:-r6-server}
     volumes:
       - ts_state:/var/lib/tailscale
-      - ./tailscale:/config:ro
+      # Not ./tailscale: r6ctl swaps the whole source folder on every sync, which left this mount on the deleted
+      # copy and dropped the Funnel (2026-10-14). r6ctl copies serve.json here in place.
+      - /opt/r6/ts-config:/config:ro
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:-}
       TS_HOSTNAME: ${TS_HOSTNAME:-r6-server}

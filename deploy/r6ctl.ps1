@@ -101,7 +101,11 @@ function Cmd-Sync {
               'tar -xf - -C /opt/r6/src.new; ' +
               'if [ -d /opt/r6/src ]; then mv /opt/r6/src /opt/r6/src.old; fi; ' +
               'mv /opt/r6/src.new /opt/r6/src; rm -rf /opt/r6/src.old; ' +
-              'chmod 600 /opt/r6/src/deploy/.env 2>/dev/null || true'
+              'chmod 600 /opt/r6/src/deploy/.env 2>/dev/null || true; ' +
+              # Tailscale's serve config is bind-mounted from a folder that is never swapped: mounting it from
+              # src/ left the running tailscale container on the deleted old copy after every sync, it dropped
+              # its Funnel config, and the public address stopped resolving (2026-10-14). cp rewrites in place.
+              'mkdir -p /opt/r6/ts-config; cp /opt/r6/src/deploy/tailscale/serve.json /opt/r6/ts-config/serve.json'
     Send-Tar $archive $remote
 }
 
