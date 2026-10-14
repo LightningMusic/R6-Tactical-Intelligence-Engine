@@ -71,6 +71,13 @@ class ServerSettings:
             os.getenv("R6_SERVER_WHISPER_MODEL_PATH", str(self.MODELS_DIR / "whisper-base.pt"))
         ).resolve()
         self.WHISPER_MODEL_SIZE = os.getenv("R6_SERVER_WHISPER_MODEL_SIZE", "base").strip()
+        # faster-whisper (CTranslate2) model folder. When it's there the server transcribes with it and skips
+        # the stretches with nobody talking: on 2026-10-13 the old path took ~41 min per 10 min of audio, while
+        # this one ran a 5 min test clip in about a minute with Whisper "small", which hears callouts better
+        # than "base" ("drone", not "trunk").
+        self.FAST_WHISPER_DIR = Path(
+            os.getenv("R6_SERVER_FAST_WHISPER_DIR", str(self.MODELS_DIR / "faster-whisper-small"))
+        ).resolve()
 
         if getattr(sys, "frozen", False):
             _bundle_dir = Path(sys.executable).parent / "_internal"

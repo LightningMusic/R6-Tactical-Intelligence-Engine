@@ -247,6 +247,43 @@ def collapse_repetitions(segments: list[dict[str, Any]]) -> tuple[list[dict[str,
     return kept, dropped
 
 
+_PAUSE_SPLIT_SEC = 0.8     # a gap this long between words starts a new line
+_MAX_LINE_SEC = 12.0       # past this, a line also ends at the next full stop
+
+
+def split_on_pauses(segments: list[dict[str, Any]], gap: float = _PAUSE_SPLIT_SEC,
+                    max_len: float = _MAX_LINE_SEC) -> list[dict[str, Any]]:
+    """
+    With the speech-only path (faster-whisper's VAD), Whisper sees the talking
+    glued together and returns segments 20-30 s long holding several separate
+    callouts. Each segment becomes one comms line with one timestamp, so this
+    cuts them back apart at the pauses the word timestamps show. Segments
+    without word timestamps pass through unchanged.
+    """
+    out: list[dict[str, Any]] = []
+    for seg in segments:
+        words = [w for w in (seg.get("words") or []) if isinstance(w, dict)]
+        if len(words) < 2:
+            out.append(seg)
+            continue
+        extra = {k: v for k, v in seg.items() if k not in ("start", "end", "text", "words")}
+        piece = [words[0]]
+        pieces = []
+        for prev, w in zip(words, words[1:]):
+            pause = float(w["start"]) - float(prev["end"])
+            long_line = float(w["start"]) - float(piece[0]["start"]) >= max_len
+            if pause >= gap or (long_line and str(prev.get("word", "")).strip().endswith((".", "?", "!"))):
+                pieces.append(piece)
+                piece = [w]
+            else:
+                piece.append(w)
+        pieces.append(piece)
+        for p in pieces:
+            out.append({**extra, "start": float(p[0]["start"]), "end": float(p[-1]["end"]),
+                        "text": "".join(str(w.get("word", "")) for w in p).strip(), "words": p})
+    return out
+
+
 # =====================================================
 # 2026-09-10 fix: load audio ourselves so Whisper never gets the chance
 # to flash a console window mid-match.
@@ -351,6 +388,7 @@ class WhisperTranscriber:
         self,
         model_path: Optional[Path] = None,
         model_size: Optional[str] = None,
+        fast_model_dir: Optional[Path] = None,
     ) -> None:
         # Defaults preserve exact prior behavior for existing (client)
         # callers that pass nothing. The overrides exist so the server's
@@ -361,6 +399,8 @@ class WhisperTranscriber:
         self._model_path: Path = model_path if model_path is not None else WHISPER_MODEL_PATH
         self._model_size_override: Optional[str] = model_size
         self._voice_encoder: Any = None  # resemblyzer.VoiceEncoder — lazy, optional dependency
+        self._fast_dir: Optional[Path] = fast_model_dir
+        self._fast: Any = None           # faster_whisper.WhisperModel — lazy, optional (server only)
 
     def _get_ffmpeg(self) -> Path:
         if self._ffmpeg is None:
@@ -430,6 +470,8 @@ class WhisperTranscriber:
         Returns a combined dict with 'text' and 'segments'.
         """
         _ensure_console()
+        if self._fast_model_ready():
+            return self._transcribe_fast(audio_path, language, progress_callback)
         self._load_model()
 
         if not audio_path.exists():
@@ -553,6 +595,90 @@ class WhisperTranscriber:
             progress_callback(done_msg)
 
         return {"text": full_text, "segments": all_segments, "language": language}
+
+    # =====================================================
+    # FASTER-WHISPER PATH (server)
+    # =====================================================
+
+    def _fast_model_ready(self) -> bool:
+        """True when a faster-whisper model folder was given, exists, and the
+        package is installed. The USB app has neither, so it keeps the
+        openai-whisper path above."""
+        if self._fast is not None:
+            return True
+        if self._fast_dir is None or not (self._fast_dir / "model.bin").exists():
+            return False
+        try:
+            from faster_whisper import WhisperModel  # type: ignore[import-untyped]
+        except ImportError:
+            return False
+        threads = int(os.getenv("OMP_NUM_THREADS") or os.cpu_count() or 4)
+        print(f"[Whisper] Loading faster-whisper model from {self._fast_dir} ({threads} threads) ...")
+        self._fast = WhisperModel(str(self._fast_dir), device="cpu", compute_type="int8", cpu_threads=threads)
+        print("[Whisper] Model ready.")
+        return True
+
+    def _transcribe_fast(
+        self,
+        audio_path: Path,
+        language: str,
+        progress_callback: Optional[Callable[[str], None]],
+    ) -> dict[str, Any]:
+        """Same result shape as transcribe_full(), but only the stretches where
+        someone is talking go through Whisper (Silero VAD). Most of a match
+        recording is game noise, and the old path spent most of its time
+        re-decoding that noise at every fallback temperature."""
+        import time
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Recording not found: {audio_path}")
+        audio = _load_whisper_audio(self._get_ffmpeg(), audio_path)
+        duration_sec = len(audio) / 16000.0
+        msg = f"Recording: {duration_sec / 60:.1f} min — transcribing the speech in it..."
+        print(f"[Whisper] {msg}")
+        if progress_callback:
+            progress_callback(msg)
+
+        started = time.time()
+        seg_iter, _info = self._fast.transcribe(  # type: ignore[union-attr]
+            audio,
+            language=language,
+            beam_size=5,
+            word_timestamps=True,
+            temperature=list(_DECODE_TEMPERATURES),
+            condition_on_previous_text=False,
+            no_speech_threshold=0.5,
+            log_prob_threshold=-1.0,
+            compression_ratio_threshold=2.4,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 400},
+        )
+        segments: list[dict[str, Any]] = []
+        next_report = 0.25
+        for s in seg_iter:
+            segments.append({
+                "start": float(s.start), "end": float(s.end), "text": s.text,
+                "avg_logprob": float(s.avg_logprob), "no_speech_prob": float(s.no_speech_prob),
+                "words": [{"word": w.word, "start": float(w.start), "end": float(w.end),
+                           "probability": float(w.probability)} for w in (s.words or [])],
+            })
+            if duration_sec > 0 and s.end / duration_sec >= next_report:
+                progress_msg = f"Transcribed {s.end / 60:.0f} of {duration_sec / 60:.0f} min ({time.time() - started:.0f} s so far)"
+                print(f"[Whisper] {progress_msg}")
+                if progress_callback:
+                    progress_callback(progress_msg)
+                next_report += 0.25
+
+        segments = split_on_pauses(segments)
+        segments, dropped = collapse_repetitions(segments)
+        if dropped:
+            print(f"[Whisper] Dropped {dropped} looped/empty segment(s) (repetition guard).")
+        full_text = " ".join(str(seg.get("text", "")).strip() for seg in segments)
+        done_msg = (f"Transcription complete: {len(full_text.split())} words, {len(segments)} segments "
+                    f"in {time.time() - started:.0f} s.")
+        print(f"[Whisper] {done_msg}")
+        if progress_callback:
+            progress_callback(done_msg)
+        return {"text": full_text, "segments": segments, "language": language}
 
     def transcribe(self, audio_path: Path, language: str = "en") -> dict[str, Any]:
         """Backwards-compatible wrapper."""

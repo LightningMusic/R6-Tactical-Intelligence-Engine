@@ -27,6 +27,8 @@ RUN pip install -r /tmp/requirements.txt
 # --no-deps: whisper would pull in triton (GPU-only) and resemblyzer the
 # Python-2 "typing" backport; their real dependencies are in requirements.txt.
 RUN pip install --no-deps openai-whisper==20250625 Resemblyzer==0.1.4
+# faster-whisper: the server's transcriber when its model folder is in /data/models (see server/config.py).
+RUN pip install faster-whisper==1.2.1
 # Resemblyzer's webrtcvad imports pkg_resources, which setuptools 81+ no longer ships.
 RUN pip install "setuptools==80.9.0"
 

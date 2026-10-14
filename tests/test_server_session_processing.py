@@ -40,7 +40,7 @@ def work_dir(tmp_path: Path) -> Path:
 
 
 class _FakeTranscriber:
-    def __init__(self, model_path=None, model_size=None) -> None:
+    def __init__(self, model_path=None, model_size=None, fast_model_dir=None) -> None:
         self.model_path = model_path
         self.model_size = model_size
 
@@ -110,7 +110,7 @@ def test_no_audio_directory_is_a_silent_noop(tmp_path: Path, monkeypatch):
 
 def test_transcription_failure_does_not_raise(monkeypatch, work_dir):
     class _BrokenTranscriber:
-        def __init__(self, model_path=None, model_size=None) -> None:
+        def __init__(self, model_path=None, model_size=None, fast_model_dir=None) -> None:
             pass
 
         def transcribe_full(self, audio_path):

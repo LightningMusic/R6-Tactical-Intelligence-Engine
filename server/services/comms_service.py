@@ -56,6 +56,7 @@ def _get_transcriber():
             _transcriber = WhisperTranscriber(
                 model_path=server_settings.WHISPER_MODEL_PATH,
                 model_size=server_settings.WHISPER_MODEL_SIZE,
+                fast_model_dir=server_settings.FAST_WHISPER_DIR,
             )
         return _transcriber
 
