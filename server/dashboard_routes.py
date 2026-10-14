@@ -71,6 +71,17 @@ def join_page_version() -> str:
     return hashlib.sha1(_JOIN_HTML_PATH.read_bytes()).hexdigest()[:12]
 
 
+_SOLO_HTML_PATH = Path(__file__).parent / "static" / "solo.html"
+_SOLO_HEADERS = {**_JOIN_HEADERS, "Permissions-Policy": "microphone=(), camera=(), geolocation=()"}
+
+
+@router.get("/solo", response_class=HTMLResponse, include_in_schema=False)
+def serve_solo() -> HTMLResponse:
+    """A player's own analyzer: upload their replay folder, see their matches and trends. The key rides in the
+    URL fragment (never sent to the server) like /join's invite token, with the same no-leak headers."""
+    return HTMLResponse(content=_SOLO_HTML_PATH.read_text(encoding="utf-8"), headers=_SOLO_HEADERS)
+
+
 @router.get("/join", response_class=HTMLResponse, include_in_schema=False)
 def serve_join() -> HTMLResponse:
     """Browser recorder for teammates: open the invite link, click Start."""

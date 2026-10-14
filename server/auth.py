@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import Request, HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from server import invites
+from server import invites, players
 from server.config import server_settings
 
 security_scheme = HTTPBearer(auto_error=False)
@@ -42,6 +42,38 @@ def verify_api_token(credentials: Optional[HTTPAuthorizationCredentials] = Secur
         )
 
     return "authenticated_client"
+
+
+@dataclass(frozen=True)
+class PlayerPrincipal:
+    """Who is calling a /solo or /plugin route. A player key is one player (`username`); the host's main key
+    is "main" and names the player it wants with ?player=."""
+    kind: str                      # "player" | "main"
+    username: Optional[str] = None
+
+
+def verify_player_token(credentials: Optional[HTTPAuthorizationCredentials] = Security(security_scheme)) -> PlayerPrincipal:
+    """For the /solo and /plugin routes only: a player key, or the main API token."""
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = credentials.credentials.strip()
+    if token.startswith(players.TOKEN_PREFIX):
+        key = players.authenticate(token)
+        if key is not None:
+            return PlayerPrincipal("player", key["username"])
+    else:
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest().lower()
+        if server_settings.API_TOKEN_HASH and hmac.compare_digest(token_hash, server_settings.API_TOKEN_HASH):
+            return PlayerPrincipal("main")
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired key.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 @dataclass(frozen=True)

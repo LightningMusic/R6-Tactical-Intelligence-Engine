@@ -267,6 +267,23 @@
         <button id="inviteCreateBtn" style="margin:0; padding:8px 12px; font-size:12px;">Create link</button>
       </div>
     </div>
+    <div class="card">
+      <h2>Player analyzers</h2>
+      <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">
+        A teammate's own analyzer: they upload their own replays and see their own numbers. The link only reaches that
+        player's own data (never comms, voice or anyone else's). <a href="/solo" target="_blank" rel="noopener">Open it yourself</a>.
+      </div>
+      <div id="playerNew" style="display:none; margin-bottom:12px; padding:10px; border-radius:8px; background:var(--bg-alt, rgba(128,128,128,0.08));">
+        <div style="font-size:12px; margin-bottom:6px;"><b id="playerNewFor"></b> — copy this now, it is not shown again:</div>
+        <input type="text" id="playerNewLink" readonly style="width:100%; font-size:12px;">
+        <button class="secondary" id="playerCopyBtn" style="margin-top:6px; padding:6px 10px; font-size:12px;">Copy link</button>
+      </div>
+      <div id="playerList" style="font-size:12px; color:var(--muted);">Loading…</div>
+      <div style="display:flex; gap:8px; margin-top:10px;">
+        <select id="playerSelect" style="flex:1; margin:0;"></select>
+        <button id="playerCreateBtn" style="margin:0; padding:8px 12px; font-size:12px;">Create link</button>
+      </div>
+    </div>
     <div class="footer-note">Auto-refreshes every 15s · data stays on this server, nothing leaves your network</div>
   </div>
 </main>
@@ -698,6 +715,7 @@
   async function loadRoster() {
     try { roster = (await apiFetch("/api/v1/roster")).roster || []; } catch (e) { roster = []; }
     fillInviteSelect();
+    loadPlayers();
   }
   async function loadInvites() {
     let list;
@@ -725,6 +743,57 @@
       catch (e) { showError(e.message); }
     }));
   }
+
+  // ── Player analyzers (/solo) ────────────────────────────
+  async function loadPlayers() {
+    const sel = $("playerSelect"), keep = sel.value;
+    sel.innerHTML = [`<option value="">Pick a teammate…</option>`].concat(roster.map(r =>
+      `<option value="${escapeHtml(r.username)}">${escapeHtml((r.label ? r.label + " — " : "") + r.username)}</option>`)).join("");
+    sel.value = keep;
+    let list;
+    try { list = (await apiFetch("/api/v1/players")).keys || []; }
+    catch (e) { $("playerList").textContent = "Could not load (" + e.message + ")."; return; }
+    $("playerList").innerHTML = list.length ? list.map(k => {
+      const dead = k.revoked ? "revoked" : k.expired ? "expired" : "";
+      return `<div class="detail-row"><span class="k">${escapeHtml(k.username)}${k.label ? ` <span style="color:var(--muted-dim)">${escapeHtml(k.label)}</span>` : ""}</span>
+        <span class="v">${dead ? `<span style="color:var(--red)">${dead}</span>` : escapeHtml(fmtAgo(k.last_seen))}
+        · <a href="#" data-pregen="${escapeHtml(k.key_id)}">${dead ? "reissue" : "new link"}</a>
+        ${dead ? "" : ` · <a href="#" data-prevoke="${escapeHtml(k.key_id)}">revoke</a>`}</span></div>`;
+    }).join("") : "No analyzer links yet.";
+    $("playerList").querySelectorAll("[data-pregen]").forEach(a => a.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      if (!confirm("Make a new link? The old one stops working.")) return;
+      try { showNewPlayer(await apiFetch(`/api/v1/players/${a.dataset.pregen}/regenerate`, { method: "POST", body: {} })); loadPlayers(); }
+      catch (e) { showError(e.message); }
+    }));
+    $("playerList").querySelectorAll("[data-prevoke]").forEach(a => a.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      if (!confirm("Revoke this link? It stops working immediately (their uploaded matches are kept).")) return;
+      try { await apiFetch(`/api/v1/players/${a.dataset.prevoke}`, { method: "DELETE" }); loadPlayers(); }
+      catch (e) { showError(e.message); }
+    }));
+  }
+  function showNewPlayer(res) {
+    $("playerNewFor").textContent = res.username;
+    $("playerNewLink").value = res.solo_url || (getServerUrl().replace(/\/$/, "") + res.solo_path);
+    $("playerNew").style.display = "block";
+    $("playerNewLink").select();
+  }
+  $("playerCreateBtn").addEventListener("click", async () => {
+    const name = $("playerSelect").value;
+    if (!name) { showError("Pick a teammate first."); return; }
+    const entry = roster.find(r => r.username === name);
+    hideError();
+    try { showNewPlayer(await apiFetch("/api/v1/players", { method: "POST", body: { username: name, label: (entry && entry.label) || name } })); loadPlayers(); }
+    catch (e) { showError(e.message); }
+  });
+  $("playerCopyBtn").addEventListener("click", async () => {
+    const box = $("playerNewLink");
+    box.select();
+    try { await navigator.clipboard.writeText(box.value); $("playerCopyBtn").textContent = "Copied"; }
+    catch (e) { document.execCommand("copy"); $("playerCopyBtn").textContent = "Copied"; }
+    setTimeout(() => { $("playerCopyBtn").textContent = "Copy link"; }, 1500);
+  });
 
   async function loadVoice() {
     let companions = "";

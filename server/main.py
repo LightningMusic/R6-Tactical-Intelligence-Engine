@@ -51,6 +51,8 @@ async def lifespan(app: FastAPI):
     server_settings.ensure_directories()
     _print_startup_banner()
     server_worker.start_in_background()
+    from server.services.solo import start_worker as start_solo_worker
+    start_solo_worker()
     # Keeps the server's operator/gadget catalog current with the game for
     # as long as it runs (checks hourly, syncs at most once a day).
     from server.match_db import ensure_match_database
@@ -73,6 +75,8 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(v1_router)
+    from server.api.solo import router as solo_router
+    app.include_router(solo_router)
     app.include_router(dashboard_router)
     return app
 

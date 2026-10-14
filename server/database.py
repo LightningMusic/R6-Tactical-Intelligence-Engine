@@ -215,6 +215,59 @@ class ServerDatabase:
                     line_key TEXT PRIMARY KEY
                 );
 
+                -- A teammate's own analyzer (server/players.py, server/services/solo.py): their key, the
+                -- replays they upload themselves (kept apart from the team's matches.db), the setups they
+                -- play on and the settings snapshots their sensitivity tool sends.
+                CREATE TABLE IF NOT EXISTS player_keys (
+                    key_id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    token_hash TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    revoked_at REAL,
+                    last_seen REAL
+                );
+                CREATE TABLE IF NOT EXISTS solo_matches (
+                    owner TEXT NOT NULL,
+                    match_key TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    setup TEXT,
+                    played_at TEXT,
+                    map TEXT,
+                    rounds INTEGER,
+                    won INTEGER,
+                    report_json TEXT,
+                    upload_bytes INTEGER NOT NULL DEFAULT 0,
+                    tz_offset_min INTEGER,
+                    uploaded_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (owner, match_key)
+                );
+                CREATE TABLE IF NOT EXISTS solo_setups (
+                    owner TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    mouse_dpi REAL,
+                    note TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (owner, name)
+                );
+                CREATE TABLE IF NOT EXISTS sens_snapshots (
+                    snap_id TEXT PRIMARY KEY,
+                    owner TEXT NOT NULL,
+                    setup TEXT NOT NULL,
+                    game TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    mouse_dpi REAL,
+                    settings_json TEXT NOT NULL,
+                    derived_json TEXT NOT NULL DEFAULT '{}',
+                    tool TEXT NOT NULL DEFAULT '',
+                    digest TEXT NOT NULL,
+                    received_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sens_owner_time ON sens_snapshots(owner, captured_at);
+
                 CREATE TABLE IF NOT EXISTS server_transcripts (
                     session_id TEXT PRIMARY KEY,
                     raw_text TEXT NOT NULL DEFAULT '',

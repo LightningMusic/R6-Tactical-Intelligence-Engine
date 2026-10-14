@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>My Siege Analyzer</title>
+<style>
+:root {
+  --bg: #f3f4f6; --panel: #ffffff; --ink: #18202c; --muted: #5d6676; --line: #d8dce3; --soft: #eceff3;
+  --accent: #2f5bd3; --win: #1c7a48; --loss: #b3261e; --warn: #9a5b00;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #11151b; --panel: #19202a; --ink: #e5e9ef; --muted: #98a2b3; --line: #2b3441; --soft: #212a36;
+  --accent: #7ea2ff; --win: #4cc38a; --loss: #f2766b; --warn: #e8b04b; color-scheme: dark } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); }
+main { max-width: 980px; margin: 0 auto; padding: 20px 16px 60px; display: grid; gap: 16px; }
+h1 { font-size: 1.5rem; margin: 0; } h2 { font-size: 1.15rem; margin: 0 0 8px; } h3 { font-size: 1rem; margin: 14px 0 6px; }
+p { margin: 0 0 8px; max-width: 70ch; }
+.muted { color: var(--muted); } .small { font-size: .85rem; }
+.W { color: var(--win); } .L { color: var(--loss); } .warn { color: var(--warn); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+nav { display: flex; gap: 6px; flex-wrap: wrap; }
+nav button { background: var(--soft); color: var(--ink); border: 1px solid var(--line); }
+nav button[aria-selected="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+button { font: inherit; border: 0; border-radius: 8px; padding: 7px 12px; background: var(--accent); color: #fff; cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input, select { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .85rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; background: var(--soft); }
+tr.click { cursor: pointer; } tr.click:hover td { background: var(--soft); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.tile { background: var(--soft); border-radius: 8px; padding: 10px 12px; }
+.tile b { display: block; font-size: 1.35rem; font-variant-numeric: tabular-nums; }
+.tile span { color: var(--muted); font-size: .8rem; }
+.chip { display: inline-block; padding: 0 6px; border-radius: 999px; font-size: .75rem; background: var(--soft); border: 1px solid var(--line); }
+.chip.bad { color: var(--loss); border-color: var(--loss); } .chip.good { color: var(--win); border-color: var(--win); }
+.pairs { display: flex; align-items: flex-end; gap: 8px; height: 90px; padding-bottom: 2px; border-bottom: 1px solid var(--line); }
+.pair { flex: 1; max-width: 44px; height: 100%; display: flex; align-items: flex-end; gap: 2px; }
+.pair div { flex: 1; border-radius: 3px 3px 0 0; }
+.k { background: var(--accent); } .d { background: var(--loss); }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-left: 6px; }
+[hidden] { display: none !important; }
+code { font-family: var(--mono); font-size: .85em; background: var(--soft); padding: 0 4px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <header class="row" style="justify-content: space-between;">
+    <div><h1>My Siege Analyzer</h1><div class="muted small" id="who">Not signed in</div></div>
+    <div class="row" id="playerPick" hidden><label class="small" for="playerSel">Player</label><select id="playerSel"></select></div>
+  </header>
+
+  <section class="card" id="signin" hidden>
+    <h2>Sign in</h2>
+    <p>Open the link Elijah sent you, or paste the key from it here. It's kept in this browser only.</p>
+    <div class="row"><input id="keyInput" type="password" placeholder="ply_…" style="flex:1; min-width: 220px;" autocomplete="off">
+      <button id="keyBtn">Sign in</button></div>
+    <p class="small L" id="keyErr" hidden></p>
+  </section>
+
+  <nav id="tabs" hidden>
+    <button data-tab="upload" aria-selected="true">Upload</button>
+    <button data-tab="matches">Matches</button>
+    <button data-tab="trends">Trends</button>
+    <button data-tab="setups">Setups</button>
+    <button class="ghost" id="signout" style="margin-left:auto">Sign out</button>
+  </nav>
+
+  <section class="card" data-panel="upload" hidden>
+    <h2>Upload your replays</h2>
+    <p>In Steam: Library → Rainbow Six Siege → gear icon → Manage → Browse local files. Then click below and choose the <b>MatchReplay</b> folder in there. Only matches that aren't here yet are sent, and only the .rec replay files.</p>
+    <div class="row">
+      <label class="small" for="upSetup">Played on</label><select id="upSetup"></select>
+      <input type="file" id="folderPick" webkitdirectory directory multiple hidden>
+      <button id="pickBtn">Choose MatchReplay folder</button>
+    </div>
+    <div id="upStatus" class="small" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card" data-panel="matches" hidden>
+    <h2>Matches</h2>
+    <div id="matchList" class="wrap muted small">Loading…</div>
+  </section>
+
+  <section class="card" data-panel="match" hidden>
+    <div class="row" style="justify-content: space-between;"><h2 id="mTitle">Match</h2><button class="ghost" id="backBtn">Back to matches</button></div>
+    <div id="mBody"></div>
+  </section>
+
+  <section class="card" data-panel="trends" hidden>
+    <h2>Trends</h2>
+    <div id="trendBody" class="muted small">Loading…</div>
+  </section>
+
+  <section class="card" data-panel="setups" hidden>
+    <h2>Setups</h2>
+    <p class="small muted">A setup is a PC you play on. Add each one with your mouse DPI (it's set on the mouse, not in the game). Then, on that PC, read Siege's settings file so its sensitivity is saved: <code>Documents\My Games\Rainbow Six - Siege\&lt;long number&gt;\GameSettings.ini</code>. Your own sensitivity tool can send these instead.</p>
+    <div id="setupList" class="wrap small">Loading…</div>
+    <h3>Add or change a setup</h3>
+    <div class="row">
+      <input id="sName" placeholder="Name, e.g. home" maxlength="32">
+      <input id="sDpi" placeholder="Mouse DPI" inputmode="numeric" style="width:110px">
+      <input id="sNote" placeholder="Note (optional)" maxlength="200" style="flex:1; min-width:160px">
+      <button id="sSave">Save setup</button>
+    </div>
+    <h3>Read GameSettings.ini on this PC</h3>
+    <div class="row">
+      <select id="iniSetup"></select>
+      <input type="file" id="iniFile" accept=".ini" hidden>
+      <button id="iniBtn">Choose GameSettings.ini</button>
+    </div>
+    <div id="iniStatus" class="small" style="margin-top:8px"></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const LS_KEY = "r6_solo_key", LS_SETUP = "r6_solo_setup";
+  const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+                  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+                  del(k) { try { localStorage.removeItem(k); } catch (e) {} } };
+  let key = null, me = null, setups = [];
+
+  // The key arrives in the URL fragment (never sent to the server); keep it and clear it from the address bar.
+  const frag = decodeURIComponent((location.hash || "").slice(1));
+  if (frag) { store.set(LS_KEY, frag); history.replaceState(null, "", location.pathname); }
+  key = store.get(LS_KEY) || store.get("r6_dashboard_api_token");   // the host can open it with the dashboard's key
+
+  function q() { return me && me.kind === "main" && $("playerSel").value ? `?player=${encodeURIComponent($("playerSel").value)}` : ""; }
+  function withQ(path) { const s = q(); return s ? path + (path.includes("?") ? "&" + s.slice(1) : s) : path; }
+  async function api(path, opts = {}) {
+    const headers = { Authorization: `Bearer ${key}` };
+    let body = opts.body;
+    if (body && !(body instanceof FormData)) { headers["Content-Type"] = "application/json"; body = JSON.stringify(body); }
+    const res = await fetch(withQ(path), { method: opts.method || "GET", headers, body, cache: "no-store", referrerPolicy: "no-referrer" });
+    let data = null; try { data = await res.json(); } catch (e) {}
+    if (!res.ok) { const err = new Error((data && data.detail) || `HTTP ${res.status}`); err.status = res.status; throw err; }
+    return data;
+  }
+
+  const fmtDate = (iso) => { if (!iso) return "–"; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
+  const pct = (a, b) => b ? Math.round(100 * a / b) + "%" : "–";
+  const kd = (k, d) => d ? (k / d).toFixed(2) : (k ? "∞" : "–");
+
+  // ── tabs ──
+  function show(tab) {
+    document.querySelectorAll("[data-panel]").forEach(p => p.hidden = p.dataset.panel !== tab);
+    document.querySelectorAll("#tabs [data-tab]").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab || (tab === "match" && b.dataset.tab === "matches"))));
+    if (tab === "matches") loadMatches();
+    if (tab === "trends") loadTrends();
+    if (tab === "setups") loadSetups();
+  }
+  document.querySelectorAll("#tabs [data-tab]").forEach(b => b.addEventListener("click", () => show(b.dataset.tab)));
+  $("backBtn").addEventListener("click", () => show("matches"));
+  $("signout").addEventListener("click", () => { store.del(LS_KEY); location.reload(); });
+
+  // ── sign in ──
+  async function signIn() {
+    if (!key) { $("signin").hidden = false; return; }
+    try { me = await api("/api/v1/solo/me"); }
+    catch (e) { $("signin").hidden = false; $("keyErr").hidden = false; $("keyErr").textContent = e.status === 401 ? "That key doesn't work (wrong, revoked or expired). Ask Elijah for a new link." : e.message; return; }
+    $("signin").hidden = true; $("tabs").hidden = false;
+    if (me.kind === "main") {
+      $("playerPick").hidden = false;
+      $("playerSel").innerHTML = (me.players || []).map(p => `<option>${esc(p)}</option>`).join("") || "<option value=''>(no player keys yet)</option>";
+      $("who").textContent = "Host key: viewing a player's analyzer";
+      $("playerSel").addEventListener("change", () => { loadSetups(); show("matches"); });
+    } else {
+      $("who").textContent = `Signed in as ${me.player}`;
+    }
+    await loadSetups(true);
+    show("upload");
+  }
+  $("keyBtn").addEventListener("click", () => { key = $("keyInput").value.trim(); store.set(LS_KEY, key); $("keyErr").hidden = true; signIn(); });
+
+  // ── upload ──
+  $("pickBtn").addEventListener("click", () => $("folderPick").click());
+  $("folderPick").addEventListener("change", async (ev) => {
+    const groups = new Map();
+    for (const f of ev.target.files) {
+      const parts = (f.webkitRelativePath || f.name).split("/");
+      if (!/\.rec$/i.test(f.name) || parts.length < 2) continue;
+      const folder = parts[parts.length - 2];
+      if (!groups.has(folder)) groups.set(folder, []);
+      groups.get(folder).push(f);
+    }
+    ev.target.value = "";
+    const out = $("upStatus");
+    if (!groups.size) { out.innerHTML = `<span class="warn">No replay folders found there. Choose the MatchReplay folder itself.</span>`; return; }
+    let known = {};
+    try { known = (await api("/api/v1/solo/known", { method: "POST", body: { folders: [...groups.keys()] } })).known || {}; }
+    catch (e) { out.innerHTML = `<span class="L">Couldn't reach the server: ${esc(e.message)}</span>`; return; }
+    const todo = [...groups.keys()].filter(f => !known[f] || known[f] === "failed").sort();
+    const skipped = groups.size - todo.length;
+    if (!todo.length) { out.textContent = `All ${groups.size} matches are already uploaded.`; return; }
+    const setup = $("upSetup").value || null;
+    if (setup) store.set(LS_SETUP, setup);
+    const lines = todo.map(f => `<div id="up-${esc(f)}">${esc(f)}: waiting</div>`);
+    out.innerHTML = `<p>${todo.length} new match${todo.length > 1 ? "es" : ""} to send${skipped ? `, ${skipped} already here` : ""}.</p>` + lines.join("");
+    for (const folder of todo) {
+      const el = document.getElementById(`up-${folder}`);
+      const files = groups.get(folder);
+      const mb = files.reduce((a, f) => a + f.size, 0) / 1e6;
+      el.textContent = `${folder}: sending ${files.length} files (${mb.toFixed(0)} MB)…`;
+      const fd = new FormData();
+      fd.append("folder", folder);
+      if (setup) fd.append("setup", setup);
+      fd.append("tz_offset_min", String(new Date().getTimezoneOffset()));   // the replay clock is this PC's local time
+      files.forEach(f => fd.append("files", f, f.name));
+      try { const r = await api("/api/v1/solo/upload", { method: "POST", body: fd }); el.innerHTML = `${esc(folder)}: <span class="W">${r.status === "known" ? "already here" : "sent, being read"}</span>`; }
+      catch (e) { el.innerHTML = `${esc(folder)}: <span class="L">${esc(e.message)}</span>`; if (e.status === 429) await new Promise(r => setTimeout(r, 30000)); }
+    }
+    out.insertAdjacentHTML("beforeend", `<p style="margin-top:8px">Done. Reading takes a few seconds per match; see <a href="#" id="toMatches">Matches</a>.</p>`);
+    $("toMatches").addEventListener("click", (e) => { e.preventDefault(); show("matches"); });
+  });
+
+  // ── matches ──
+  let pollTimer = null;
+  async function loadMatches() {
+    clearTimeout(pollTimer);
+    let list;
+    try { list = (await api("/api/v1/solo/matches")).matches || []; }
+    catch (e) { $("matchList").textContent = "Couldn't load: " + e.message; return; }
+    if (!list.length) { $("matchList").innerHTML = "No matches yet. Upload your MatchReplay folder first."; return; }
+    $("matchList").classList.remove("muted");
+    $("matchList").innerHTML = `<table><tr><th>Played</th><th>Map</th><th>Score</th><th>K–D</th><th>HS</th><th>Opening K–D</th><th>Setup</th><th></th></tr>${
+      list.map(m => {
+        const t = m.totals || {};
+        const st = m.status === "done" ? "" : m.status === "failed" ? `<span class="chip bad" title="${esc(m.error)}">couldn't read</span>` : `<span class="chip">${m.status === "queued" ? "waiting" : "reading"}</span>`;
+        const sc = m.score && m.score[0] != null ? `<span class="${m.score[0] > m.score[1] ? "W" : "L"}">${m.score[0]}–${m.score[1]}</span>` : "";
+        return `<tr class="${m.status === "done" ? "click" : ""}" data-f="${esc(m.folder)}"><td>${fmtDate(m.played_at || m.uploaded_at)}</td><td>${esc(m.map || m.folder)}</td><td>${sc}</td>
+          <td>${m.status === "done" ? `${t.kills}–${t.deaths}` : ""}</td><td>${m.status === "done" ? `${t.headshots}/${t.kills}` : ""}</td>
+          <td>${m.status === "done" ? `${t.opening_kills}–${t.opening_deaths}` : ""}</td><td>${esc(m.setup || "")}</td><td>${st}</td></tr>`;
+      }).join("")}</table>`;
+    $("matchList").querySelectorAll("tr.click").forEach(tr => tr.addEventListener("click", () => openMatch(tr.dataset.f)));
+    if (list.some(m => m.status === "queued" || m.status === "processing")) pollTimer = setTimeout(() => { if (!document.querySelector('[data-panel="matches"]').hidden) loadMatches(); }, 5000);
+  }
+
+  async function openMatch(folder) {
+    show("match");
+    $("mBody").textContent = "Loading…";
+    let m; try { m = await api(`/api/v1/solo/matches/${encodeURIComponent(folder)}`); } catch (e) { $("mBody").textContent = e.message; return; }
+    const r = m.report, t = r.totals;
+    $("mTitle").textContent = `${r.map} · ${fmtDate(r.played_at)}`;
+    const opts = [`<option value="">${m.setup && !m.setup_set_by_hand ? `from your tool: ${esc(m.setup)}` : "not set"}</option>`, ...setups.map(s => `<option ${m.setup_set_by_hand && m.setup === s.name ? "selected" : ""}>${esc(s.name)}</option>`)];
+    $("mBody").innerHTML = `
+      <div class="tiles">
+        <div class="tile"><b class="${r.score[0] > r.score[1] ? "W" : "L"}">${r.score[0] ?? "?"}–${r.score[1] ?? "?"}</b><span>result</span></div>
+        <div class="tile"><b>${t.kills}–${t.deaths}</b><span>kills – deaths</span></div>
+        <div class="tile"><b>${t.headshots}/${t.kills}</b><span>headshot kills</span></div>
+        <div class="tile"><b>${t.opening_kills}–${t.opening_deaths}</b><span>opening kills – deaths</span></div>
+        <div class="tile"><b>${t.typical_death_into_action ?? "–"}${t.typical_death_into_action != null ? " s" : ""}</b><span>typical death, into the round</span></div>
+        <div class="tile"><b>${t.deaths_isolated}/${t.deaths_checked}</b><span>deaths nobody could trade</span></div>
+      </div>
+      <div class="row" style="margin:10px 0"><label class="small" for="mSetup">Played on</label><select id="mSetup">${opts.join("")}</select>
+        <button class="ghost" id="mDel">Delete this match</button></div>
+      <div class="wrap"><table><tr><th>Rnd</th><th>Side</th><th>Operator</th><th>Kills</th><th>Died to</th><th>When</th><th>Nearest teammate</th><th>Drones / walls</th></tr>${
+        r.rounds.map(x => {
+          const d = x.death;
+          const flags = d ? [d.opening ? `<span class="chip bad">opening death</span>` : "", d.spawn_peek ? `<span class="chip bad">spawn peek</span>` : "", d.traded ? `<span class="chip good">traded</span>` : ""].join(" ") : `<span class="chip good">survived</span>`;
+          const kills = x.kills.map(k => `${esc(k.victim)} ${esc(k.clock)}${k.headshot ? " (HS)" : ""}${k.opening ? " · opening" : ""}`).join("<br>") || "–";
+          const util = x.side === "attack" ? (x.drones == null ? "–" : `${x.drones} drone${x.drones === 1 ? "" : "s"}`) : (x.reinforced == null ? "–" : `${x.reinforced} wall${x.reinforced === 1 ? "" : "s"}`);
+          const near = x.nearest_mate_m == null ? "–" : typeof x.nearest_mate_m === "number" ? `${Math.round(x.nearest_mate_m)} m` : x.nearest_mate_m;
+          return `<tr><td class="${x.won ? "W" : "L"}">R${String(x.n).padStart(2, "0")}</td><td>${x.side === "attack" ? "Att" : "Def"}</td><td>${esc(x.operator || "?")}</td><td>${kills}</td>
+            <td>${d ? esc(d.killer || "?") : "–"} ${flags}</td><td>${d && d.clock ? `${esc(d.clock)}${d.into_action != null ? ` (${Math.round(d.into_action)} s in)` : ""}` : "–"}</td><td>${near}</td><td>${util}</td></tr>`;
+        }).join("")}</table></div>
+      ${r.killed_by && r.killed_by.length ? `<p class="small muted" style="margin-top:8px">Killed you: ${r.killed_by.map(([n, c]) => `${esc(n)} ×${c}`).join(", ")}</p>` : ""}`;
+    $("mSetup").addEventListener("change", async () => { try { await api(`/api/v1/solo/matches/${encodeURIComponent(folder)}/setup`, { method: "PUT", body: { setup: $("mSetup").value || null } }); } catch (e) { alertInline(e.message); } });
+    let armed = false;
+    $("mDel").addEventListener("click", async () => {
+      if (!armed) { armed = true; $("mDel").textContent = "Click again to delete"; return; }
+      try { await api(`/api/v1/solo/matches/${encodeURIComponent(folder)}`, { method: "DELETE" }); show("matches"); } catch (e) { alertInline(e.message); }
+    });
+  }
+  function alertInline(msg) { $("mBody").insertAdjacentHTML("afterbegin", `<p class="L small">${esc(msg)}</p>`); }
+
+  // ── trends ──
+  function group(title, obj) {
+    const rows = Object.entries(obj || {}).sort((a, b) => b[1].rounds - a[1].rounds);
+    if (!rows.length) return "";
+    return `<h3>${title}</h3><div class="wrap"><table><tr><th></th><th>Rounds</th><th>Won</th><th>K–D</th><th>K/D</th><th>HS</th><th>Opening K–D</th><th>Typical death</th><th>Untradeable deaths</th><th>Drones / attack rd</th></tr>${
+      rows.map(([n, s]) => `<tr><td>${esc(n)}</td><td>${s.rounds}</td><td>${pct(s.won, s.rounds)}</td><td>${s.kills}–${s.deaths}</td><td>${kd(s.kills, s.deaths)}</td><td>${pct(s.headshots, s.kills)}</td>
+        <td>${s.opening_kills}–${s.opening_deaths}</td><td>${s.typical_death_into_action != null ? s.typical_death_into_action + " s" : "–"}</td><td>${pct(s.deaths_isolated, s.deaths_checked)}</td>
+        <td>${s.attack_rounds_measured ? (s.drones / s.attack_rounds_measured).toFixed(2) : "–"}</td></tr>`).join("")}</table></div>`;
+  }
+  async function loadTrends() {
+    let t; try { t = await api("/api/v1/solo/trends"); } catch (e) { $("trendBody").textContent = e.message; return; }
+    const o = t.overall;
+    if (!o) { $("trendBody").textContent = "No matches read yet."; return; }
+    $("trendBody").classList.remove("muted");
+    const maxK = Math.max(1, ...t.series.map(s => Math.max(s.kills || 0, s.deaths || 0)));
+    $("trendBody").innerHTML = `
+      <div class="tiles">
+        <div class="tile"><b>${kd(o.kills, o.deaths)}</b><span>K/D over ${t.series.length} matches</span></div>
+        <div class="tile"><b>${pct(o.headshots, o.kills)}</b><span>headshot kills</span></div>
+        <div class="tile"><b>${o.opening_kills}–${o.opening_deaths}</b><span>opening kills – deaths</span></div>
+        <div class="tile"><b>${o.typical_death_into_action ?? "–"}${o.typical_death_into_action != null ? " s" : ""}</b><span>typical death, into the round</span></div>
+        <div class="tile"><b>${pct(o.deaths_isolated, o.deaths_checked)}</b><span>deaths nobody could trade</span></div>
+        <div class="tile"><b>${o.spawn_peeked}</b><span>spawn-peek deaths</span></div>
+      </div>
+      <h3>Kills and deaths per match <span class="muted small">(oldest to newest)</span></h3>
+      <div class="pairs" role="img" aria-label="Kills and deaths per match">${t.series.map(s => `<div class="pair" title="${esc(s.map)} ${fmtDate(s.played_at)}: ${s.kills} kills, ${s.deaths} deaths">
+        <div class="k" style="height:${Math.max(2, 100 * (s.kills || 0) / maxK)}%"></div><div class="d" style="height:${Math.max(2, 100 * (s.deaths || 0) / maxK)}%"></div></div>`).join("")}</div>
+      <div class="small muted"><span class="sw k"></span> kills <span class="sw d"></span> deaths · tallest bar = ${maxK}</div>
+      ${group("By setup", t.by.setup)}${group("By map", t.by.map)}${group("By side", t.by.side)}${group("By operator", t.by.operator)}
+      ${t.killed_by.length ? `<h3>Who kills you most</h3><p class="small">${t.killed_by.map(([n, c]) => `${esc(n)} ×${c}`).join(", ")}</p>` : ""}`;
+  }
+
+  // ── setups ──
+  async function loadSetups(quiet) {
+    try { setups = (await api("/api/v1/solo/setups")).setups || []; } catch (e) { if (!quiet) $("setupList").textContent = e.message; return; }
+    const opts = `<option value="">not set</option>` + setups.map(s => `<option>${esc(s.name)}</option>`).join("");
+    $("upSetup").innerHTML = opts; $("iniSetup").innerHTML = setups.map(s => `<option>${esc(s.name)}</option>`).join("") || `<option value="">add a setup first</option>`;
+    const last = store.get(LS_SETUP); if (last && setups.some(s => s.name === last)) $("upSetup").value = last;
+    if (!setups.length) { $("setupList").innerHTML = `<span class="muted">No setups yet.</span>`; return; }
+    $("setupList").innerHTML = `<table><tr><th>Setup</th><th>Mouse DPI</th><th>Siege sensitivity</th><th>Relative speed</th><th>Last read</th><th></th></tr>${
+      setups.map(s => {
+        const snap = (s.latest || {}).r6siege, st = snap ? snap.settings : {};
+        const sens = snap ? ["MouseYawSensitivity", "MousePitchSensitivity", "AimDownSightsMouse", "MouseSensitivityMultiplierUnit", "XFactorAiming", "DefaultFOV"]
+          .filter(k => k in st).map(k => `${k.replace("Mouse", "").replace("Sensitivity", " sens")}: ${esc(st[k])}`).join("<br>") : "–";
+        return `<tr><td>${esc(s.name)}${s.note ? `<div class="muted">${esc(s.note)}</div>` : ""}</td><td>${s.mouse_dpi ?? (snap && snap.mouse_dpi) ?? "–"}</td><td>${sens}</td>
+          <td>${s.relative_speed ? `${s.relative_speed}×` : "–"}</td><td>${snap ? fmtDate(snap.captured_at) : "never"}</td><td><a href="#" data-del="${esc(s.name)}">remove</a></td></tr>`;
+      }).join("")}</table><p class="muted small" style="margin-top:6px">Relative speed: how far your view turns for the same mouse movement, against your slowest setup (DPI × hip-fire sensitivity). The same number on two setups means they feel the same.</p>`;
+    $("setupList").querySelectorAll("[data-del]").forEach(a => a.addEventListener("click", async (e) => {
+      e.preventDefault(); try { await api(`/api/v1/solo/setups/${encodeURIComponent(a.dataset.del)}`, { method: "DELETE" }); loadSetups(); } catch (err) { $("iniStatus").textContent = err.message; }
+    }));
+  }
+  $("sSave").addEventListener("click", async () => {
+    try { await api("/api/v1/solo/setups", { method: "PUT", body: { name: $("sName").value.trim(), mouse_dpi: $("sDpi").value.trim() || null, note: $("sNote").value.trim() } });
+      $("sName").value = $("sDpi").value = $("sNote").value = ""; loadSetups(); $("iniStatus").innerHTML = `<span class="W">Saved.</span>`; }
+    catch (e) { $("iniStatus").innerHTML = `<span class="L">${esc(e.message)}</span>`; }
+  });
+  $("iniBtn").addEventListener("click", () => $("iniFile").click());
+  $("iniFile").addEventListener("change", async (ev) => {
+    const f = ev.target.files[0]; ev.target.value = "";
+    const setupName = $("iniSetup").value;
+    if (!f || !setupName) { $("iniStatus").innerHTML = `<span class="warn">Add a setup first, then pick it here.</span>`; return; }
+    const text = await f.text();
+    // Only the mouse/aim lines and field of view; never paths or anything else in the file.
+    const settings = {}; let section = "";
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim(); const sec = line.match(/^\[(.+)\]$/);
+      if (sec) { section = sec[1].toUpperCase(); continue; }
+      const kv = line.match(/^([A-Za-z0-9_.\-]+)\s*=\s*([^;#]*)/); if (!kv) continue;
+      const k = kv[1], v = kv[2].trim();
+      if (!/^-?[0-9.]+$/.test(v) || v.length > 30) continue;
+      if (section === "INPUT" || (section === "DISPLAY" && /fov/i.test(k))) settings[k] = v;
+    }
+    if (!Object.keys(settings).length) { $("iniStatus").innerHTML = `<span class="warn">No mouse settings found in that file. Is it GameSettings.ini?</span>`; return; }
+    const s = setups.find(x => x.name === setupName) || {};
+    try { const r = await api("/api/v1/plugin/sensitivity/snapshots", { method: "POST", body: { setup: setupName, game: "r6siege", captured_at: new Date().toISOString(), mouse_dpi: s.mouse_dpi ?? null, settings, tool: "solo page" } });
+      $("iniStatus").innerHTML = `<span class="W">${r.stored ? "Saved" : "Same as last time, noted"} for ${esc(setupName)} (${Object.keys(settings).length} settings).</span>`; loadSetups(); }
+    catch (e) { $("iniStatus").innerHTML = `<span class="L">${esc(e.message)}</span>`; }
+  });
+
+  signIn();
+})();
+</script>
+</body>
+</html>
