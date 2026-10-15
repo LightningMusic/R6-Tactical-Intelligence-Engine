@@ -107,6 +107,25 @@ def _save_restore(target: Optional[dict], path=None) -> None:
         print(f"[OBS] Could not save which OBS setup to switch back to: {e}")
 
 
+def _local_websocket_profile(config_path=None) -> Optional[dict]:
+    """This PC's OBS WebSocket server settings (OBS 28+ keeps them in the user's settings folder) as a
+    connection profile, or None when there are none or the server is switched off."""
+    import json
+    import os
+    import socket
+    path = config_path or os.path.join(os.environ.get("APPDATA", ""), "obs-studio", "plugin_config",
+                                       "obs-websocket", "config.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except Exception:
+        return None
+    if not cfg.get("server_enabled"):
+        return None
+    return {"name": f"This PC ({socket.gethostname()})", "host": "localhost", "port": int(cfg.get("server_port") or 4455),
+            "password": cfg.get("server_password", "") if cfg.get("auth_required", True) else ""}
+
+
 def _obs_is_running() -> bool:
     for proc in psutil.process_iter(["name", "exe"]):
         try:
@@ -244,6 +263,15 @@ class OBSController:
             seen_creds.add(creds)
             candidates.append((i, p))
 
+        # This PC's own OBS: its WebSocket password sits in the user's OBS settings, so a PC the stick has
+        # never seen (the host's home PC) connects with no typing; it's saved as a profile once it works.
+        local = _local_websocket_profile()
+        if local is not None:
+            creds = (local["host"], local["port"], local["password"])
+            if creds not in seen_creds:
+                seen_creds.add(creds)
+                candidates.append((len(profiles), local))
+
         print(f"[OBS] Will try {len(candidates)} saved profile(s): "
               f"{', '.join(p.get('name', f'Profile {i+1}') for i, p in candidates)}")
 
@@ -275,6 +303,9 @@ class OBSController:
                     print(f"[OBS] Connected using profile '{name}'. "
                           f"Recording dir → {RECORDINGS_DIR}")
 
+                    if idx == len(profiles):            # this PC's own OBS settings: remember them
+                        profiles = profiles + [dict(profile)]
+                        print(f"[OBS] Connected with this PC's own OBS settings; saved as '{name}'.")
                     if idx != active_idx:
                         print(f"[OBS] '{name}' worked — making it the active "
                               f"profile so this PC connects on the first try "

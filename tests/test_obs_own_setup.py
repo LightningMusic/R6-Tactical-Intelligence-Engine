@@ -105,3 +105,15 @@ def test_after_a_crash_the_next_run_still_knows_what_to_switch_back_to(ctl):
     assert fresh.use_own_setup() is True
     assert fresh.restore_user_setup() is True
     assert (obs.profile, obs.collection) == ("Untitled", "Untitled")
+
+
+def test_this_pcs_own_obs_password_is_read_from_its_settings(tmp_path):
+    import json
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"server_enabled": True, "server_port": 4460, "auth_required": True,
+                               "server_password": "abc"}))
+    p = oc._local_websocket_profile(cfg)
+    assert (p["host"], p["port"], p["password"]) == ("localhost", 4460, "abc") and p["name"].startswith("This PC")
+    cfg.write_text(json.dumps({"server_enabled": False, "server_password": "abc"}))
+    assert oc._local_websocket_profile(cfg) is None                 # WebSocket server switched off
+    assert oc._local_websocket_profile(tmp_path / "missing.json") is None
