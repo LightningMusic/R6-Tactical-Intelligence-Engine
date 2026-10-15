@@ -140,7 +140,7 @@ def main() -> int:
             browser.close()
     finally:
         control(was)                                                   # leave the host signal as it was
-        requests.delete(base + f"/api/v1/invites/{inv['invite_id']}", headers=H, timeout=15)
+        requests.delete(base + f"/api/v1/invites/{inv['invite_id']}?purge=true", headers=H, timeout=15)
     r = requests.get(base + "/api/v1/join/whoami", headers={"Authorization": f"Bearer {inv['token']}"}, timeout=15)
     check(r.status_code == 401, "the throwaway invite is revoked")
     print("\nALL CHECKS PASSED" if not FAILS else f"\nFAILED: {FAILS}")

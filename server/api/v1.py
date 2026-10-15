@@ -541,10 +541,21 @@ def regenerate_invite(invite_id: str, _client: str = Depends(verify_api_token)) 
 
 
 @router.delete("/invites/{invite_id}")
-def revoke_invite(invite_id: str, _client: str = Depends(verify_api_token)) -> dict:
+def revoke_invite(invite_id: str, purge: bool = False, _client: str = Depends(verify_api_token)) -> dict:
+    """Revokes a link; ?purge=true removes it from the list for good (test links, links no longer wanted)."""
+    if purge:
+        if not invites.purge(invite_id):
+            raise HTTPException(status_code=404, detail="No such invite.")
+        return {"status": "removed", "invite_id": invite_id}
     if not invites.revoke(invite_id):
         raise HTTPException(status_code=404, detail="No such active invite.")
     return {"status": "revoked", "invite_id": invite_id}
+
+
+@router.post("/invites/cleanup")
+def cleanup_invites(_client: str = Depends(verify_api_token)) -> dict:
+    """Removes every revoked or expired link from the list (2026-10-15: test links had piled up to 6)."""
+    return {"removed": invites.purge_dead()}
 
 
 @router.get("/voice/recordings")
@@ -654,9 +665,22 @@ def companion_status(_client: str = Depends(verify_api_token)) -> dict:
     import json as _json
     now = time.time()
     with repo.db.get_connection() as conn:
-        rows = conn.execute("SELECT * FROM companions WHERE last_seen > ? ORDER BY username",
+        rows = conn.execute("SELECT * FROM companions WHERE last_seen > ? ORDER BY last_seen DESC",
                             (now - 24 * 3600,)).fetchall()
         control = _companion_control(conn)
+    # One row per person (their newest device), and no browser rows whose link was revoked or removed: a
+    # teammate who opened their link in two browsers showed up twice, and test links lingered (2026-10-15).
+    live = invites.live_ids()
+    seen, kept = set(), []
+    for r in rows:
+        dev = str(r["device_id"])
+        if dev.startswith("web-") and dev.split("-")[1] not in live:
+            continue
+        if str(r["username"]).lower() in seen:
+            continue
+        seen.add(str(r["username"]).lower())
+        kept.append(r)
+    rows = sorted(kept, key=lambda r: str(r["username"]).lower())
     # What each person's newest recording on the server sounded like: a companion reports nothing about its
     # microphone while it records, so this is how the host finds out a mic picked up nothing.
     from server.services.comms_service import CommsService

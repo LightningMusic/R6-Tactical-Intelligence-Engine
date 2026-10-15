@@ -85,7 +85,7 @@ def main():
     check(r.status_code == 200 and "Smoke_Test" in r.text, "recording is listed")
 
     print("[4] revoke")
-    requests.delete(base + f"/api/v1/invites/{inv['invite_id']}", headers=H, timeout=10)
+    requests.delete(base + f"/api/v1/invites/{inv['invite_id']}?purge=true", headers=H, timeout=10)
     check(requests.get(base + "/api/v1/join/whoami", headers=IH, timeout=10).status_code == 401,
           "revoked invite is refused")
 

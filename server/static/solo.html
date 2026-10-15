@@ -72,6 +72,7 @@ code { font-family: var(--mono); font-size: .85em; background: var(--soft); padd
     <button data-tab="upload" aria-selected="true">Upload</button>
     <button data-tab="matches">Matches</button>
     <button data-tab="trends">Trends</button>
+    <button data-tab="compare">Team vs solo</button>
     <button data-tab="setups">Setups</button>
     <button class="ghost" id="signout" style="margin-left:auto">Sign out</button>
   </nav>
@@ -100,6 +101,12 @@ code { font-family: var(--mono); font-size: .85em; background: var(--soft); padd
   <section class="card" data-panel="trends" hidden>
     <h2>Trends</h2>
     <div id="trendBody" class="muted small">Loading…</div>
+  </section>
+
+  <section class="card" data-panel="compare" hidden>
+    <h2>With the team and without</h2>
+    <p class="small muted">Every round you've played, grouped by how many of the team were in the match with you: the team's own recorded matches plus the replays you uploaded here (a team match you also uploaded counts once). Different nights mean different opponents, so treat small groups with care.</p>
+    <div id="cmpBody" class="muted small">Loading…</div>
   </section>
 
   <section class="card" data-panel="setups" hidden>
@@ -161,6 +168,7 @@ code { font-family: var(--mono); font-size: .85em; background: var(--soft); padd
     if (tab === "matches") loadMatches();
     if (tab === "trends") loadTrends();
     if (tab === "setups") loadSetups();
+    if (tab === "compare") loadCompare();
   }
   document.querySelectorAll("#tabs [data-tab]").forEach(b => b.addEventListener("click", () => show(b.dataset.tab)));
   $("backBtn").addEventListener("click", () => show("matches"));
@@ -316,6 +324,33 @@ code { font-family: var(--mono); font-size: .85em; background: var(--soft); padd
       <div class="small muted"><span class="sw k"></span> kills <span class="sw d"></span> deaths · tallest bar = ${maxK}</div>
       ${group("By setup", t.by.setup)}${group("By map", t.by.map)}${group("By side", t.by.side)}${group("By operator", t.by.operator)}
       ${t.killed_by.length ? `<h3>Who kills you most</h3><p class="small">${t.killed_by.map(([n, c]) => `${esc(n)} ×${c}`).join(", ")}</p>` : ""}`;
+  }
+
+  // ── team vs solo ──
+  const CMP = [
+    ["Win rate", "pct"], ["K/D", "num"], ["Kills per round", "num"], ["Headshot share", "pct"], ["Rounds survived", "pct"],
+    ["Opening deaths per round", "num"], ["Deaths nobody could trade", "pct"], ["Typical death, seconds in", "sec"], ["Drones per attack round", "num"]];
+  function rates(s) {
+    const r = s.rounds || 0;
+    return { "Win rate": r ? s.won / r : null, "K/D": s.deaths ? s.kills / s.deaths : null, "Kills per round": r ? s.kills / r : null,
+      "Headshot share": s.kills >= 5 ? s.headshots / s.kills : null, "Rounds survived": r ? s.survived / r : null,
+      "Opening deaths per round": r ? s.opening_deaths / r : null,
+      "Deaths nobody could trade": s.deaths_checked >= 5 ? s.deaths_isolated / s.deaths_checked : null,
+      "Typical death, seconds in": s.typical_death_into_action, "Drones per attack round": s.attack_rounds_measured >= 5 ? s.drones / s.attack_rounds_measured : null };
+  }
+  const fmtv = (v, kind) => v == null ? "–" : kind === "pct" ? Math.round(v * 100) + "%" : kind === "sec" ? Math.round(v) + " s" : v.toFixed(2);
+  async function loadCompare() {
+    let c; try { c = await api("/api/v1/solo/compare"); } catch (e) { $("cmpBody").textContent = e.message; return; }
+    if (!c.groups.length) { $("cmpBody").textContent = "No rounds to compare yet."; return; }
+    $("cmpBody").classList.remove("muted");
+    const kinds = Object.fromEntries(CMP);
+    const head = `<tr><th></th>${c.groups.map(g => `<th>${esc(g.name)}<div class="muted" style="font-weight:400">${g.matches} match${g.matches === 1 ? "" : "es"}, ${g.summary.rounds} rds</div></th>`).join("")}</tr>`;
+    const body = CMP.map(([m, kind]) => `<tr><td>${m}</td>${c.groups.map(g => `<td>${fmtv(rates(g.summary)[m], kind)}</td>`).join("")}</tr>`).join("");
+    const diffs = (c.differences || []).filter(d => d.change != null && Math.abs(d.change) >= 0.25).slice(0, 6).map(d =>
+      `<li><b>${esc(d.metric)}</b>: ${fmtv(d.full_team, kinds[d.metric])} with the full team, ${fmtv(d.other, kinds[d.metric])} with ${esc(d.group.toLowerCase())}</li>`).join("");
+    $("cmpBody").innerHTML = `<div class="wrap"><table>${head}${body}</table></div>
+      ${diffs ? `<h3>Biggest differences</h3><ul class="small">${diffs}</ul>` : `<p class="small muted">Not enough full-team rounds yet to compare (15 or more needed).</p>`}
+      ${c.groups.some(g => g.name.startsWith("Own uploads")) ? `<p class="small muted">"Teammates unknown": uploads from before 15 October don't record who you played with. Delete one on the Matches tab and upload the folder again to have it sorted.</p>` : ""}`;
   }
 
   // ── setups ──

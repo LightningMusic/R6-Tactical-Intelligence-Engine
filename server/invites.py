@@ -93,6 +93,36 @@ def revoke(invite_id: str) -> bool:
         return cur.rowcount > 0
 
 
+def purge(invite_id: str) -> bool:
+    """Removes a link for good (revoking it first). For test links and links the host no longer wants listed;
+    the teammate's recordings already on the server are kept."""
+    with server_db.get_connection() as conn:
+        cur = conn.execute("DELETE FROM invites WHERE invite_id = ?", (invite_id,))
+        conn.execute("DELETE FROM companions WHERE device_id LIKE ?", (f"web-{invite_id}-%",))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def purge_dead() -> int:
+    """Removes every revoked or expired link (and the browser rows that used them). Returns how many."""
+    now = time.time()
+    with server_db.get_connection() as conn:
+        dead = [r[0] for r in conn.execute("SELECT invite_id FROM invites WHERE revoked_at IS NOT NULL OR expires_at <= ?",
+                                           (now,))]
+        for invite_id in dead:
+            conn.execute("DELETE FROM invites WHERE invite_id = ?", (invite_id,))
+            conn.execute("DELETE FROM companions WHERE device_id LIKE ?", (f"web-{invite_id}-%",))
+        conn.commit()
+    return len(dead)
+
+
+def live_ids() -> set[str]:
+    now = time.time()
+    with server_db.get_connection() as conn:
+        return {r[0] for r in conn.execute("SELECT invite_id FROM invites WHERE revoked_at IS NULL AND expires_at > ?",
+                                           (now,))}
+
+
 def regenerate(invite_id: str, days: int = DEFAULT_DAYS) -> Optional[dict]:
     """A fresh token for an existing invite; the old link stops working."""
     days = max(1, min(int(days or DEFAULT_DAYS), MAX_DAYS))

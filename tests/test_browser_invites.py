@@ -277,3 +277,37 @@ def test_join_page_is_served_with_locked_down_headers(server):
     csp = r.headers["content-security-policy"]
     assert "default-src 'none'" in csp and "connect-src 'self'" in csp and "frame-ancestors 'none'" in csp
     assert "https://" not in r.text.replace("https://example.test", "")   # no third-party loads at all
+
+
+def test_old_and_test_links_can_be_removed_for_good(server):
+    # 2026-10-15: four revoked test links stayed on the host's list next to the two real ones.
+    client, _ = server
+    real = _invite(client, "lammtozzz")
+    test = _invite(client, "Test_Browser")
+    client.delete(f"/api/v1/invites/{test['invite_id']}", headers=_auth(API))          # revoked: still listed
+    assert len(client.get("/api/v1/invites", headers=_auth(API)).json()["invites"]) == 2
+    assert client.post("/api/v1/invites/cleanup", headers=_auth(API)).json() == {"removed": 1}
+    assert [i["username"] for i in client.get("/api/v1/invites", headers=_auth(API)).json()["invites"]] == ["lammtozzz"]
+    r = client.delete(f"/api/v1/invites/{real['invite_id']}?purge=true", headers=_auth(API))
+    assert r.json()["status"] == "removed"
+    assert client.get("/api/v1/invites", headers=_auth(API)).json()["invites"] == []
+    assert client.post("/api/v1/invites/cleanup", headers=_auth(VOICE)).status_code == 401
+
+
+def test_the_recorder_list_shows_each_person_once_and_only_working_links(server):
+    client, db = server
+    live = _invite(client, "K3nyooo")
+    dead = _invite(client, "Test_Browser")
+    client.delete(f"/api/v1/invites/{dead['invite_id']}", headers=_auth(API))
+    now = time.time()
+    with db.get_connection() as conn:
+        for dev, user, seen in ((f"web-{live['invite_id']}-old", "K3nyooo", now - 3600),
+                                (f"web-{live['invite_id']}-new", "K3nyooo", now - 5),
+                                (f"web-{dead['invite_id']}-x", "Test_Browser", now - 10),
+                                ("companion-device", "Teddy_Dance", now - 20)):
+            conn.execute("INSERT INTO companions (device_id, username, status_json, last_seen) VALUES (?, ?, '{}', ?)",
+                         (dev, user, seen))
+        conn.commit()
+    rows = client.get("/api/v1/companion/status", headers=_auth(API)).json()["companions"]
+    assert [(r["username"], r["device_id"]) for r in rows] == [("K3nyooo", f"web-{live['invite_id']}-new"),
+                                                               ("Teddy_Dance", "companion-device")]

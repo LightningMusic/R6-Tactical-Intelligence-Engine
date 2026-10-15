@@ -230,7 +230,7 @@ def main() -> int:
             check("paused" in page.inner_text("#headline").lower(), "page says the mic is paused")
             page.click("#pauseBtn")
             control(False)
-            httpx.delete(base + f"/api/v1/invites/{invite['invite_id']}", headers=H)
+            httpx.delete(base + f"/api/v1/invites/{invite['invite_id']}?purge=true", headers=H)
             wait_for(lambda: state()["auth"], 10, "page noticed the revoked link")
             check("doesn't work" in page.inner_text("#headline"), "revoked link shows a clear message")
             r = httpx.get(base + "/api/v1/join/whoami", headers={"Authorization": f"Bearer {invite['token']}"})

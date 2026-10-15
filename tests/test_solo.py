@@ -245,3 +245,29 @@ def test_the_replay_clock_is_converted_with_the_uploaders_time_zone():
     assert solo.replay_time_utc("2026-10-13T18:33:32Z", 300) == "2026-10-13T23:33:32+00:00"
     assert solo.replay_time_utc("2026-10-13T18:33:32Z", None) == "2026-10-13T18:33:32"
     assert solo.replay_time_utc(None, 300) is None
+
+
+def test_rounds_are_grouped_by_how_much_of_the_team_was_there(server, monkeypatch):
+    client, _ = server
+    tok = _key(client)["token"]
+    _send(client, tok)
+    import integration.rec_importer as ri
+
+    class FakeImporter:
+        def __init__(self, *a, **k):
+            pass
+
+        def import_match_folder(self, folder):
+            return _result()
+    monkeypatch.setattr(ri, "RecImporter", FakeImporter)
+    job = solo._claim()
+    solo._process(job["owner"], job["match_key"])
+    # Without a roster nobody can say who's "the team".
+    groups = client.get("/api/v1/solo/compare", headers=_auth(tok)).json()["groups"]
+    assert [g["name"] for g in groups] == ["Own uploads, teammates unknown"]
+    client.put("/api/v1/roster", headers=_auth(API), json={"roster": [{"username": "K3nyooo"}, {"username": "Mate"}]})
+    c = client.get("/api/v1/solo/compare", headers=_auth(tok)).json()
+    assert [(g["name"], g["matches"], g["summary"]["rounds"]) for g in c["groups"]] == [("2-3 of the team", 1, 2)]
+    assert c["differences"] == []                       # no full-team rounds to compare against
+    assert client.get("/api/v1/solo/compare?player=Mate", headers=_auth(tok)).status_code == 403
+    assert client.get("/api/v1/solo/me", headers=_auth(API)).json()["players"] == ["K3nyooo", "Mate"]

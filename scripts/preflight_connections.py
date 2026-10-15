@@ -292,7 +292,7 @@ def main() -> int:
                     wav.unlink(missing_ok=True)
                 say(PASS if r.status_code == 200 and r.json().get("status") == "stored" else FAIL, "an audio chunk uploads and is stored", f"HTTP {r.status_code}")
             finally:
-                requests.delete(base + f"/api/v1/invites/{inv['invite_id']}", headers={"Authorization": f"Bearer {main_key}"}, timeout=15)
+                requests.delete(base + f"/api/v1/invites/{inv['invite_id']}?purge=true", headers={"Authorization": f"Bearer {main_key}"}, timeout=15)
             r = get(base + "/api/v1/join/whoami", key=tok)
             say(PASS if r.status_code == 401 else FAIL, "the throwaway invite was revoked and no longer works", f"HTTP {r.status_code}")
 

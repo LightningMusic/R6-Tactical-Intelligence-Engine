@@ -723,13 +723,18 @@
     catch (e) { $("inviteList").textContent = "Could not load (" + e.message + ")."; return; }
     lastInvites = list;
     fillInviteSelect();
-    $("inviteList").innerHTML = list.length ? list.map(i => {
+    // Only working links are listed; revoked or expired ones (and test links) can be cleared in one click.
+    const deadInv = list.filter(i => i.revoked || i.expired).length;
+    list = list.filter(i => !i.revoked && !i.expired);
+    $("inviteList").innerHTML = (list.length ? list.map(i => {
       const dead = i.revoked ? "revoked" : i.expired ? "expired" : "";
       return `<div class="detail-row"><span class="k">${escapeHtml(i.username)}${i.label ? ` <span style="color:var(--muted-dim)">${escapeHtml(i.label)}</span>` : ""}</span>
         <span class="v">${dead ? `<span style="color:var(--red)">${dead}</span>` : escapeHtml(fmtAgo(i.last_seen))}
         · <a href="#" data-regen="${escapeHtml(i.invite_id)}">${dead ? "reissue" : "new link"}</a>
         ${dead ? "" : ` · <a href="#" data-revoke="${escapeHtml(i.invite_id)}">revoke</a>`}</span></div>`;
-    }).join("") : "No links yet. Add a teammate below.";
+    }).join("") : "No links yet. Add a teammate below.") + (deadInv ? `<div class="detail-row"><span class="k" style="color:var(--muted-dim)">${deadInv} old link${deadInv > 1 ? "s" : ""} (revoked or expired)</span><span class="v"><a href="#" id="inviteCleanup">remove</a></span></div>` : "");
+    const ic = $("inviteCleanup");
+    if (ic) ic.addEventListener("click", async (ev) => { ev.preventDefault(); try { await apiFetch("/api/v1/invites/cleanup", { method: "POST", body: {} }); loadInvites(); } catch (e) { showError(e.message); } });
     $("inviteList").querySelectorAll("[data-regen]").forEach(a => a.addEventListener("click", async (ev) => {
       ev.preventDefault();
       if (!confirm("Make a new link? The old one stops working.")) return;
@@ -753,13 +758,17 @@
     let list;
     try { list = (await apiFetch("/api/v1/players")).keys || []; }
     catch (e) { $("playerList").textContent = "Could not load (" + e.message + ")."; return; }
-    $("playerList").innerHTML = list.length ? list.map(k => {
+    const deadKeys = list.filter(k => k.revoked || k.expired).length;
+    list = list.filter(k => !k.revoked && !k.expired);
+    $("playerList").innerHTML = (list.length ? list.map(k => {
       const dead = k.revoked ? "revoked" : k.expired ? "expired" : "";
       return `<div class="detail-row"><span class="k">${escapeHtml(k.username)}${k.label ? ` <span style="color:var(--muted-dim)">${escapeHtml(k.label)}</span>` : ""}</span>
         <span class="v">${dead ? `<span style="color:var(--red)">${dead}</span>` : escapeHtml(fmtAgo(k.last_seen))}
         · <a href="#" data-pregen="${escapeHtml(k.key_id)}">${dead ? "reissue" : "new link"}</a>
         ${dead ? "" : ` · <a href="#" data-prevoke="${escapeHtml(k.key_id)}">revoke</a>`}</span></div>`;
-    }).join("") : "No analyzer links yet.";
+    }).join("") : "No analyzer links yet.") + (deadKeys ? `<div class="detail-row"><span class="k" style="color:var(--muted-dim)">${deadKeys} old link${deadKeys > 1 ? "s" : ""} (revoked or expired)</span><span class="v"><a href="#" id="playerCleanup">remove</a></span></div>` : "");
+    const pc = $("playerCleanup");
+    if (pc) pc.addEventListener("click", async (ev) => { ev.preventDefault(); try { await apiFetch("/api/v1/players/cleanup", { method: "POST", body: {} }); loadPlayers(); } catch (e) { showError(e.message); } });
     $("playerList").querySelectorAll("[data-pregen]").forEach(a => a.addEventListener("click", async (ev) => {
       ev.preventDefault();
       if (!confirm("Make a new link? The old one stops working.")) return;

@@ -348,6 +348,7 @@ def player_report(result, me: str) -> Optional[dict]:
     out: list[dict] = []
     my_name = None
     flip_score = False
+    all_mates: set = set()
     for r in rounds:
         stats = {(p.get("username") or "").lower(): p for p in r.raw_player_stats}
         mine = stats.get(me_l)
@@ -378,25 +379,8 @@ def player_report(result, me: str) -> Optional[dict]:
             row["death"] = {"killer": death.killer, "clock": _clock(death.time_str, death.time_sec), "into_action": into,
                             "opening": bool(death.is_opening), "traded": bool(death.is_trade),
                             "spawn_peek": side == "attack" and into is not None and 0 <= into <= SPAWN_PEEK_SEC}
-        pos = r.positions or {}
-        players = pos.get("players") or {}
-        died = pos.get("died") or {}
-        if my_name in players and died.get(my_name) is not None:
-            t = died[my_name]
-            here = _at(players[my_name]["pts"], t - 0.5)
-            others = [_at(players[m]["pts"], t - 0.5) for m in mates if m in players and died.get(m, 1e9) > t]
-            others = [o for o in others if o]
-            if here and others:
-                d = min(math.dist(here[1:3], o[1:3]) + (100 if abs(here[3] - o[3]) > FLOOR_GAP_M else 0) for o in others)
-                row["nearest_mate_m"] = round(d, 1) if d < 100 else "other floor"
-        if side == "attack" and pos.get("drones") is not None and my_name in players:
-            first = min((v for v in died.values() if v >= PREP_SEC), default=None)
-            mine_d = [d for d in pos["drones"] if not d.get("prep") and d.get("who") == my_name]
-            row["drones"] = len(mine_d)
-            row["drones_before_first_death"] = sum(1 for d in mine_d if first is None or d["t"] < first)
-        walls = pos.get("walls")
-        if side == "defense" and walls:
-            row["reinforced"] = sum(1 for w in walls.get("reinforcements") or [] if w.get("who") == my_name)
+        _position_facts(row, r.positions or {}, my_name, mates, side)
+        all_mates.update(mates)
         out.append(row)
     if not out:
         return None
@@ -405,7 +389,31 @@ def player_report(result, me: str) -> Optional[dict]:
         us, them = them, us
     nemesis = collections.Counter(r["death"]["killer"] for r in out if r["death"] and r["death"]["killer"])
     return {"v": 1, "player": my_name, "map": _map_name(result), "played_at": getattr(result, "played_at", None),
-            "score": [us, them], "rounds": out, "totals": summarize(out), "killed_by": nemesis.most_common()}
+            "score": [us, them], "rounds": out, "totals": summarize(out), "killed_by": nemesis.most_common(),
+            "mates": sorted(all_mates)}
+
+
+def _position_facts(row: dict, pos: dict, my_name: str, mates: Iterable[str], side: str) -> None:
+    """Fills a round row's nearest-teammate-at-death, drones (attack) and reinforcements (defense) from a
+    round's decoded positions."""
+    players = pos.get("players") or {}
+    died = pos.get("died") or {}
+    if my_name in players and died.get(my_name) is not None:
+        t = died[my_name]
+        here = _at(players[my_name]["pts"], t - 0.5)
+        others = [_at(players[m]["pts"], t - 0.5) for m in mates if m in players and died.get(m, 1e9) > t]
+        others = [o for o in others if o]
+        if here and others:
+            d = min(math.dist(here[1:3], o[1:3]) + (100 if abs(here[3] - o[3]) > FLOOR_GAP_M else 0) for o in others)
+            row["nearest_mate_m"] = round(d, 1) if d < 100 else "other floor"
+    if side == "attack" and pos.get("drones") is not None and my_name in players:
+        first = min((v for v in died.values() if v >= PREP_SEC), default=None)
+        mine_d = [d for d in pos["drones"] if not d.get("prep") and d.get("who") == my_name]
+        row["drones"] = len(mine_d)
+        row["drones_before_first_death"] = sum(1 for d in mine_d if first is None or d["t"] < first)
+    walls = pos.get("walls")
+    if side == "defense" and walls:
+        row["reinforced"] = sum(1 for w in walls.get("reinforcements") or [] if w.get("who") == my_name)
 
 
 def summarize(rounds: list[dict]) -> dict:
@@ -759,3 +767,183 @@ def performance(owner: str, since: Optional[str] = None) -> list[dict]:
                      "setup": m["setup"]})
     rows.sort(key=lambda r: r.get("played_at") or "", reverse=True)
     return rows
+
+
+# ── Team vs solo: what changes for a player with more of the team around them ──
+
+BUCKETS = ("Full team", "4 of the team", "2-3 of the team", "Without the team", "Own uploads, teammates unknown")
+DUPLICATE_WINDOW_SEC = 15 * 60      # a solo upload this close to a team match on the same map is that match
+
+
+def _roster() -> set[str]:
+    try:
+        from server import roster
+        return {str(e.get("username") or "").lower() for e in roster.get_all() if e.get("username")}
+    except Exception:
+        return set()
+
+
+def _bucket(n_roster: Optional[int]) -> str:
+    if n_roster is None:
+        return BUCKETS[4]
+    return BUCKETS[0] if n_roster >= 5 else BUCKETS[1] if n_roster == 4 else BUCKETS[2] if n_roster >= 2 else BUCKETS[3]
+
+
+_team_rows_cache: dict = {}
+
+
+def _team_rows(conn, mid: int, username: str) -> list[dict]:
+    """One player's round rows (the same shape player_report makes) from a team match in matches.db."""
+    key = (mid, username.lower())
+    if key in _team_rows_cache:
+        return _team_rows_cache[key]
+    from integration.positions import decode_blob
+    me_l = username.lower()
+    rounds = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT round_number, side, outcome FROM rounds WHERE match_id = ?", (mid,))}
+    mine = {r[0]: (r[1], r[2]) for r in conn.execute(
+        """SELECT r.round_number, o.name, s.assists FROM player_round_stats s JOIN rounds r ON r.round_id = s.round_id
+           JOIN players p ON p.player_id = s.player_id LEFT JOIN operators o ON o.operator_id = s.operator_id
+           WHERE r.match_id = ? AND lower(p.name) = ?""", (mid, me_l))}
+    events, blobs = {}, {}
+    for name, text in conn.execute("""SELECT metric_name, metric_text FROM derived_metrics WHERE match_id = ?
+                                      AND (metric_name LIKE 'round_%_events' OR metric_name LIKE 'round_%_positions')""", (mid,)):
+        try:
+            rn = int(name.split("_")[1])
+        except ValueError:
+            continue
+        (events if name.endswith("_events") else blobs)[rn] = text
+    rows = []
+    for rn in sorted(mine):
+        side, outcome = rounds.get(rn, (None, None))
+        if side not in ("attack", "defense"):
+            continue
+        try:
+            kills = json.loads(events.get(rn) or "{}").get("kills") or []
+        except Exception:
+            kills = []
+        row: dict[str, Any] = {
+            "n": rn, "side": side, "won": outcome == "win", "operator": mine[rn][0] or "", "assists": mine[rn][1] or 0,
+            "kills": [{"victim": k.get("victim"), "clock": k.get("time") or "", "headshot": bool(k.get("headshot")),
+                       "opening": bool(k.get("opening"))} for k in kills if (k.get("killer") or "").lower() == me_l],
+            "death": None, "nearest_mate_m": None, "drones": None, "drones_before_first_death": None, "reinforced": None}
+        d = next((k for k in kills if (k.get("victim") or "").lower() == me_l), None)
+        if d is not None:
+            into = round(float(d.get("t") or 0) - PREP_SEC, 1) if d.get("t") is not None else None
+            row["death"] = {"killer": d.get("killer"), "clock": d.get("time") or "", "into_action": into,
+                            "opening": bool(d.get("opening")), "traded": bool(d.get("trade")),
+                            "spawn_peek": side == "attack" and into is not None and 0 <= into <= SPAWN_PEEK_SEC}
+        pos = decode_blob(blobs[rn]) if rn in blobs else None
+        if pos:
+            players = pos.get("players") or {}
+            me = next((n for n in players if n.lower() == me_l), None)
+            if me:
+                team = players[me].get("team")
+                _position_facts(row, pos, me, [n for n in players if n != me and players[n].get("team") == team], side)
+        rows.append(row)
+    _team_rows_cache[key] = rows
+    return rows
+
+
+def compare(username: str) -> dict:
+    """The player's rounds grouped by how much of the team was with them, each group summarized, plus the
+    differences between playing with the full team and without it."""
+    roster = _roster()
+    groups: dict[str, list] = {b: [] for b in BUCKETS}
+    matches: dict[str, int] = {b: 0 for b in BUCKETS}
+    team_times: list[tuple[str, Optional[str]]] = []
+    conn = _match_db()
+    if conn is not None:
+        try:
+            mids = [r[0] for r in conn.execute("""SELECT DISTINCT r.match_id FROM player_round_stats s
+                         JOIN rounds r ON r.round_id = s.round_id JOIN players p ON p.player_id = s.player_id
+                         WHERE lower(p.name) = ?""", (username.lower(),))]
+            for mid in mids:
+                names = {r[0].lower() for r in conn.execute("""SELECT DISTINCT p.name FROM player_round_stats s
+                             JOIN rounds r ON r.round_id = s.round_id JOIN players p ON p.player_id = s.player_id
+                             WHERE r.match_id = ?""", (mid,))}
+                rows = _team_rows(conn, mid, username)
+                if not rows:
+                    continue
+                b = _bucket(len(names & roster) if roster else None)
+                groups[b] += rows
+                matches[b] += 1
+                m = conn.execute("SELECT datetime, map FROM matches WHERE match_id = ?", (mid,)).fetchone()
+                team_times.append((m[1], _team_match_utc(mid, m[0])))
+        finally:
+            conn.close()
+
+    def is_team_match(map_name, played) -> bool:
+        if not played:
+            return False
+        try:
+            t = datetime.fromisoformat(str(played).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        for tm_map, tm_played in team_times:
+            if not tm_played or (tm_map or "").lower() != (map_name or "").lower():
+                continue
+            try:
+                u = datetime.fromisoformat(tm_played)
+                if (t.tzinfo is None) != (u.tzinfo is None):
+                    continue
+                if abs((t - u).total_seconds()) <= DUPLICATE_WINDOW_SEC:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    skipped = 0
+    for m in list_matches(username):
+        if m["status"] != "done":
+            continue
+        rep = (get_match(username, m["folder"]) or {}).get("report") or {}
+        if is_team_match(rep.get("map"), rep.get("played_at")):
+            skipped += 1                        # already counted from the team's own data
+            continue
+        mates = rep.get("mates")
+        b = _bucket(1 + len({x.lower() for x in mates} & roster) if mates is not None and roster else None)
+        groups[b] += rep.get("rounds") or []
+        matches[b] += 1
+
+    out = [{"name": b, "matches": matches[b], "summary": summarize(groups[b])} for b in BUCKETS if groups[b]]
+    return {"player": username, "groups": out, "differences": _differences(out),
+            "team_matches_also_uploaded": skipped}
+
+
+def _rates(s: dict) -> dict:
+    """The comparable per-round figures of one summary (None where there's too little to say)."""
+    r = s["rounds"] or 0
+    return {
+        "Win rate": s["won"] / r if r else None,
+        "K/D": s["kills"] / s["deaths"] if s["deaths"] else None,
+        "Kills per round": s["kills"] / r if r else None,
+        "Headshot share": s["headshots"] / s["kills"] if s["kills"] >= 5 else None,
+        "Rounds survived": s["survived"] / r if r else None,
+        "Opening deaths per round": s["opening_deaths"] / r if r else None,
+        "Deaths nobody could trade": s["deaths_isolated"] / s["deaths_checked"] if s["deaths_checked"] >= 5 else None,
+        "Typical death, seconds in": s["typical_death_into_action"],
+        "Drones per attack round": s["drones"] / s["attack_rounds_measured"] if s["attack_rounds_measured"] >= 5 else None,
+    }
+
+
+def _differences(groups: list[dict], min_rounds: int = 15) -> list[dict]:
+    """Full team against each other group with enough rounds, metric by metric, biggest relative change first."""
+    by = {g["name"]: g for g in groups}
+    full = by.get(BUCKETS[0])
+    if not full or full["summary"]["rounds"] < min_rounds:
+        return []
+    base = _rates(full["summary"])
+    out = []
+    for g in groups[1:]:
+        if g["summary"]["rounds"] < min_rounds:
+            continue
+        other = _rates(g["summary"])
+        for metric, a in base.items():
+            b = other.get(metric)
+            if a is None or b is None:
+                continue
+            change = (a - b) / abs(b) if b else None
+            out.append({"metric": metric, "full_team": round(a, 3), "other": round(b, 3), "group": g["name"],
+                        "change": round(change, 3) if change is not None else None})
+    out.sort(key=lambda d: -abs(d["change"] or 0))
+    return out

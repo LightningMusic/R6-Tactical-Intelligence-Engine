@@ -59,7 +59,18 @@ def _bad(exc: Exception):
 @router.get("/solo/me")
 def solo_me(player: Optional[str] = None, p: PlayerPrincipal = Depends(verify_player_token)) -> dict:
     owner = _owner(p, player) if (p.kind == "player" or player) else None
-    return {"kind": p.kind, "player": owner, "players": players.known_usernames() if p.kind == "main" else None}
+    if p.kind != "main":
+        return {"kind": p.kind, "player": owner, "players": None}
+    # The host can look at any teammate: everyone on the roster, plus anyone with an analyzer key.
+    try:
+        from server import roster
+        names = [e["username"] for e in roster.get_all() if e.get("username")]
+    except Exception:
+        names = []
+    for n in players.known_usernames():
+        if n.lower() not in {x.lower() for x in names}:
+            names.append(n)
+    return {"kind": p.kind, "player": owner, "players": names}
 
 
 @router.post("/solo/known")
@@ -115,6 +126,13 @@ def solo_delete(folder: str, player: Optional[str] = None, p: PlayerPrincipal = 
 def solo_trends(since: Optional[str] = None, player: Optional[str] = None,
                 p: PlayerPrincipal = Depends(verify_player_token)) -> dict:
     return solo.trends(_owner(p, player), since)
+
+
+@router.get("/solo/compare")
+def solo_compare(player: Optional[str] = None, p: PlayerPrincipal = Depends(verify_player_token)) -> dict:
+    """The player's rounds grouped by how much of the team was with them (full team, 4, 2-3, without), each
+    group summarized, and the biggest differences between the full team and the rest."""
+    return solo.compare(_owner(p, player))
 
 
 @router.get("/solo/setups")
@@ -200,7 +218,17 @@ def regenerate_player_key(key_id: str, _client: str = Depends(verify_api_token))
 
 
 @router.delete("/players/{key_id}")
-def revoke_player_key(key_id: str, _client: str = Depends(verify_api_token)) -> dict:
+def revoke_player_key(key_id: str, purge: bool = False, _client: str = Depends(verify_api_token)) -> dict:
+    """Revokes a key; ?purge=true removes it from the list for good."""
+    if purge:
+        if not players.purge(key_id):
+            raise HTTPException(status_code=404, detail="No such key.")
+        return {"ok": True, "removed": True}
     if not players.revoke(key_id):
         raise HTTPException(status_code=404, detail="No such key, or it's already revoked.")
     return {"ok": True}
+
+
+@router.post("/players/cleanup")
+def cleanup_player_keys(_client: str = Depends(verify_api_token)) -> dict:
+    return {"removed": players.purge_dead()}

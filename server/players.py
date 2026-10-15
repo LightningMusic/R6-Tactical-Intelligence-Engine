@@ -83,6 +83,21 @@ def revoke(key_id: str) -> bool:
         return cur.rowcount > 0
 
 
+def purge(key_id: str) -> bool:
+    """Removes a key from the list for good (the player's uploaded matches are kept)."""
+    with server_db.get_connection() as conn:
+        cur = conn.execute("DELETE FROM player_keys WHERE key_id = ?", (key_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def purge_dead() -> int:
+    with server_db.get_connection() as conn:
+        cur = conn.execute("DELETE FROM player_keys WHERE revoked_at IS NOT NULL OR expires_at <= ?", (time.time(),))
+        conn.commit()
+        return cur.rowcount
+
+
 def regenerate(key_id: str, days: int = DEFAULT_DAYS) -> Optional[dict]:
     days = max(1, min(int(days or DEFAULT_DAYS), MAX_DAYS))
     now = time.time()
