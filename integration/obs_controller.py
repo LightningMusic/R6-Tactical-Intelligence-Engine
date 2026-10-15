@@ -73,6 +73,40 @@ def track_layout_for(recording_start_epoch: float, path=None) -> Optional[dict]:
         return None
     return best.get("layout")
 
+# 2026-10-15: OBS's own profile and scene collection for R6 sessions on a PC whose OBS is someone's personal
+# setup (the host's home PC). Recording here rewrites the ACTIVE profile (Advanced output, the stick as the
+# recording folder, track routing) and adds sources to the active scene collection, so on a personal OBS that
+# would wreck the owner's own recording setup. Instead the app switches OBS to these two for the session and
+# back afterwards. A PC whose current scene collection already has the R6 scenes (the practice PC) is left
+# exactly as it is.
+OWN_PROFILE = "R6Analyzer"
+OWN_COLLECTION = "R6Analyzer"
+RESTORE_FILE = RECORDINGS_DIR / "obs_restore.json"   # what to switch back to; survives a crash mid-session
+
+
+def _load_restore(path=None) -> Optional[dict]:
+    import json
+    path = path or RESTORE_FILE
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        return d if d.get("profile") and d.get("collection") else None
+    except Exception:
+        return None
+
+
+def _save_restore(target: Optional[dict], path=None) -> None:
+    import json
+    path = path or RESTORE_FILE
+    try:
+        if target is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(target), encoding="utf-8")
+    except Exception as e:
+        print(f"[OBS] Could not save which OBS setup to switch back to: {e}")
+
+
 def _obs_is_running() -> bool:
     for proc in psutil.process_iter(["name", "exe"]):
         try:
@@ -117,6 +151,7 @@ class OBSController:
         self._connected       = False
         self._client: Optional[obswebsocket.obsws] = None
         self._launched_by_us  = False
+        self._restore_to: Optional[dict] = None   # the user's own OBS profile/collection, while we're on ours
 
 
     def _require_client(self) -> obswebsocket.obsws:
@@ -228,6 +263,9 @@ class OBSController:
                     self._client.connect()
                     self._connected = True
 
+                    # On a personal OBS, move to our own profile/collection before changing anything.
+                    self.use_own_setup()
+
                     # Point OBS at the USB recordings folder
                     self._client.call(
                         obs_requests.SetRecordDirectory(
@@ -258,9 +296,82 @@ class OBSController:
               f"profile(s), none worked. Last error: {last_error}")
         return False
 
+    # =====================================================
+    # THE USER'S OWN OBS SETUP
+    # =====================================================
+
+    def use_own_setup(self) -> bool:
+        """Switches OBS to the R6Analyzer profile and scene collection (creating them the first time),
+        remembering the user's current ones, unless the current collection already is an R6 setup.
+        Returns True when OBS is now on ours. Never raises: a failure here just means recording happens
+        in whatever setup is active, as before this existed."""
+        client = self._client
+        if client is None or not self._connected:
+            return False
+        try:
+            profs = client.call(obs_requests.GetProfileList()).datain or {}
+            colls = client.call(obs_requests.GetSceneCollectionList()).datain or {}
+            cur_p, cur_c = profs.get("currentProfileName"), colls.get("currentSceneCollectionName")
+            if cur_p == OWN_PROFILE and cur_c == OWN_COLLECTION:
+                # Already ours: a session is running, or the app stopped without switching back last time.
+                self._restore_to = self._restore_to or _load_restore()
+                return True
+            scenes = {s.get("sceneName") for s in (client.call(obs_requests.GetSceneList()).getScenes() or [])}
+            if SCENE_COMMS in scenes:
+                return False        # this PC's OBS is already set up for R6 (the practice PC): leave it alone
+            if client.call(obs_requests.GetRecordStatus()).getOutputActive():
+                print("[OBS] OBS is already recording; not switching its profile.")
+                return False
+            self._restore_to = {"profile": cur_p, "collection": cur_c}
+            _save_restore(self._restore_to)
+            if OWN_PROFILE in (profs.get("profiles") or []):
+                client.call(obs_requests.SetCurrentProfile(profileName=OWN_PROFILE))
+            else:
+                client.call(obs_requests.CreateProfile(profileName=OWN_PROFILE))       # creating switches to it
+                # Our own profile, so its recording settings can be set outright: Matroska, which can be read
+                # while it's still being written (mid-session match slicing) and holds the separate tracks.
+                for cat, name, value in (("Output", "Mode", "Advanced"), ("AdvOut", "RecType", "Standard"),
+                                         ("AdvOut", "RecFormat2", "mkv")):
+                    client.call(obs_requests.SetProfileParameter(parameterCategory=cat, parameterName=name,
+                                                                 parameterValue=value))
+            if OWN_COLLECTION in (colls.get("sceneCollections") or []):
+                client.call(obs_requests.SetCurrentSceneCollection(sceneCollectionName=OWN_COLLECTION))
+            else:
+                client.call(obs_requests.CreateSceneCollection(sceneCollectionName=OWN_COLLECTION))
+            time.sleep(1.5)         # OBS finishes loading a scene collection after answering
+            print(f"[OBS] Switched OBS to its '{OWN_PROFILE}' profile and scene collection for this session "
+                  f"(yours, '{cur_p}' / '{cur_c}', come back when it ends).")
+            return True
+        except Exception as e:
+            print(f"[OBS] Could not switch OBS to its own setup ({e}); using the current one.")
+            return False
+
+    def restore_user_setup(self) -> bool:
+        """Switches OBS back to the profile and scene collection it was on before use_own_setup(). Waits for
+        a recording to have stopped; returns True when switched back (or there was nothing to do)."""
+        target = self._restore_to or _load_restore()
+        client = self._client
+        if target is None:
+            return True
+        if client is None or not self._connected:
+            return False
+        try:
+            if client.call(obs_requests.GetRecordStatus()).getOutputActive():
+                return False
+            client.call(obs_requests.SetCurrentSceneCollection(sceneCollectionName=target["collection"]))
+            client.call(obs_requests.SetCurrentProfile(profileName=target["profile"]))
+            print(f"[OBS] Switched OBS back to '{target['profile']}' / '{target['collection']}'.")
+            self._restore_to = None
+            _save_restore(None)
+            return True
+        except Exception as e:
+            print(f"[OBS] Could not switch OBS back to '{target.get('profile')}': {e}")
+            return False
+
     def disconnect(self) -> None:
         if not self._connected or self._client is None:
             return
+        self.restore_user_setup()
         try:
             self._client.disconnect()
         except Exception as e:
@@ -779,14 +890,19 @@ class OBSController:
             print("[OBS] Not connected.")
             return False
         try:
+            status = self._client.call(obs_requests.GetRecordStatus())
+            if not status.getOutputActive():
+                # A second session in the same run starts from the user's own setup again (switched back at
+                # the last stop): move to ours first, and point it at the stick (the folder is per profile).
+                if self.use_own_setup():
+                    self._client.call(obs_requests.SetRecordDirectory(recordDirectory=str(RECORDINGS_DIR)))
+                self.ensure_comms_tracks()      # creates the scene on a fresh collection, so before switching to it
             self._client.call(
                 obs_requests.SetCurrentProgramScene(
                     sceneName=settings.OBS_SCENE_NAME
                 )
             )
-            status = self._client.call(obs_requests.GetRecordStatus())
             if not status.getOutputActive():
-                self.ensure_comms_tracks()
                 self._client.call(obs_requests.StartRecord())
                 print(f"[OBS] Recording started.")
             else:
@@ -825,6 +941,12 @@ class OBSController:
                     )
                 except Exception:
                     pass
+
+            # Back to the user's own OBS setup once the file is closed (OBS won't switch profiles mid-write).
+            for _ in range(10):
+                if self.restore_user_setup():
+                    break
+                time.sleep(1)
 
             if save_path:
                 print(f"[OBS] Recording saved → {save_path}")

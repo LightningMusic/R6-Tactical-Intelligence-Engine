@@ -185,9 +185,14 @@ class RecordingView(QWidget):
             try:
                 import psutil
                 killed = 0
-                for proc in psutil.process_iter(["name", "pid"]):
+                from app.config import OBS_EXE_PATH
+                own = str(OBS_EXE_PATH).lower()
+                for proc in psutil.process_iter(["name", "pid", "exe"]):
                     try:
-                        if proc.info["name"] and "obs64" in proc.info["name"].lower():
+                        # Only the stick's own OBS: an OBS installed on this PC (the host's home PC) is the
+                        # user's, and closing the app must not close it.
+                        if proc.info["name"] and "obs64" in proc.info["name"].lower() \
+                                and (proc.info.get("exe") or "").lower() == own:
                             proc.terminate()
                             killed += 1
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -195,7 +200,7 @@ class RecordingView(QWidget):
                 if killed:
                     self._log_message(f"OBS process terminated ({killed} instance(s)).")
                 else:
-                    self._log_message("OBS process not found (already closed).")
+                    self._log_message("The stick's OBS isn't running (an OBS installed on this PC is left open).")
             except Exception as e:
                 self._log_message(f"OBS process kill error: {e}")
 
