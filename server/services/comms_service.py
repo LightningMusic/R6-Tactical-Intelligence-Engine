@@ -204,6 +204,42 @@ def _utterances(segments: list[dict], clock: ClipClock, source: str, speaker: st
     return out
 
 
+def apply_review_answers(session_id: str, timeline: dict, speech: list[dict], roster: dict) -> int:
+    """Sets the speaker of every speech line the host named on the review page (comms_review, keyed
+    "session|round|t" off this same timeline) to the name they heard. A line is matched back to its utterance by
+    round start + t and its text. Returns how many lines changed."""
+    with server_db.get_connection() as conn:
+        answers = {r[0]: r[1] for r in conn.execute(
+            "SELECT line_key, heard FROM comms_review WHERE session_id = ? AND heard NOT IN (?, ?, '')",
+            (session_id, "Can't tell", "Someone else"))}
+    if not answers:
+        return 0
+    by_label = {str(v).lower(): str(k) for k, v in (roster or {}).items() if v}
+    changed = 0
+    for rnd in timeline.get("rounds") or []:
+        items = [it for it in rnd.get("items") or [] if it.get("kind") == "speech"]
+        for it in items:
+            heard = answers.get(f"{session_id}|{rnd.get('round_number')}|{float(it['t']):.2f}")
+            if not heard or heard == it.get("speaker"):
+                continue
+            text = (it.get("text") or "").strip()
+            # The utterance: same text, and the same offset from the round start as every other line's.
+            cands = [u for u in speech if (u.get("text") or "").strip() == text]
+            if len(cands) > 1:
+                anchors = [u["start"] - o["t"] for o in items if o is not it
+                           for u in speech if (u.get("text") or "").strip() == (o.get("text") or "").strip()][:1]
+                if anchors:
+                    cands = [u for u in cands if abs((u["start"] - anchors[0]) - float(it["t"])) < 0.05]
+            if len(cands) != 1:
+                continue
+            u = cands[0]
+            u["speaker"] = heard
+            u["username"] = by_label.get(heard.lower(), u.get("username") or "")
+            u["named_by"] = "review"
+            changed += 1
+    return changed
+
+
 class CommsService:
 
     # ── 1. Host tracks ─────────────────────────────────────────────────
@@ -583,6 +619,12 @@ class CommsService:
                                                      if json.loads(r["alignment_json"] or "{}").get("status") == "aligned"]
         timeline = build_timeline(rounds, speech, float(meta.get("utc_offset_sec", _local_utc_offset())),
                                   names=roster, tracked_usernames=tracked)
+        # The host's answers on the review page are the truth for the lines they heard: rebuild with them, so
+        # every per-person count uses who really said it (2026-10-15: Carter, who had no voice profile, was
+        # named Zander or Hector on most of his Discord lines).
+        if apply_review_answers(session_id, timeline, speech, roster):
+            timeline = build_timeline(rounds, speech, float(meta.get("utc_offset_sec", _local_utc_offset())),
+                                      names=roster, tracked_usernames=tracked)
         timeline["voice"] = [json.loads(r["alignment_json"] or "{}") for r in voice_rows]
         if voice_id_stats:
             timeline["voice_id"] = voice_id_stats
