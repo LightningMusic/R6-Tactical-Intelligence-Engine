@@ -211,6 +211,12 @@ class ServerDatabase:
                 );
 
                 -- Review answers already folded into a voice profile (comms_review.learn_voices).
+                -- Lines to put first on the review page (comms_review.set_focus), e.g. the ones a report quotes.
+                CREATE TABLE IF NOT EXISTS review_focus (
+                    line_key TEXT PRIMARY KEY,
+                    added_at REAL NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS voice_review_used (
                     line_key TEXT PRIMARY KEY
                 );

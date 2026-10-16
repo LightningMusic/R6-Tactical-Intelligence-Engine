@@ -460,6 +460,13 @@ def review_comms_sample(n: int = 30, _client: str = Depends(verify_api_token)) -
     return comms_review.sample(max(1, min(int(n), 60)))
 
 
+@router.put("/review/comms/focus")
+def review_comms_focus(body: dict, _client: str = Depends(verify_api_token)) -> dict:
+    """{"keys": [...]}: these lines come first on the review page until answered."""
+    from server.services import comms_review
+    return {"focused": comms_review.set_focus(list(body.get("keys") or []))}
+
+
 @router.get("/review/comms/clip")
 def review_comms_clip(key: str, _client: str = Depends(verify_api_token)):
     from fastapi.responses import Response

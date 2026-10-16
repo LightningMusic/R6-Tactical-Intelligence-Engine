@@ -152,10 +152,19 @@ def sample(n: int = 30, seed: Optional[int] = None) -> dict[str, Any]:
     marked yet, spread over the categories by QUOTA (a short category's places go to the others)."""
     rng = random.Random(seed)
     done = answered_keys()
+    with server_db.get_connection() as conn:
+        focus = [r[0] for r in conn.execute("SELECT line_key FROM review_focus ORDER BY added_at, line_key")]
     pool: dict[str, list[dict]] = collections.defaultdict(list)
+    first: dict[str, dict] = {}
     for ln in lines():
-        if ln["key"] not in done:
+        if ln["key"] in done:
+            continue
+        if ln["key"] in focus:
+            first[ln["key"]] = ln          # lines the host was asked to check (set_focus) come before random ones
+        else:
             pool[ln["category"]].append(ln)
+    focused = [first[k] for k in focus if k in first][:n]
+    n -= len(focused)
     total = sum(QUOTA.values())
     want = {c: round(QUOTA[c] * n / total) for c in CATEGORIES}
     picked: list[dict] = []
@@ -168,6 +177,8 @@ def sample(n: int = 30, seed: Optional[int] = None) -> dict[str, Any]:
     if len(picked) < n and rest:
         picked += rng.sample(rest, min(n - len(picked), len(rest)))
     rng.shuffle(picked)
+    picked = focused + picked
+    n += len(focused)
     items = [{**{k: x[k] for k in ("key", "map", "round", "clock", "category", "claimed", "text")},
               "duration": round(min(x["end"] - x["t"] + 2 * PAD_SEC, MAX_CLIP_SEC), 1),
               "how": DESCRIBE[x["category"]]} for x in picked[:n]]
@@ -176,6 +187,18 @@ def sample(n: int = 30, seed: Optional[int] = None) -> dict[str, Any]:
         warm([x["key"] for x in items])
     return {"items": items, "choices": choices(sorted({x["claimed"] for x in items if x["claimed"]})),
             "left": dict(left)}
+
+
+def set_focus(keys: list[str]) -> int:
+    """Lines to put first on the review page, in this order (e.g. the lines a report quotes), replacing the last
+    list. Answered ones simply stop coming up."""
+    keys = [k for k in dict.fromkeys(str(k) for k in keys) if k.count("|") == 2][:200]
+    with server_db.get_connection() as conn:
+        conn.execute("DELETE FROM review_focus")
+        for i, k in enumerate(keys):
+            conn.execute("INSERT INTO review_focus (line_key, added_at) VALUES (?, ?)", (k, i))
+        conn.commit()
+    return len(keys)
 
 
 def _find(key: str) -> Optional[tuple[dict, dict, dict]]:

@@ -145,3 +145,13 @@ def test_the_page_is_served_and_the_data_needs_the_key():
         assert "Check the comms" in c.get("/review").text
         assert c.get("/api/v1/review/comms/sample").status_code == 401
         assert c.get("/api/v1/review/comms/summary").status_code == 401
+
+
+def test_lines_put_in_focus_come_first_until_answered(review):
+    keys = [x["key"] for x in review.sample(n=10, seed=1)["items"]]
+    want = keys[-2:][::-1]
+    assert review.set_focus(want + ["not|a|real-line", "junk"]) == 3
+    s = review.sample(n=3, seed=5)
+    assert [x["key"] for x in s["items"][:2]] == want and len(s["items"]) == 3
+    review.record(want[0], "James", "right")
+    assert review.sample(n=3, seed=5)["items"][0]["key"] == want[1]
