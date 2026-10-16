@@ -41,7 +41,7 @@ def server(tmp_path, monkeypatch):
     from server.repositories import ServerRepository
     db = ServerDatabase(d / "server_matches.db")
     for mod in ("server.repositories", "server.services.comms_service", "server.invites", "server.players",
-                "server.services.solo"):
+                "server.services.solo", "server.roster"):
         monkeypatch.setattr(f"{mod}.server_db", db)
     monkeypatch.setattr("server.api.v1.repo", ServerRepository(db))
     monkeypatch.setattr(solo, "start_worker", lambda: None)      # tests run the reader themselves
