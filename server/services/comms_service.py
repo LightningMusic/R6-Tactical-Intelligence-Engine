@@ -62,7 +62,16 @@ def _get_transcriber():
 
 
 def _load_audio(path: Path):
-    """Any audio file -> mono float32 at 16 kHz."""
+    """Any audio file -> mono float32 at 16 kHz. Read from the decoded copy next to it (made once, the same one the
+    review page cuts clips from): decoding through a pipe each time hit its 120 s limit on 2026-10-16, when
+    starting ffmpeg alone took 18 s on the slow disk and voice naming was skipped for a whole session."""
+    import numpy as np
+    try:
+        from server.services.comms_review import decoded
+        raw = decoded(path)
+        return np.fromfile(raw, dtype="<i2").astype(np.float32) / 32768.0
+    except Exception as e:                                       # noqa: BLE001 - fall back to the direct decode
+        print(f"[Comms] decoded copy of {Path(path).name} unavailable ({e}); decoding directly.")
     from integration.whisper_transcriber import _find_ffmpeg, _load_whisper_audio
     return _load_whisper_audio(_find_ffmpeg(), path)
 
