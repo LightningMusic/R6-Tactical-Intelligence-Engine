@@ -16,8 +16,10 @@ as the matches table spells it.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Optional
 
+from server.config import server_settings
 from server.match_db import get_match_repo
 
 MAX_SCATTER = 9000           # points sent to the labelling page (downsampled) — enough for a readable heatmap
@@ -29,13 +31,24 @@ def _conn():
     return get_match_repo().db.get_connection()
 
 
+PIN_KINDS = ("room", "site", "stairs", "spawn", "hatch")
+
+
 def _ensure_table(conn) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS map_rooms (
         map   TEXT NOT NULL,
         name  TEXT NOT NULL,
         floor TEXT NOT NULL DEFAULT '',
+        kind  TEXT NOT NULL DEFAULT 'room',
         x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL,
         PRIMARY KEY (map, name))""")
+    try:
+        conn.execute("ALTER TABLE map_rooms ADD COLUMN kind TEXT NOT NULL DEFAULT 'room'")
+    except Exception:
+        pass        # column already there
+    conn.execute("""CREATE TABLE IF NOT EXISTS map_structures (
+        map TEXT NOT NULL, floor TEXT NOT NULL DEFAULT '', reinforced INTEGER NOT NULL DEFAULT 0,
+        x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL)""")
 
 
 def maps_with_positions() -> list[dict]:
@@ -105,8 +118,8 @@ def scatter(map_name: str) -> dict:
         try:
             model = places.site_model(rounds, floors)
             for site, c in model.items():
-                suggested.append({"name": _clean_site(site), "x": round(c["x"], 1), "y": round(c["y"], 1),
-                                  "z": round(c["z"], 1), "floor": _floor_of(c["z"], floors)})
+                suggested.append({"name": _clean_site(site), "kind": "site", "x": round(c["x"], 1),
+                                  "y": round(c["y"], 1), "z": round(c["z"], 1), "floor": _floor_of(c["z"], floors)})
         except Exception:
             pass
     return {"map": map_name, "floors": floor_list, "points": points, "bounds": bounds,
@@ -123,13 +136,14 @@ def _clean_site(site: str) -> str:
 def get_rooms(map_name: str) -> list[dict]:
     with _conn() as conn:
         _ensure_table(conn)
-        rows = conn.execute("SELECT name, floor, x, y, z FROM map_rooms WHERE map = ? ORDER BY floor, name",
+        rows = conn.execute("SELECT name, floor, kind, x, y, z FROM map_rooms WHERE map = ? ORDER BY floor, name",
                             (map_name,)).fetchall()
-    return [{"name": r["name"], "floor": r["floor"], "x": r["x"], "y": r["y"], "z": r["z"]} for r in rows]
+    return [{"name": r["name"], "floor": r["floor"], "kind": r["kind"] or "room",
+             "x": r["x"], "y": r["y"], "z": r["z"]} for r in rows]
 
 
 def save_rooms(map_name: str, rooms: list[dict]) -> int:
-    """Replace this map's rooms with the given list. Each room: {name, floor, x, y, z}."""
+    """Replace this map's rooms with the given list. Each room: {name, floor, kind, x, y, z}."""
     clean = []
     seen = set()
     for r in rooms or []:
@@ -140,16 +154,99 @@ def save_rooms(map_name: str, rooms: list[dict]) -> int:
             x, y, z = float(r["x"]), float(r["y"]), float(r["z"])
         except (KeyError, TypeError, ValueError):
             continue
+        kind = str(r.get("kind") or "room").lower()
         seen.add(name.lower())
-        clean.append((map_name, name, str(r.get("floor") or "")[:4], x, y, z))
+        clean.append((map_name, name, str(r.get("floor") or "")[:4], kind if kind in PIN_KINDS else "room", x, y, z))
         if len(clean) >= 200:
             break
     with _conn() as conn:
         _ensure_table(conn)
         conn.execute("DELETE FROM map_rooms WHERE map = ?", (map_name,))
-        conn.executemany("INSERT INTO map_rooms (map, name, floor, x, y, z) VALUES (?, ?, ?, ?, ?, ?)", clean)
+        conn.executemany("INSERT INTO map_rooms (map, name, floor, kind, x, y, z) VALUES (?, ?, ?, ?, ?, ?, ?)", clean)
         conn.commit()
     return len(clean)
+
+
+# ── Walls: every breakable surface, read from the stored replays (cached) ─────
+
+def structures(map_name: str, rebuild: bool = False) -> dict:
+    """The map's destructible surfaces (breakable walls, hatches, barricades) with a floor, and whether each one
+    gets reinforced — read once from the stored replay packages and cached. Hard (concrete) walls aren't
+    objects in the replay, so they still only show as the heatmap's empty gaps."""
+    with _conn() as conn:
+        _ensure_table(conn)
+        have = conn.execute("SELECT COUNT(*) FROM map_structures WHERE map = ?", (map_name,)).fetchone()[0]
+    if rebuild or not have:
+        _build_structures(map_name)
+    with _conn() as conn:
+        rows = conn.execute("SELECT floor, reinforced, x, y, z FROM map_structures WHERE map = ?", (map_name,)).fetchall()
+    return {"map": map_name, "walls": [{"floor": r["floor"], "reinforced": bool(r["reinforced"]),
+                                        "x": r["x"], "y": r["y"], "z": r["z"]} for r in rows]}
+
+
+def _build_structures(map_name: str, max_packages: int = 12) -> int:
+    """Extract destructible surfaces from the map's stored replays and cache them. Dedups near-identical
+    surfaces, assigns a floor, and marks the ones near a reinforcement spot as reinforceable."""
+    import tempfile
+    import zipfile
+    from integration import walls as W
+    from integration.replay_utility import read_rec
+    from server.database import server_db
+    from analysis import places
+
+    with _conn() as conn:
+        mids = [r[0] for r in conn.execute("SELECT match_id FROM matches WHERE map = ?", (map_name,))]
+        rounds = _map_rounds(conn, map_name)
+    floors = places.floors(rounds) if rounds else []
+
+    # reinforcement spots already decoded and stored with the positions
+    reinf = [(w["x"], w["y"], w["z"]) for r in rounds
+             for w in ((r["positions"].get("walls") or {}).get("reinforcements") or [])
+             if w.get("x") is not None]
+
+    # match -> session -> package hash (the session/package bookkeeping is in the other DB)
+    hashes: list[str] = []
+    with server_db.get_connection() as sconn:
+        for mid in mids:
+            row = sconn.execute("SELECT session_id FROM server_parsed_matches WHERE match_id = ?", (mid,)).fetchone()
+            if not row:
+                continue
+            pk = sconn.execute("SELECT package_hash FROM server_packages WHERE session_id = ?", (row[0],)).fetchone()
+            if pk and pk[0] not in hashes:
+                hashes.append(pk[0])
+
+    surfaces: dict[tuple, list] = {}      # rounded (x,y,z) -> [x,y,z]
+    for h in hashes[:max_packages]:
+        pkg = server_settings.UPLOADS_DIR / f"{h}.r6session"
+        if not pkg.exists():
+            continue
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                with zipfile.ZipFile(pkg) as z:
+                    recs = [n for n in z.namelist() if n.lower().endswith(".rec")]
+                    for n in recs:
+                        z.extract(n, tmp)
+                        try:
+                            for (x, y, zz) in W.map_objects(read_rec(Path(tmp) / n)).values():
+                                key = (round(x * 1.5) / 1.5, round(y * 1.5) / 1.5, round(zz))
+                                surfaces.setdefault(key, [x, y, zz])
+                        except Exception:
+                            continue
+        except Exception as e:                                   # noqa: BLE001 - a bad package must not stop the rest
+            print(f"[Rooms] structures: could not read {h[:12]} for {map_name}: {e}")
+
+    rows = []
+    for (x, y, z) in surfaces.values():
+        floor = _floor_of(z, floors)
+        reinforced = any(abs(rz - z) < FLOOR_GAP and math.dist((rx, ry), (x, y)) < 1.5 for rx, ry, rz in reinf)
+        rows.append((map_name, floor, 1 if reinforced else 0, round(x, 2), round(y, 2), round(z, 2)))
+    with _conn() as conn:
+        _ensure_table(conn)
+        conn.execute("DELETE FROM map_structures WHERE map = ?", (map_name,))
+        conn.executemany("INSERT INTO map_structures (map, floor, reinforced, x, y, z) VALUES (?, ?, ?, ?, ?, ?)", rows)
+        conn.commit()
+    print(f"[Rooms] structures for {map_name}: {len(rows)} surfaces from {len(hashes[:max_packages])} packages.")
+    return len(rows)
 
 
 def rooms_by_map() -> dict[str, list[dict]]:

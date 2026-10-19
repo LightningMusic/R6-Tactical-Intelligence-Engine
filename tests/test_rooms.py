@@ -61,18 +61,32 @@ def test_scatter_gives_points_floors_and_a_site_suggestion(match_db):
 
 def test_saving_and_loading_rooms(match_db):
     saved = match_db.save_rooms("Border", [
-        {"name": "CCTV", "floor": "2F", "x": 0, "y": 0, "z": 10},
+        {"name": "CCTV", "floor": "2F", "kind": "room", "x": 0, "y": 0, "z": 10},
         {"name": "CCTV", "floor": "2F", "x": 5, "y": 5, "z": 10},     # duplicate name dropped
         {"name": "", "floor": "2F", "x": 1, "y": 1, "z": 10},          # blank name dropped
-        {"name": "Armory", "x": 50, "y": 50, "z": 10}])
-    assert saved == 2
-    got = {r["name"] for r in match_db.get_rooms("Border")}
-    assert got == {"CCTV", "Armory"}
+        {"name": "Armory", "kind": "site", "x": 50, "y": 50, "z": 10},
+        {"name": "Up", "kind": "nonsense", "x": 5, "y": 6, "z": 10}])   # unknown kind -> room
+    assert saved == 3
+    by = {r["name"]: r for r in match_db.get_rooms("Border")}
+    assert set(by) == {"CCTV", "Armory", "Up"}
+    assert by["Armory"]["kind"] == "site" and by["Up"]["kind"] == "room"
     # scatter now returns the saved rooms and no suggestions (only suggested when nothing saved)
     s = match_db.scatter("Border")
-    assert {r["name"] for r in s["rooms"]} == {"CCTV", "Armory"} and s["suggested"] == []
+    assert {r["name"] for r in s["rooms"]} == {"CCTV", "Armory", "Up"} and s["suggested"] == []
     match_db.save_rooms("Border", [])
     assert match_db.get_rooms("Border") == []
+
+
+def test_structures_returns_cached_walls_without_rebuilding(match_db):
+    # Pre-fill the cache so structures() reads it instead of re-reading packages (which need the uploads store).
+    with match_db._conn() as conn:
+        match_db._ensure_table(conn)
+        conn.execute("INSERT INTO map_structures (map, floor, reinforced, x, y, z) VALUES ('Border', '2F', 1, 1, 2, 10)")
+        conn.execute("INSERT INTO map_structures (map, floor, reinforced, x, y, z) VALUES ('Border', '2F', 0, 3, 4, 10)")
+        conn.commit()
+    s = match_db.structures("Border")
+    assert len(s["walls"]) == 2
+    assert sum(w["reinforced"] for w in s["walls"]) == 1
 
 
 def test_maps_list_counts_rounds_and_labels(match_db):

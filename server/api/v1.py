@@ -527,9 +527,16 @@ def rooms_get(map: str, _client: str = Depends(verify_api_token)) -> dict:
 
 @router.put("/rooms")
 def rooms_put(body: dict, map: str, _client: str = Depends(verify_api_token)) -> dict:
-    """{"rooms": [{"name", "floor", "x", "y", "z"}, ...]} replaces this map's room labels."""
+    """{"rooms": [{"name", "floor", "kind", "x", "y", "z"}, ...]} replaces this map's room labels."""
     from server.services import rooms
     return {"map": map, "saved": rooms.save_rooms(map, body.get("rooms") or [])}
+
+
+@router.get("/rooms/structures")
+def rooms_structures(map: str, rebuild: bool = False, _client: str = Depends(verify_api_token)) -> dict:
+    """The map's breakable walls/hatches read from the stored replays (cached; ?rebuild=true re-reads them)."""
+    from server.services import rooms
+    return rooms.structures(map, rebuild=rebuild)
 
 
 @router.post("/sessions/{session_id}/reread-replays", status_code=202)

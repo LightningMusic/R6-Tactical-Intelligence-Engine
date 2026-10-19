@@ -8,36 +8,41 @@
 <style>
 :root {
   --bg: #11151b; --panel: #19202a; --ink: #e5e9ef; --muted: #96a0b0; --line: #2b3441; --soft: #212a36;
-  --accent: #7ea2ff; --good: #4cc38a; --warn: #e8b04b;
+  --accent: #7ea2ff; --good: #4cc38a; --warn: #e8b04b; --wall: #d2593f; --reinf: #f0923e;
   --mono: ui-monospace, "Cascadia Mono", Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) { :root {
-  --bg: #f3f4f6; --panel: #fff; --ink: #18202c; --muted: #5d6676; --line: #d8dce3; --soft: #eceff3;
-  --accent: #2f5bd3; --good: #1c7a48; --warn: #9a5b00; color-scheme: light } }
+  --bg: #eef0f3; --panel: #fff; --ink: #18202c; --muted: #5d6676; --line: #d8dce3; --soft: #eceff3;
+  --accent: #2f5bd3; --good: #1c7a48; --warn: #9a5b00; --wall: #c0392b; --reinf: #d35400; color-scheme: light } }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); }
-header { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-h1 { font-size: 1.15rem; margin: 0; }
-main { display: flex; gap: 12px; padding: 12px 16px; flex-wrap: wrap; align-items: flex-start; }
-.wrap { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow: hidden; }
-canvas { display: block; background: var(--bg); touch-action: none; cursor: crosshair; max-width: 100%; }
-aside { flex: 1; min-width: 240px; max-width: 360px; display: grid; gap: 10px; }
+header { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+h1 { font-size: 1.1rem; margin: 0; }
+main { display: flex; gap: 12px; padding: 12px 14px; flex-wrap: wrap; align-items: flex-start; }
+.wrap { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); overflow: hidden; position: relative; }
+canvas { display: block; touch-action: none; cursor: crosshair; }
+canvas.panning { cursor: grabbing; }
+aside { flex: 1; min-width: 250px; max-width: 370px; display: grid; gap: 10px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 button, select, input { font: inherit; border-radius: 7px; border: 1px solid var(--line); background: var(--soft); color: var(--ink); padding: 6px 9px; }
 button { background: var(--accent); color: #fff; border: 0; cursor: pointer; }
 button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+button.mini { padding: 3px 8px; font-size: .85rem; }
 button:disabled { opacity: .5; cursor: default; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.floors button { background: var(--soft); color: var(--ink); border: 1px solid var(--line); padding: 4px 10px; }
-.floors button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
-ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; max-height: 40vh; overflow: auto; }
+.floors button, .kinds button { background: var(--soft); color: var(--ink); border: 1px solid var(--line); padding: 4px 10px; }
+.floors button[aria-pressed="true"], .kinds button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; max-height: 38vh; overflow: auto; }
 li { display: flex; justify-content: space-between; gap: 8px; font-size: .9rem; padding: 3px 6px; border-radius: 6px; }
 li:hover { background: var(--soft); }
 li a { color: var(--warn); text-decoration: none; cursor: pointer; }
 .muted { color: var(--muted); } .small { font-size: .85rem; } .good { color: var(--good); }
 .pill { font: .72rem var(--mono); background: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; color: var(--muted); }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: .8rem; color: var(--muted); }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; }
 #hint { min-height: 1.3em; }
+#zoomhint { position: absolute; bottom: 6px; right: 8px; font: .72rem var(--mono); color: var(--muted); background: rgba(0,0,0,.35); padding: 1px 6px; border-radius: 6px; }
 </style>
 </head>
 <body>
@@ -46,26 +51,38 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   <select id="mapSel"><option value="">Loading maps…</option></select>
   <span id="mapInfo" class="pill"></span>
   <span style="flex:1"></span>
+  <label class="small"><input type="checkbox" id="showWalls" checked> walls</label>
+  <label class="small"><input type="checkbox" id="showSug" checked> site suggestions</label>
   <button id="saveBtn" disabled>Save labels</button>
   <span id="saveMsg" class="small"></span>
 </header>
 <main>
-  <div class="wrap"><canvas id="cv" width="640" height="640"></canvas></div>
+  <div class="wrap">
+    <canvas id="cv" width="680" height="680"></canvas>
+    <div id="zoomhint">scroll = zoom · drag = pan · click = add pin</div>
+  </div>
   <aside>
     <div class="card">
       <div class="row floors" id="floorRow"></div>
+      <div class="row kinds" id="kindRow" style="margin-top:6px"></div>
       <p id="hint" class="small muted">Pick a floor, then click a room on the map and name it.</p>
       <div class="row">
-        <input id="nameInput" placeholder="Room name (e.g. CCTV)" maxlength="40" style="flex:1" disabled>
+        <input id="nameInput" placeholder="Name (e.g. CCTV)" maxlength="40" style="flex:1" disabled>
         <button id="addBtn" disabled>Add</button>
       </div>
-      <div class="row small"><label><input type="checkbox" id="showSug" checked> show suggested from sites</label></div>
+      <div class="legend" style="margin-top:8px">
+        <span><span class="sw" style="background:var(--wall)"></span>breakable wall</span>
+        <span><span class="sw" style="background:var(--reinf)"></span>reinforced wall</span>
+        <span><span class="sw" style="background:var(--accent)"></span>room</span>
+        <span><span class="sw" style="background:#e0564e"></span>site</span>
+      </div>
+      <div class="row" style="margin-top:6px"><button id="rebuildWalls" class="ghost mini">re-read walls from replays</button><button id="resetView" class="ghost mini">reset view</button></div>
     </div>
     <div class="card">
-      <div class="row" style="justify-content:space-between"><b>Rooms</b><span id="roomCount" class="muted small"></span></div>
-      <ul id="roomList"><li class="muted">No rooms yet.</li></ul>
+      <div class="row" style="justify-content:space-between"><b>Pins</b><span id="roomCount" class="muted small"></span></div>
+      <ul id="roomList"><li class="muted">No pins yet.</li></ul>
     </div>
-    <div class="card small muted">Dots are everywhere players have actually walked, by floor. Click to drop a named pin; pins snap nothing — put them in the middle of the room. Save when done; unsaved changes are kept until you switch maps.</div>
+    <div class="card small muted">The red marks are breakable walls and hatches read from the replays (hard concrete walls aren't in the data — they show as the dark gaps). Zoom in to place pins accurately. Pick a pin type first (room, site, stairs…). Save when done.</div>
   </aside>
 </main>
 <script>
@@ -76,6 +93,9 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   const server = () => (get(LS_URL) || location.origin).replace(/\/$/, "");
   const key = get(LS_TOKEN);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const KINDS = ["room", "site", "stairs", "spawn", "hatch"];
+  const KIND_COLOR = { room: "--accent", site: "#e0564e", stairs: "#49c7d4", spawn: "--good", hatch: "--reinf" };
+  const col = (c) => c.startsWith("--") ? getComputedStyle(document.body).getPropertyValue(c).trim() : c;
 
   async function api(path, opts = {}) {
     const headers = { Authorization: `Bearer ${key}` };
@@ -88,120 +108,132 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   }
 
   const cv = $("cv"), ctx = cv.getContext("2d");
-  let data = null, rooms = [], floor = null, hidden = new Set(), dirty = false;
-  let tf = null;          // world -> canvas transform
+  let data = null, walls = [], rooms = [], floor = null, kind = "room", hidden = new Set(), dirty = false;
+  let base = null, view = { s: 1, ox: 0, oy: 0 };
 
-  function fit() {
+  function fitBase() {
     const b = data.bounds;
-    if (!b) { tf = null; return; }
-    const pad = 24, w = cv.width - 2 * pad, h = cv.height - 2 * pad;
-    const sx = w / Math.max(1e-3, b.maxx - b.minx), sy = h / Math.max(1e-3, b.maxy - b.miny);
-    const s = Math.min(sx, sy);
-    // y is flipped so the plot reads like a map (north up); center it
+    if (!b) { base = null; return; }
+    const pad = 20, w = cv.width - 2 * pad, h = cv.height - 2 * pad;
+    const s = Math.min(w / Math.max(1e-3, b.maxx - b.minx), h / Math.max(1e-3, b.maxy - b.miny));
     const ox = pad + (w - s * (b.maxx - b.minx)) / 2, oy = pad + (h - s * (b.maxy - b.miny)) / 2;
-    tf = {
+    base = {
       toCv: (x, y) => [ox + (x - b.minx) * s, cv.height - (oy + (y - b.miny) * s)],
       toWorld: (cx, cy) => [b.minx + (cx - ox) / s, b.miny + (cv.height - cy - oy) / s],
     };
   }
-  // A ramp from the map background up through blue/cyan/green to warm, for a density heatmap: walls show as
-  // the un-walked gaps, busy rooms and corridors as bright paths.
+  const toScreen = (x, y) => { const [bx, by] = base.toCv(x, y); return [bx * view.s + view.ox, by * view.s + view.oy]; };
+  const toWorld = (sx, sy) => base.toWorld((sx - view.ox) / view.s, (sy - view.oy) / view.s);
+  function resetView() { view = { s: 1, ox: 0, oy: 0 }; draw(); }
+
+  // heatmap ramp
   const STOPS = [[0, 0, 0, 0], [30, 70, 150, 90], [40, 170, 190, 170], [90, 210, 120, 220], [245, 215, 90, 255]];
   function heat(t) {
     const x = Math.max(0, Math.min(1, t)) * (STOPS.length - 1), i = Math.min(STOPS.length - 2, x | 0), f = x - i;
     const a = STOPS[i], b = STOPS[i + 1];
     return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, a[3] + (b[3] - a[3]) * f];
   }
-  const CELL = 3;   // density cell size in canvas pixels
+  const CELL = 3;
   function draw() {
-    ctx.clearRect(0, 0, cv.width, cv.height);
-    if (!tf) { ctx.fillStyle = "#888"; ctx.fillText("No positions for this map.", 20, 30); return; }
-    const gw = Math.ceil(cv.width / CELL), gh = Math.ceil(cv.height / CELL);
-    const grid = new Float32Array(gw * gh);
-    let max = 1;
+    ctx.fillStyle = col("--bg"); ctx.fillRect(0, 0, cv.width, cv.height);
+    if (!base) { ctx.fillStyle = "#888"; ctx.fillText("No positions for this map.", 20, 30); return; }
+    // density heatmap
+    const gw = Math.ceil(cv.width / CELL), gh = Math.ceil(cv.height / CELL), grid = new Float32Array(gw * gh);
     for (const p of data.points) {
       if (hidden.has((data.floors[p[2]] || {}).name)) continue;
-      const [cx, cy] = tf.toCv(p[0], p[1]);
+      const [cx, cy] = toScreen(p[0], p[1]);
       const gx = cx / CELL | 0, gy = cy / CELL | 0;
-      if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) continue;
-      const v = ++grid[gy * gw + gx];
-      if (v > max) max = v;
+      if (gx >= 0 && gy >= 0 && gx < gw && gy < gh) grid[gy * gw + gx]++;
     }
-    // One box-blur pass so sparse maps read as continuous space instead of speckle.
     const blur = new Float32Array(gw * gh);
-    for (let gy = 0; gy < gh; gy++) {
-      for (let gx = 0; gx < gw; gx++) {
-        let s = 0, n = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          const yy = gy + dy; if (yy < 0 || yy >= gh) continue;
-          for (let dx = -1; dx <= 1; dx++) {
-            const xx = gx + dx; if (xx < 0 || xx >= gw) continue;
-            s += grid[yy * gw + xx]; n++;
-          }
-        }
-        blur[gy * gw + gx] = s / n;
-      }
+    for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) {
+      let s = 0, n = 0;
+      for (let dy = -1; dy <= 1; dy++) { const yy = gy + dy; if (yy < 0 || yy >= gh) continue;
+        for (let dx = -1; dx <= 1; dx++) { const xx = gx + dx; if (xx < 0 || xx >= gw) continue; s += grid[yy * gw + xx]; n++; } }
+      blur[gy * gw + gx] = s / n;
     }
-    let bmax = 1;
-    for (let i = 0; i < blur.length; i++) if (blur[i] > bmax) bmax = blur[i];
-    const norm = Math.max(1, bmax * 0.6);         // let busy cells saturate so quiet rooms still register
-    const img = ctx.createImageData(cv.width, cv.height);
-    const d = img.data;
-    for (let y = 0; y < cv.height; y++) {
-      const gy = (y / CELL | 0) * gw;
-      for (let x = 0; x < cv.width; x++) {
-        const v = blur[gy + (x / CELL | 0)];
-        if (!v) continue;
-        const [r, g, b, a] = heat(Math.pow(v / norm, 0.5));
-        const o = (y * cv.width + x) * 4;
-        d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = a;
-      }
-    }
+    let bmax = 1; for (let i = 0; i < blur.length; i++) if (blur[i] > bmax) bmax = blur[i];
+    const norm = Math.max(1, bmax * 0.6);
+    const img = ctx.createImageData(cv.width, cv.height), d = img.data;
+    for (let y = 0; y < cv.height; y++) { const gy = (y / CELL | 0) * gw;
+      for (let x = 0; x < cv.width; x++) { const v = blur[gy + (x / CELL | 0)]; if (!v) continue;
+        const [r, g, b, a] = heat(Math.pow(v / norm, 0.5)); const o = (y * cv.width + x) * 4;
+        d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = a; } }
     ctx.putImageData(img, 0, 0);
-    const sug = $("showSug").checked ? (data.suggested || []) : [];
-    for (const r of sug) pin(r, true);
+    // walls
+    if ($("showWalls").checked) {
+      const sz = Math.max(2, 2.4 * view.s);
+      for (const w of walls) {
+        if (hidden.has(w.floor)) continue;
+        const [cx, cy] = toScreen(w.x, w.y);
+        if (cx < -5 || cy < -5 || cx > cv.width + 5 || cy > cv.height + 5) continue;
+        ctx.fillStyle = w.reinforced ? col("--reinf") : col("--wall");
+        ctx.fillRect(cx - sz / 2, cy - sz / 2, sz, sz);
+      }
+    }
+    if ($("showSug").checked) for (const r of (data.suggested || [])) pin(r, true);
     for (const r of rooms) pin(r, false);
+    if (pending) { const [cx, cy] = toScreen(pending.x, pending.y); ctx.beginPath(); ctx.arc(cx, cy, 7, 0, 7); ctx.strokeStyle = col("--good"); ctx.lineWidth = 2; ctx.stroke(); }
   }
   function pin(r, suggested) {
     if (hidden.has(r.floor)) return;
-    const [cx, cy] = tf.toCv(r.x, r.y);
+    const [cx, cy] = toScreen(r.x, r.y);
+    const c = col(KIND_COLOR[r.kind] || "--accent");
     ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 7);
-    ctx.fillStyle = suggested ? "transparent" : "#fff"; if (!suggested) ctx.fill();
-    ctx.lineWidth = 2; ctx.strokeStyle = suggested ? "var(--warn)" : getComputedStyle(document.body).getPropertyValue("--accent"); ctx.stroke();
-    ctx.fillStyle = getComputedStyle(document.body).color; ctx.font = "12px system-ui";
+    ctx.fillStyle = suggested ? "transparent" : c; if (!suggested) ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = suggested ? col("--warn") : c; ctx.stroke();
+    ctx.fillStyle = col("--ink"); ctx.font = "12px system-ui";
     ctx.fillText(r.name + (suggested ? " ?" : ""), cx + 8, cy + 4);
   }
 
-  let pending = null;     // {x,y} of a click awaiting a name
-  cv.addEventListener("click", (e) => {
-    if (!tf) return;
+  // ── pan / zoom / click ──
+  let down = null, moved = false;
+  cv.addEventListener("pointerdown", (e) => { down = { x: e.offsetX, y: e.offsetY, ox: view.ox, oy: view.oy }; moved = false; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener("pointermove", (e) => {
+    if (!down) return;
+    const dx = e.offsetX - down.x, dy = e.offsetY - down.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) { moved = true; cv.classList.add("panning"); view.ox = down.ox + dx; view.oy = down.oy + dy; draw(); }
+  });
+  cv.addEventListener("pointerup", (e) => {
+    cv.classList.remove("panning");
+    if (down && !moved) addPendingAt(e.offsetX * cv.width / cv.clientWidth, e.offsetY * cv.height / cv.clientHeight);
+    down = null;
+  });
+  cv.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const mx = e.offsetX * cv.width / cv.clientWidth, my = e.offsetY * cv.height / cv.clientHeight;
+    const f = e.deltaY < 0 ? 1.2 : 1 / 1.2, ns = Math.max(0.6, Math.min(12, view.s * f));
+    const k = ns / view.s;
+    view.ox = mx - (mx - view.ox) * k; view.oy = my - (my - view.oy) * k; view.s = ns;
+    draw();
+  }, { passive: false });
+
+  let pending = null;
+  function addPendingAt(sx, sy) {
+    if (!base) return;
     if (!floor) { hint("Pick a floor first — the pin needs to know which level it's on.", true); return; }
-    const rect = cv.getBoundingClientRect();
-    const [wx, wy] = tf.toWorld((e.clientX - rect.left) * cv.width / rect.width, (e.clientY - rect.top) * cv.height / rect.height);
+    const [wx, wy] = toWorld(sx, sy);
     pending = { x: wx, y: wy };
     $("nameInput").disabled = false; $("addBtn").disabled = false; $("nameInput").focus();
-    hint(`Name the room on ${floor} and press Add.`);
-    draw();
-    const [cx, cy] = tf.toCv(wx, wy);
-    ctx.beginPath(); ctx.arc(cx, cy, 7, 0, 7); ctx.strokeStyle = "var(--good)"; ctx.lineWidth = 2; ctx.stroke();
-  });
+    hint(`Name this ${kind} on ${floor} and press Add.`); draw();
+  }
   function addRoom() {
     const name = $("nameInput").value.trim();
     if (!pending || !name || !floor) return;
     const fz = (data.floors.find(f => f.name === floor) || {}).z || 0;
     rooms = rooms.filter(r => r.name.toLowerCase() !== name.toLowerCase());
-    rooms.push({ name, floor, x: +pending.x.toFixed(1), y: +pending.y.toFixed(1), z: fz });
+    rooms.push({ name, floor, kind, x: +pending.x.toFixed(1), y: +pending.y.toFixed(1), z: fz });
     pending = null; $("nameInput").value = ""; $("nameInput").disabled = true; $("addBtn").disabled = true;
-    dirty = true; $("saveBtn").disabled = false; renderRooms(); draw(); hint("Added. Click the next room.");
+    dirty = true; $("saveBtn").disabled = false; renderRooms(); draw(); hint("Added. Click the next one.");
   }
   $("addBtn").addEventListener("click", addRoom);
   $("nameInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addRoom(); });
 
   function renderRooms() {
-    $("roomCount").textContent = rooms.length + " room" + (rooms.length === 1 ? "" : "s");
+    $("roomCount").textContent = rooms.length + " pin" + (rooms.length === 1 ? "" : "s");
     $("roomList").innerHTML = rooms.length ? rooms.map((r, i) =>
-      `<li><span><span class="pill">${esc(r.floor)}</span> ${esc(r.name)}</span><a data-i="${i}">remove</a></li>`).join("")
-      : `<li class="muted">No rooms yet.</li>`;
+      `<li><span><span class="pill">${esc(r.floor)}</span> <span class="pill">${esc(r.kind)}</span> ${esc(r.name)}</span><a data-i="${i}">remove</a></li>`).join("")
+      : `<li class="muted">No pins yet.</li>`;
     $("roomList").querySelectorAll("a[data-i]").forEach(a => a.addEventListener("click", () => {
       rooms.splice(+a.dataset.i, 1); dirty = true; $("saveBtn").disabled = false; renderRooms(); draw();
     }));
@@ -209,12 +241,12 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   function floorButtons() {
     $("floorRow").innerHTML = (data.floors || []).map(f =>
       `<button data-f="${esc(f.name)}" aria-pressed="false">${esc(f.name) || "floor"}</button>`).join("")
-      + `<button id="allFloors" class="ghost">show all</button>`;
+      + `<button id="allFloors" class="ghost">all floors</button>`;
     $("floorRow").querySelectorAll("button[data-f]").forEach(b => b.addEventListener("click", () => {
       floor = b.dataset.f;
       $("floorRow").querySelectorAll("button[data-f]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
       hidden = new Set(data.floors.map(f => f.name).filter(n => n !== floor));
-      hint(`Labelling ${floor}. Click a room.`); draw();
+      hint(`Labelling ${floor}. Pick a type and click a room.`); draw();
     }));
     $("allFloors").addEventListener("click", () => {
       floor = null; hidden = new Set();
@@ -222,30 +254,55 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
       hint("Showing all floors. Pick one floor to add pins."); draw();
     });
   }
+  function kindButtons() {
+    $("kindRow").innerHTML = `<span class="small muted">type:</span>` + KINDS.map(k =>
+      `<button data-k="${k}" aria-pressed="${k === kind}">${k}</button>`).join("");
+    $("kindRow").querySelectorAll("button[data-k]").forEach(b => b.addEventListener("click", () => {
+      kind = b.dataset.k;
+      $("kindRow").querySelectorAll("button[data-k]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    }));
+  }
   const hint = (t, warn) => { const h = $("hint"); h.textContent = t; h.className = "small " + (warn ? "good" : "muted"); };
   $("showSug").addEventListener("change", draw);
+  $("showWalls").addEventListener("change", draw);
+  $("resetView").addEventListener("click", resetView);
+
+  async function loadWalls(map, rebuild) {
+    walls = [];
+    try { walls = (await api(`/api/v1/rooms/structures?map=${encodeURIComponent(map)}${rebuild ? "&rebuild=true" : ""}`)).walls || []; }
+    catch (e) { /* walls are optional */ }
+    draw();
+  }
+  $("rebuildWalls").addEventListener("click", async () => {
+    const map = $("mapSel").value; if (!map) return;
+    $("rebuildWalls").disabled = true; hint("Re-reading walls from the replays (can take a minute)…");
+    await loadWalls(map, true); $("rebuildWalls").disabled = false; hint(`${walls.length} wall surfaces loaded.`);
+  });
 
   async function loadMap(map) {
     $("saveMsg").textContent = ""; hint("Loading…");
     try { data = await api(`/api/v1/rooms/scatter?map=${encodeURIComponent(map)}`); }
     catch (e) { hint("Could not load: " + e.message, true); return; }
-    rooms = (data.rooms || []).map(r => ({ ...r }));
-    floor = null; hidden = new Set(); dirty = false; $("saveBtn").disabled = true;
+    rooms = (data.rooms || []).map(r => ({ kind: "room", ...r }));
+    floor = null; hidden = new Set(); dirty = false; $("saveBtn").disabled = true; pending = null;
+    view = { s: 1, ox: 0, oy: 0 };
     $("mapInfo").textContent = `${data.points.length} points · ${(data.floors || []).length} floors`;
-    fit(); floorButtons(); renderRooms(); draw();
-    hint(rooms.length ? "Loaded saved rooms. Pick a floor to add more." : "Pick a floor, then click a room and name it.");
+    fitBase(); floorButtons(); renderRooms(); draw();
+    hint(rooms.length ? "Loaded saved pins. Pick a floor to add more." : "Pick a floor and a type, then click a room.");
+    loadWalls(map, false);
   }
   $("mapSel").addEventListener("change", () => {
-    if (dirty && !confirm("Switch maps? Unsaved room labels will be lost.")) { return; }
+    if (dirty && !confirm("Switch maps? Unsaved pins will be lost.")) return;
     if ($("mapSel").value) loadMap($("mapSel").value);
   });
   $("saveBtn").addEventListener("click", async () => {
     try {
       const r = await api(`/api/v1/rooms?map=${encodeURIComponent($("mapSel").value)}`, { method: "PUT", body: { rooms } });
-      dirty = false; $("saveBtn").disabled = true; $("saveMsg").textContent = `Saved ${r.saved} rooms.`; $("saveMsg").className = "small good";
+      dirty = false; $("saveBtn").disabled = true; $("saveMsg").textContent = `Saved ${r.saved} pins.`; $("saveMsg").className = "small good";
     } catch (e) { $("saveMsg").textContent = e.message; $("saveMsg").className = "small"; }
   });
 
+  kindButtons();
   (async () => {
     if (!key) { hint("Open the dashboard and sign in first (this page uses its saved key).", true); return; }
     try {
