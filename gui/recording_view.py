@@ -127,6 +127,7 @@ class RecordingView(QWidget):
         self._recording_path: str | None     = None
         self._game_recording_active = False
         self._streaming_active      = False
+        self._session_log = None     # open text file mirroring the recording panel for the current session
         self._starting              = False
         self._obs_started.connect(self._finish_start_session)
         self._build_ui()
@@ -148,6 +149,7 @@ class RecordingView(QWidget):
                 return
 
             self._log_message("Shutting down...")
+            self._close_session_log()
 
             # ── Step 1: Stop OBS watchdog ─────────────────────────────
             if hasattr(self, "_obs_watchdog"):
@@ -541,6 +543,7 @@ class RecordingView(QWidget):
         # it is driven from a worker thread; the window stays responsive.
         self._starting = True
         self._start_btn.setEnabled(False)
+        self._open_session_log()
         self._set_status("⏳ Starting OBS recording...", "#e0a830")
         self._log_message("Starting OBS recording (can take a few seconds)...")
         import threading
@@ -602,6 +605,10 @@ class RecordingView(QWidget):
         self._stop_btn.setEnabled(True)
         self._set_status("🔴 Recording...", "#e05555")
         self._log_message("Session started. OBS recording. Folder snapshot taken.")
+
+        # Self-check: say what (if anything) is wrong now rather than in the debrief. Recording has already
+        # started, so this never blocks it; it just reports and warns once about real problems.
+        self._run_session_selfcheck()
 
         # ── Watchdog timer — checks OBS is still recording every 60s ──
         from PySide6.QtCore import QTimer
@@ -950,11 +957,69 @@ class RecordingView(QWidget):
         self._status_label.setText(f"Status: {text}")
         self._status_label.setStyleSheet(f"font-size: 14px; color: {color};")
 
+    def _run_session_selfcheck(self) -> None:
+        """Run the OBS/Discord/recording self-check and report it; pop one warning if anything is wrong."""
+        try:
+            checks = self.obs.session_preflight()
+        except Exception as e:
+            self._log_message(f"Self-check could not run: {e}")
+            return
+        self._log_message("— session self-check —")
+        for c in checks:
+            mark = "✓" if c["ok"] else ("⚠" if c["level"] == "warn" else "✗")
+            self._log_message(f"  {mark} {c['msg']}")
+        problems = [c for c in checks if not c["ok"]]
+        errors = [c for c in problems if c["level"] == "error"]
+        if problems:
+            QMessageBox.warning(
+                self, "Session self-check",
+                ("Some things need attention before this recording is any good:\n\n" if errors
+                 else "The recording is running, with a couple of things worth a look:\n\n")
+                + "\n".join(f"  • {c['msg']}" for c in problems)
+                + "\n\nRecording is already running; fix these and they take effect from now on.",
+            )
+
     def _log_message(self, message: str) -> None:
         self._log.append(message)
         # Auto-scroll to bottom
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
+        # Also keep it on disk so there's nothing to copy out of the panel by hand: into the rolling
+        # r6analyzer.log (print() is captured there, see app/logging_setup.py) and, during a session, into a
+        # plain per-session text file named by when the session started.
+        stamped = f"{time.strftime('%H:%M:%S')}  {message}"
+        print(f"[Session] {message}")
+        if self._session_log is not None:
+            try:
+                self._session_log.write(stamped + "\n")
+                self._session_log.flush()
+            except Exception:
+                pass
+
+    def _open_session_log(self) -> None:
+        """Start a fresh per-session log file in data/logs/sessions/ (on the USB). Never raises."""
+        self._close_session_log()
+        try:
+            from app.config import LOGS_DIR
+            folder = LOGS_DIR / "sessions"
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"session_{time.strftime('%Y-%m-%d_%H-%M-%S')}.log"
+            self._session_log = open(path, "w", encoding="utf-8")
+            self._session_log.write(f"R6Analyzer session log — started {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            self._session_log.flush()
+            self._log_message(f"Writing this session's log to {path}")
+        except Exception as e:
+            self._session_log = None
+            print(f"[Session] could not open a session log file: {e}")
+
+    def _close_session_log(self) -> None:
+        if self._session_log is not None:
+            try:
+                self._session_log.write(f"\n— session log closed {time.strftime('%Y-%m-%d %H:%M:%S')} —\n")
+                self._session_log.close()
+            except Exception:
+                pass
+            self._session_log = None
 
 
     # =====================================================

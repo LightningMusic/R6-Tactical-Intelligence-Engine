@@ -126,6 +126,18 @@ def _local_websocket_profile(config_path=None) -> Optional[dict]:
             "password": cfg.get("server_password", "") if cfg.get("auth_required", True) else ""}
 
 
+def _discord_running() -> bool:
+    """Whether Discord's desktop app is running — the team's voice is captured from Discord.exe, so a session
+    with Discord closed records a silent team track."""
+    for proc in psutil.process_iter(["name"]):
+        try:
+            if proc.info["name"] and proc.info["name"].lower() == "discord.exe":
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return False
+
+
 def _obs_is_running() -> bool:
     for proc in psutil.process_iter(["name", "exe"]):
         try:
@@ -191,7 +203,11 @@ class OBSController:
         print(f"[OBS] Launching: {OBS_EXE_PATH}")
         try:
             subprocess.Popen(
-                [str(OBS_EXE_PATH)],   # ← remove --minimize-to-tray
+                # --disable-shutdown-check: the app ends OBS with TerminateProcess on exit, which OBS reads as a
+                # crash, so every launch otherwise opens the "Safe Mode?" dialog and waits for a click. This
+                # flag skips that check and starts normally. --disable-missing-files-check likewise suppresses
+                # the "some sources are missing" prompt on a fresh profile.
+                [str(OBS_EXE_PATH), "--disable-shutdown-check", "--disable-missing-files-check"],
                 cwd=str(OBS_EXE_PATH.parent),
                 # no CREATE_NO_WINDOW — let it show
             )
@@ -789,6 +805,60 @@ class OBSController:
         except Exception as e:
             print(f"[OBS] Stream stop error: {e}")
             return False
+
+    # =====================================================
+    # SESSION SELF-CHECK
+    # =====================================================
+
+    def session_preflight(self, scene_name: Optional[str] = None) -> list[dict]:
+        """Checks the things that have silently ruined a recording before, so Start can say what's wrong instead
+        of the host finding out in the debrief: OBS connected, Discord running (the team track is captured from
+        it), both comms sources present and on their own tracks, the recording format multi-track, and the disk
+        not nearly full. Returns [{"ok", "level", "msg"}] (level "warn" = recording still works, "error" = comms
+        or the recording itself is at risk). Never raises; a check it can't run is reported, not skipped."""
+        checks: list[dict] = []
+
+        def add(ok, msg, level="error"):
+            checks.append({"ok": bool(ok), "level": "ok" if ok else level, "msg": msg})
+
+        client = self._client
+        if not self._connected or client is None:
+            add(False, "OBS is not connected — nothing will be recorded.")
+            return checks
+        add(True, "OBS is connected.")
+
+        add(_discord_running(), "Discord is running (the team's voice is captured from it)." if _discord_running()
+            else "Discord does not appear to be running — the team track will be silent. Open Discord before Start.")
+
+        scene = scene_name or settings.OBS_SCENE_NAME
+        try:
+            items = {i.get("sourceName") for i in
+                     (client.call(obs_requests.GetSceneItemList(sceneName=scene)).getSceneItems() or [])}
+            for name, what in ((DISCORD_INPUT_NAME, "the team's Discord audio"), (MIC_INPUT_NAME, "your microphone")):
+                add(name in items, f"{what} is in the recording scene." if name in items
+                    else f"{what} ({name}) is missing from scene '{scene}'.")
+        except Exception as e:
+            add(False, f"Could not read the recording scene '{scene}': {e}")
+
+        try:
+            fmt = client.call(obs_requests.GetProfileParameter(parameterCategory="AdvOut",
+                                                               parameterName="RecFormat2")).datain.get("parameterValue")
+            add(bool(fmt) and "mkv" in str(fmt).lower(),
+                "Recording format keeps the separate voice tracks (Matroska)." if fmt and "mkv" in str(fmt).lower()
+                else f"Recording format is '{fmt}', not Matroska — your mic and Discord won't be separate tracks.",
+                level="warn")
+        except Exception as e:
+            add(False, f"Could not read the recording format: {e}", level="warn")
+
+        try:
+            import shutil
+            free_gb = shutil.disk_usage(str(RECORDINGS_DIR)).free / (1024 ** 3)
+            add(free_gb >= 10, f"{free_gb:.0f} GB free for the recording." if free_gb >= 10
+                else f"Only {free_gb:.1f} GB free — a long session may not fit.", level="warn")
+        except Exception:
+            pass
+
+        return checks
 
 
     def get_stream_status(self) -> dict:
