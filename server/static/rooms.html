@@ -76,7 +76,6 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   const server = () => (get(LS_URL) || location.origin).replace(/\/$/, "");
   const key = get(LS_TOKEN);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const FLOOR_COLORS = ["#7ea2ff", "#4cc38a", "#e8b04b", "#f2766b", "#c78bff", "#49c7d4"];
 
   async function api(path, opts = {}) {
     const headers = { Authorization: `Bearer ${key}` };
@@ -105,16 +104,60 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
       toWorld: (cx, cy) => [b.minx + (cx - ox) / s, b.miny + (cv.height - cy - oy) / s],
     };
   }
+  // A ramp from the map background up through blue/cyan/green to warm, for a density heatmap: walls show as
+  // the un-walked gaps, busy rooms and corridors as bright paths.
+  const STOPS = [[0, 0, 0, 0], [30, 70, 150, 90], [40, 170, 190, 170], [90, 210, 120, 220], [245, 215, 90, 255]];
+  function heat(t) {
+    const x = Math.max(0, Math.min(1, t)) * (STOPS.length - 1), i = Math.min(STOPS.length - 2, x | 0), f = x - i;
+    const a = STOPS[i], b = STOPS[i + 1];
+    return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, a[3] + (b[3] - a[3]) * f];
+  }
+  const CELL = 3;   // density cell size in canvas pixels
   function draw() {
     ctx.clearRect(0, 0, cv.width, cv.height);
     if (!tf) { ctx.fillStyle = "#888"; ctx.fillText("No positions for this map.", 20, 30); return; }
+    const gw = Math.ceil(cv.width / CELL), gh = Math.ceil(cv.height / CELL);
+    const grid = new Float32Array(gw * gh);
+    let max = 1;
     for (const p of data.points) {
-      const fname = (data.floors[p[2]] || {}).name;
-      if (hidden.has(fname)) continue;
+      if (hidden.has((data.floors[p[2]] || {}).name)) continue;
       const [cx, cy] = tf.toCv(p[0], p[1]);
-      ctx.fillStyle = FLOOR_COLORS[p[2] % FLOOR_COLORS.length] + "33";
-      ctx.fillRect(cx, cy, 2, 2);
+      const gx = cx / CELL | 0, gy = cy / CELL | 0;
+      if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) continue;
+      const v = ++grid[gy * gw + gx];
+      if (v > max) max = v;
     }
+    // One box-blur pass so sparse maps read as continuous space instead of speckle.
+    const blur = new Float32Array(gw * gh);
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        let s = 0, n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = gy + dy; if (yy < 0 || yy >= gh) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = gx + dx; if (xx < 0 || xx >= gw) continue;
+            s += grid[yy * gw + xx]; n++;
+          }
+        }
+        blur[gy * gw + gx] = s / n;
+      }
+    }
+    let bmax = 1;
+    for (let i = 0; i < blur.length; i++) if (blur[i] > bmax) bmax = blur[i];
+    const norm = Math.max(1, bmax * 0.6);         // let busy cells saturate so quiet rooms still register
+    const img = ctx.createImageData(cv.width, cv.height);
+    const d = img.data;
+    for (let y = 0; y < cv.height; y++) {
+      const gy = (y / CELL | 0) * gw;
+      for (let x = 0; x < cv.width; x++) {
+        const v = blur[gy + (x / CELL | 0)];
+        if (!v) continue;
+        const [r, g, b, a] = heat(Math.pow(v / norm, 0.5));
+        const o = (y * cv.width + x) * 4;
+        d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = a;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
     const sug = $("showSug").checked ? (data.suggested || []) : [];
     for (const r of sug) pin(r, true);
     for (const r of rooms) pin(r, false);

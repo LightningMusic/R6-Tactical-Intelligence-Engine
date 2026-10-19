@@ -20,7 +20,7 @@ from typing import Optional
 
 from server.match_db import get_match_repo
 
-MAX_SCATTER = 3500           # points sent to the labelling page (downsampled)
+MAX_SCATTER = 9000           # points sent to the labelling page (downsampled) — enough for a readable heatmap
 ROOM_MAX_M = 8.0             # a position farther than this from every room on its floor is left unnamed
 FLOOR_GAP = 1.6
 
@@ -92,7 +92,7 @@ def scatter(map_name: str) -> dict:
     pts: list[list] = []
     for r in rounds:
         for pl in (r["positions"].get("players") or {}).values():
-            for p in pl["pts"][::3]:                       # every 3rd sample is plenty for a shape
+            for p in pl["pts"][::2]:
                 pts.append((p[1], p[2], _floor_of(p[3], floors)))
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
