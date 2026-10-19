@@ -8,7 +8,7 @@
 <style>
 :root {
   --bg: #11151b; --panel: #19202a; --ink: #e5e9ef; --muted: #96a0b0; --line: #2b3441; --soft: #212a36;
-  --accent: #7ea2ff; --good: #4cc38a; --warn: #e8b04b; --wall: #d2593f; --reinf: #f0923e;
+  --accent: #7ea2ff; --good: #4cc38a; --warn: #e8b04b; --wall: #ff5347; --reinf: #ffab38;
   --mono: ui-monospace, "Cascadia Mono", Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: dark;
 }
@@ -51,8 +51,9 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   <select id="mapSel"><option value="">Loading maps…</option></select>
   <span id="mapInfo" class="pill"></span>
   <span style="flex:1"></span>
+  <label class="small"><input type="checkbox" id="showHeat" checked> heatmap</label>
   <label class="small"><input type="checkbox" id="showWalls" checked> walls</label>
-  <label class="small"><input type="checkbox" id="showSug" checked> site suggestions</label>
+  <label class="small"><input type="checkbox" id="showSug" checked> sites</label>
   <button id="saveBtn" disabled>Save labels</button>
   <span id="saveMsg" class="small"></span>
 </header>
@@ -137,7 +138,23 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   function draw() {
     ctx.fillStyle = col("--bg"); ctx.fillRect(0, 0, cv.width, cv.height);
     if (!base) { ctx.fillStyle = "#888"; ctx.fillText("No positions for this map.", 20, 30); return; }
-    // density heatmap
+    if ($("showHeat").checked) drawHeat();
+    // walls
+    if ($("showWalls").checked) {
+      const heatOn = $("showHeat").checked, sz = Math.max(heatOn ? 3 : 4, (heatOn ? 2.6 : 3.4) * view.s);
+      for (const w of walls) {
+        if (hidden.has(w.floor)) continue;
+        const [cx, cy] = toScreen(w.x, w.y);
+        if (cx < -5 || cy < -5 || cx > cv.width + 5 || cy > cv.height + 5) continue;
+        ctx.fillStyle = w.reinforced ? col("--reinf") : col("--wall");
+        ctx.fillRect(cx - sz / 2, cy - sz / 2, sz, sz);
+      }
+    }
+    if ($("showSug").checked) for (const r of (data.suggested || [])) pin(r, true);
+    for (const r of rooms) pin(r, false);
+    if (pending) { const [cx, cy] = toScreen(pending.x, pending.y); ctx.beginPath(); ctx.arc(cx, cy, 7, 0, 7); ctx.strokeStyle = col("--good"); ctx.lineWidth = 2; ctx.stroke(); }
+  }
+  function drawHeat() {
     const gw = Math.ceil(cv.width / CELL), gh = Math.ceil(cv.height / CELL), grid = new Float32Array(gw * gh);
     for (const p of data.points) {
       if (hidden.has((data.floors[p[2]] || {}).name)) continue;
@@ -160,20 +177,6 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
         const [r, g, b, a] = heat(Math.pow(v / norm, 0.5)); const o = (y * cv.width + x) * 4;
         d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = a; } }
     ctx.putImageData(img, 0, 0);
-    // walls
-    if ($("showWalls").checked) {
-      const sz = Math.max(2, 2.4 * view.s);
-      for (const w of walls) {
-        if (hidden.has(w.floor)) continue;
-        const [cx, cy] = toScreen(w.x, w.y);
-        if (cx < -5 || cy < -5 || cx > cv.width + 5 || cy > cv.height + 5) continue;
-        ctx.fillStyle = w.reinforced ? col("--reinf") : col("--wall");
-        ctx.fillRect(cx - sz / 2, cy - sz / 2, sz, sz);
-      }
-    }
-    if ($("showSug").checked) for (const r of (data.suggested || [])) pin(r, true);
-    for (const r of rooms) pin(r, false);
-    if (pending) { const [cx, cy] = toScreen(pending.x, pending.y); ctx.beginPath(); ctx.arc(cx, cy, 7, 0, 7); ctx.strokeStyle = col("--good"); ctx.lineWidth = 2; ctx.stroke(); }
   }
   function pin(r, suggested) {
     if (hidden.has(r.floor)) return;
@@ -265,6 +268,7 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   const hint = (t, warn) => { const h = $("hint"); h.textContent = t; h.className = "small " + (warn ? "good" : "muted"); };
   $("showSug").addEventListener("change", draw);
   $("showWalls").addEventListener("change", draw);
+  $("showHeat").addEventListener("change", draw);
   $("resetView").addEventListener("click", resetView);
 
   async function loadWalls(map, rebuild) {
