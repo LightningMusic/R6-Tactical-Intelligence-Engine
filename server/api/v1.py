@@ -504,6 +504,34 @@ def put_roster(body: dict, _client: str = Depends(verify_api_token)) -> dict:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+# ── Room (callout) labels per map (host only; the /rooms labelling page) ──────
+
+@router.get("/rooms/maps")
+def rooms_maps(_client: str = Depends(verify_api_token)) -> dict:
+    from server.services import rooms
+    return {"maps": rooms.maps_with_positions()}
+
+
+@router.get("/rooms/scatter")
+def rooms_scatter(map: str, _client: str = Depends(verify_api_token)) -> dict:
+    """Everywhere players have been on this map (downsampled), the floors, and starting pins from the sites."""
+    from server.services import rooms
+    return rooms.scatter(map)
+
+
+@router.get("/rooms")
+def rooms_get(map: str, _client: str = Depends(verify_api_token)) -> dict:
+    from server.services import rooms
+    return {"map": map, "rooms": rooms.get_rooms(map)}
+
+
+@router.put("/rooms")
+def rooms_put(body: dict, map: str, _client: str = Depends(verify_api_token)) -> dict:
+    """{"rooms": [{"name", "floor", "x", "y", "z"}, ...]} replaces this map's room labels."""
+    from server.services import rooms
+    return {"map": map, "saved": rooms.save_rooms(map, body.get("rooms") or [])}
+
+
 @router.post("/sessions/{session_id}/reread-replays", status_code=202)
 def reread_replays(session_id: str, ai: bool = True, _client: str = Depends(verify_api_token)) -> dict:
     """Re-read this session's stored replays for gadget usage, objective facts and the kill order (no

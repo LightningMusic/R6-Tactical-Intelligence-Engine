@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Map Room Labels</title>
+<style>
+:root {
+  --bg: #11151b; --panel: #19202a; --ink: #e5e9ef; --muted: #96a0b0; --line: #2b3441; --soft: #212a36;
+  --accent: #7ea2ff; --good: #4cc38a; --warn: #e8b04b;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) { :root {
+  --bg: #f3f4f6; --panel: #fff; --ink: #18202c; --muted: #5d6676; --line: #d8dce3; --soft: #eceff3;
+  --accent: #2f5bd3; --good: #1c7a48; --warn: #9a5b00; color-scheme: light } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); }
+header { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+h1 { font-size: 1.15rem; margin: 0; }
+main { display: flex; gap: 12px; padding: 12px 16px; flex-wrap: wrap; align-items: flex-start; }
+.wrap { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow: hidden; }
+canvas { display: block; background: var(--bg); touch-action: none; cursor: crosshair; max-width: 100%; }
+aside { flex: 1; min-width: 240px; max-width: 360px; display: grid; gap: 10px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+button, select, input { font: inherit; border-radius: 7px; border: 1px solid var(--line); background: var(--soft); color: var(--ink); padding: 6px 9px; }
+button { background: var(--accent); color: #fff; border: 0; cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+button:disabled { opacity: .5; cursor: default; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.floors button { background: var(--soft); color: var(--ink); border: 1px solid var(--line); padding: 4px 10px; }
+.floors button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; max-height: 40vh; overflow: auto; }
+li { display: flex; justify-content: space-between; gap: 8px; font-size: .9rem; padding: 3px 6px; border-radius: 6px; }
+li:hover { background: var(--soft); }
+li a { color: var(--warn); text-decoration: none; cursor: pointer; }
+.muted { color: var(--muted); } .small { font-size: .85rem; } .good { color: var(--good); }
+.pill { font: .72rem var(--mono); background: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; color: var(--muted); }
+#hint { min-height: 1.3em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Map room labels</h1>
+  <select id="mapSel"><option value="">Loading maps…</option></select>
+  <span id="mapInfo" class="pill"></span>
+  <span style="flex:1"></span>
+  <button id="saveBtn" disabled>Save labels</button>
+  <span id="saveMsg" class="small"></span>
+</header>
+<main>
+  <div class="wrap"><canvas id="cv" width="640" height="640"></canvas></div>
+  <aside>
+    <div class="card">
+      <div class="row floors" id="floorRow"></div>
+      <p id="hint" class="small muted">Pick a floor, then click a room on the map and name it.</p>
+      <div class="row">
+        <input id="nameInput" placeholder="Room name (e.g. CCTV)" maxlength="40" style="flex:1" disabled>
+        <button id="addBtn" disabled>Add</button>
+      </div>
+      <div class="row small"><label><input type="checkbox" id="showSug" checked> show suggested from sites</label></div>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between"><b>Rooms</b><span id="roomCount" class="muted small"></span></div>
+      <ul id="roomList"><li class="muted">No rooms yet.</li></ul>
+    </div>
+    <div class="card small muted">Dots are everywhere players have actually walked, by floor. Click to drop a named pin; pins snap nothing — put them in the middle of the room. Save when done; unsaved changes are kept until you switch maps.</div>
+  </aside>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const LS_URL = "r6_dashboard_server_url", LS_TOKEN = "r6_dashboard_api_token";
+  const get = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const server = () => (get(LS_URL) || location.origin).replace(/\/$/, "");
+  const key = get(LS_TOKEN);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const FLOOR_COLORS = ["#7ea2ff", "#4cc38a", "#e8b04b", "#f2766b", "#c78bff", "#49c7d4"];
+
+  async function api(path, opts = {}) {
+    const headers = { Authorization: `Bearer ${key}` };
+    let body = opts.body;
+    if (body && !(body instanceof FormData)) { headers["Content-Type"] = "application/json"; body = JSON.stringify(body); }
+    const res = await fetch(server() + path, { method: opts.method || "GET", headers, body, cache: "no-store", referrerPolicy: "no-referrer" });
+    let data = null; try { data = await res.json(); } catch (e) {}
+    if (!res.ok) throw new Error((data && data.detail) || `HTTP ${res.status}`);
+    return data;
+  }
+
+  const cv = $("cv"), ctx = cv.getContext("2d");
+  let data = null, rooms = [], floor = null, hidden = new Set(), dirty = false;
+  let tf = null;          // world -> canvas transform
+
+  function fit() {
+    const b = data.bounds;
+    if (!b) { tf = null; return; }
+    const pad = 24, w = cv.width - 2 * pad, h = cv.height - 2 * pad;
+    const sx = w / Math.max(1e-3, b.maxx - b.minx), sy = h / Math.max(1e-3, b.maxy - b.miny);
+    const s = Math.min(sx, sy);
+    // y is flipped so the plot reads like a map (north up); center it
+    const ox = pad + (w - s * (b.maxx - b.minx)) / 2, oy = pad + (h - s * (b.maxy - b.miny)) / 2;
+    tf = {
+      toCv: (x, y) => [ox + (x - b.minx) * s, cv.height - (oy + (y - b.miny) * s)],
+      toWorld: (cx, cy) => [b.minx + (cx - ox) / s, b.miny + (cv.height - cy - oy) / s],
+    };
+  }
+  function draw() {
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    if (!tf) { ctx.fillStyle = "#888"; ctx.fillText("No positions for this map.", 20, 30); return; }
+    for (const p of data.points) {
+      const fname = (data.floors[p[2]] || {}).name;
+      if (hidden.has(fname)) continue;
+      const [cx, cy] = tf.toCv(p[0], p[1]);
+      ctx.fillStyle = FLOOR_COLORS[p[2] % FLOOR_COLORS.length] + "33";
+      ctx.fillRect(cx, cy, 2, 2);
+    }
+    const sug = $("showSug").checked ? (data.suggested || []) : [];
+    for (const r of sug) pin(r, true);
+    for (const r of rooms) pin(r, false);
+  }
+  function pin(r, suggested) {
+    if (hidden.has(r.floor)) return;
+    const [cx, cy] = tf.toCv(r.x, r.y);
+    ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 7);
+    ctx.fillStyle = suggested ? "transparent" : "#fff"; if (!suggested) ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = suggested ? "var(--warn)" : getComputedStyle(document.body).getPropertyValue("--accent"); ctx.stroke();
+    ctx.fillStyle = getComputedStyle(document.body).color; ctx.font = "12px system-ui";
+    ctx.fillText(r.name + (suggested ? " ?" : ""), cx + 8, cy + 4);
+  }
+
+  let pending = null;     // {x,y} of a click awaiting a name
+  cv.addEventListener("click", (e) => {
+    if (!tf) return;
+    if (!floor) { hint("Pick a floor first — the pin needs to know which level it's on.", true); return; }
+    const rect = cv.getBoundingClientRect();
+    const [wx, wy] = tf.toWorld((e.clientX - rect.left) * cv.width / rect.width, (e.clientY - rect.top) * cv.height / rect.height);
+    pending = { x: wx, y: wy };
+    $("nameInput").disabled = false; $("addBtn").disabled = false; $("nameInput").focus();
+    hint(`Name the room on ${floor} and press Add.`);
+    draw();
+    const [cx, cy] = tf.toCv(wx, wy);
+    ctx.beginPath(); ctx.arc(cx, cy, 7, 0, 7); ctx.strokeStyle = "var(--good)"; ctx.lineWidth = 2; ctx.stroke();
+  });
+  function addRoom() {
+    const name = $("nameInput").value.trim();
+    if (!pending || !name || !floor) return;
+    const fz = (data.floors.find(f => f.name === floor) || {}).z || 0;
+    rooms = rooms.filter(r => r.name.toLowerCase() !== name.toLowerCase());
+    rooms.push({ name, floor, x: +pending.x.toFixed(1), y: +pending.y.toFixed(1), z: fz });
+    pending = null; $("nameInput").value = ""; $("nameInput").disabled = true; $("addBtn").disabled = true;
+    dirty = true; $("saveBtn").disabled = false; renderRooms(); draw(); hint("Added. Click the next room.");
+  }
+  $("addBtn").addEventListener("click", addRoom);
+  $("nameInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addRoom(); });
+
+  function renderRooms() {
+    $("roomCount").textContent = rooms.length + " room" + (rooms.length === 1 ? "" : "s");
+    $("roomList").innerHTML = rooms.length ? rooms.map((r, i) =>
+      `<li><span><span class="pill">${esc(r.floor)}</span> ${esc(r.name)}</span><a data-i="${i}">remove</a></li>`).join("")
+      : `<li class="muted">No rooms yet.</li>`;
+    $("roomList").querySelectorAll("a[data-i]").forEach(a => a.addEventListener("click", () => {
+      rooms.splice(+a.dataset.i, 1); dirty = true; $("saveBtn").disabled = false; renderRooms(); draw();
+    }));
+  }
+  function floorButtons() {
+    $("floorRow").innerHTML = (data.floors || []).map(f =>
+      `<button data-f="${esc(f.name)}" aria-pressed="false">${esc(f.name) || "floor"}</button>`).join("")
+      + `<button id="allFloors" class="ghost">show all</button>`;
+    $("floorRow").querySelectorAll("button[data-f]").forEach(b => b.addEventListener("click", () => {
+      floor = b.dataset.f;
+      $("floorRow").querySelectorAll("button[data-f]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      hidden = new Set(data.floors.map(f => f.name).filter(n => n !== floor));
+      hint(`Labelling ${floor}. Click a room.`); draw();
+    }));
+    $("allFloors").addEventListener("click", () => {
+      floor = null; hidden = new Set();
+      $("floorRow").querySelectorAll("button[data-f]").forEach(x => x.setAttribute("aria-pressed", "false"));
+      hint("Showing all floors. Pick one floor to add pins."); draw();
+    });
+  }
+  const hint = (t, warn) => { const h = $("hint"); h.textContent = t; h.className = "small " + (warn ? "good" : "muted"); };
+  $("showSug").addEventListener("change", draw);
+
+  async function loadMap(map) {
+    $("saveMsg").textContent = ""; hint("Loading…");
+    try { data = await api(`/api/v1/rooms/scatter?map=${encodeURIComponent(map)}`); }
+    catch (e) { hint("Could not load: " + e.message, true); return; }
+    rooms = (data.rooms || []).map(r => ({ ...r }));
+    floor = null; hidden = new Set(); dirty = false; $("saveBtn").disabled = true;
+    $("mapInfo").textContent = `${data.points.length} points · ${(data.floors || []).length} floors`;
+    fit(); floorButtons(); renderRooms(); draw();
+    hint(rooms.length ? "Loaded saved rooms. Pick a floor to add more." : "Pick a floor, then click a room and name it.");
+  }
+  $("mapSel").addEventListener("change", () => {
+    if (dirty && !confirm("Switch maps? Unsaved room labels will be lost.")) { return; }
+    if ($("mapSel").value) loadMap($("mapSel").value);
+  });
+  $("saveBtn").addEventListener("click", async () => {
+    try {
+      const r = await api(`/api/v1/rooms?map=${encodeURIComponent($("mapSel").value)}`, { method: "PUT", body: { rooms } });
+      dirty = false; $("saveBtn").disabled = true; $("saveMsg").textContent = `Saved ${r.saved} rooms.`; $("saveMsg").className = "small good";
+    } catch (e) { $("saveMsg").textContent = e.message; $("saveMsg").className = "small"; }
+  });
+
+  (async () => {
+    if (!key) { hint("Open the dashboard and sign in first (this page uses its saved key).", true); return; }
+    try {
+      const maps = (await api("/api/v1/rooms/maps")).maps || [];
+      $("mapSel").innerHTML = `<option value="">Pick a map…</option>` + maps.map(m =>
+        `<option value="${esc(m.map)}">${esc(m.map)} — ${m.rounds} rounds${m.rooms ? `, ${m.rooms} labelled` : ""}</option>`).join("");
+    } catch (e) { $("mapSel").innerHTML = `<option>Could not load maps: ${esc(e.message)}</option>`; }
+  })();
+})();
+</script>
+</body>
+</html>
