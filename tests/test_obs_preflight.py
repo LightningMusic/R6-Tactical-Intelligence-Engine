@@ -50,10 +50,16 @@ def test_a_missing_comms_source_is_an_error(ctl):
     assert any("Discord audio" in c["msg"] and c["level"] == "error" for c in bad)
 
 
-def test_wrong_format_is_only_a_warning(ctl):
-    ctl._client = FakeOBS(fmt="hybrid_mp4")
+def test_hybrid_and_matroska_formats_are_accepted(ctl):
+    for fmt in ("hybrid_mp4", "hybrid_mov", "mkv", "fragmented_mp4"):
+        ctl._client = FakeOBS(fmt=fmt)
+        assert [c for c in ctl.session_preflight() if not c["ok"]] == [], fmt
+
+
+def test_plain_mp4_is_a_warning(ctl):
+    ctl._client = FakeOBS(fmt="mp4")
     probs = [c for c in ctl.session_preflight() if not c["ok"]]
-    assert len(probs) == 1 and probs[0]["level"] == "warn" and "Matroska" in probs[0]["msg"]
+    assert len(probs) == 1 and probs[0]["level"] == "warn" and "separate tracks" in probs[0]["msg"]
 
 
 def test_no_obs_connection_short_circuits(ctl):

@@ -843,9 +843,14 @@ class OBSController:
         try:
             fmt = client.call(obs_requests.GetProfileParameter(parameterCategory="AdvOut",
                                                                parameterName="RecFormat2")).datain.get("parameterValue")
-            add(bool(fmt) and "mkv" in str(fmt).lower(),
-                "Recording format keeps the separate voice tracks (Matroska)." if fmt and "mkv" in str(fmt).lower()
-                else f"Recording format is '{fmt}', not Matroska — your mic and Discord won't be separate tracks.",
+            fl = str(fmt or "").lower()
+            # mkv, hybrid_mp4/mov and fragmented mp4/mov all hold several audio tracks AND can be read while
+            # recording (plain mp4/mov only finish their index at stop). 2026-10-19: a real session recorded
+            # mic + Discord as separate tracks on hybrid_mp4, so that is fine, not a warning.
+            ok_fmt = any(k in fl for k in ("mkv", "matroska", "hybrid", "fragmented", "fmp4"))
+            add(ok_fmt,
+                f"Recording format ('{fmt}') keeps the separate voice tracks." if ok_fmt
+                else f"Recording format is '{fmt}' — set Recording to Matroska or Hybrid MP4 so your mic and Discord stay separate tracks.",
                 level="warn")
         except Exception as e:
             add(False, f"Could not read the recording format: {e}", level="warn")
