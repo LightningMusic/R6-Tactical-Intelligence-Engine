@@ -21,6 +21,7 @@ def _positions(floor_z, pts_by_player):
 @pytest.fixture
 def match_db(tmp_path, monkeypatch):
     monkeypatch.setattr(server_settings, "MATCHES_DB_PATH", tmp_path / "matches.db")
+    monkeypatch.setattr(server_settings, "DATA_DIR", tmp_path)
     import importlib
     import server.match_db as mdb
     importlib.reload(mdb)
@@ -107,6 +108,25 @@ def test_naming_an_unknown_map_relabels_its_matches(match_db):
     with db.get_connection() as conn:
         assert conn.execute("SELECT map FROM matches WHERE match_id = 90").fetchone()[0] == "Kanal"
     assert game_catalog.pending_unknown_maps(db) == [] or all(p["game_id"] != 441408792952 for p in game_catalog.pending_unknown_maps(db))
+
+
+def test_backdrop_upload_transform_and_remove(match_db):
+    png = b"\x89PNG\r\n\x1a\n" + b"fake image bytes"
+    rec = match_db.save_backdrop("Border", "2F", png, "png")
+    assert rec["has_image"] and rec["transform"] is None
+    data, media = match_db.backdrop_bytes("Border", "2F")
+    assert data == png and media == "image/png"
+    assert match_db.save_backdrop.__module__          # sanity: callable
+    assert match_db.set_backdrop_transform("Border", "2F",
+                                           {"scale": 0.1, "rot": 0, "tx": 1, "ty": 2, "opacity": 0.7, "flip": True})
+    got = match_db.get_backdrop("Border", "2F")
+    assert got["transform"]["scale"] == 0.1 and got["transform"]["flip"] is True
+    with pytest.raises(ValueError):
+        match_db.save_backdrop("Border", "2F", png, "gif")       # only png/jpg/webp
+    with pytest.raises(ValueError):
+        match_db.set_backdrop_transform("Border", "2F", {"scale": "x"})
+    assert match_db.delete_backdrop("Border", "2F")
+    assert match_db.get_backdrop("Border", "2F") is None and match_db.backdrop_bytes("Border", "2F") is None
 
 
 def test_maps_list_counts_rounds_and_labels(match_db):

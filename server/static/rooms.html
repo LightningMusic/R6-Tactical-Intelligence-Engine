@@ -80,6 +80,28 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
       <div class="row" style="margin-top:6px"><button id="rebuildWalls" class="ghost mini">re-read walls from replays</button><button id="resetView" class="ghost mini">reset view</button></div>
     </div>
     <div class="card">
+      <div class="row" style="justify-content:space-between"><b>Floor plan image</b><span id="bdFloor" class="pill"></span></div>
+      <p class="small muted" style="margin:6px 0">Upload a floor plan (e.g. an r6maps screenshot) for the selected floor and line it up with the dots, then pin rooms on the real layout.</p>
+      <input type="file" id="bdFile" accept="image/png,image/jpeg,image/webp" hidden>
+      <div class="row">
+        <button id="bdUpload" class="mini" disabled>Upload image</button>
+        <button id="bdAlign" class="ghost mini" disabled>Align</button>
+        <button id="bdRemove" class="ghost mini" disabled>Remove</button>
+      </div>
+      <div class="row" style="margin-top:6px"><label class="small muted" for="bdOpacity">opacity</label>
+        <input type="range" id="bdOpacity" min="0" max="100" value="70" style="flex:1" disabled></div>
+      <div id="bdAlignCtl" style="display:none; margin-top:6px">
+        <div class="small good" style="margin-bottom:4px">Aligning: drag to move · scroll to resize · then Save.</div>
+        <div class="row">
+          <button id="bdRotL" class="ghost mini">⟲ 90°</button><button id="bdRotR" class="ghost mini">⟳ 90°</button>
+          <button id="bdRotLf" class="ghost mini">−2°</button><button id="bdRotRf" class="ghost mini">+2°</button>
+          <button id="bdFlip" class="ghost mini">flip</button>
+          <button id="bdSave" class="mini">Save alignment</button>
+        </div>
+      </div>
+      <div id="bdMsg" class="small" style="margin-top:4px"></div>
+    </div>
+    <div class="card">
       <div class="row" style="justify-content:space-between"><b>Pins</b><span id="roomCount" class="muted small"></span></div>
       <ul id="roomList"><li class="muted">No pins yet.</li></ul>
     </div>
@@ -111,6 +133,7 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   const cv = $("cv"), ctx = cv.getContext("2d");
   let data = null, walls = [], rooms = [], floor = null, kind = "room", hidden = new Set(), dirty = false;
   let base = null, view = { s: 1, ox: 0, oy: 0 };
+  let backdrop = null, aligning = false;    // {floor, img, transform:{scale,rot,tx,ty,flip,opacity}, dirty}
 
   function fitBase() {
     const b = data.bounds;
@@ -119,9 +142,18 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
     const s = Math.min(w / Math.max(1e-3, b.maxx - b.minx), h / Math.max(1e-3, b.maxy - b.miny));
     const ox = pad + (w - s * (b.maxx - b.minx)) / 2, oy = pad + (h - s * (b.maxy - b.miny)) / 2;
     base = {
+      s, ox, oy, minx: b.minx, miny: b.miny,
       toCv: (x, y) => [ox + (x - b.minx) * s, cv.height - (oy + (y - b.miny) * s)],
       toWorld: (cx, cy) => [b.minx + (cx - ox) / s, b.miny + (cv.height - cy - oy) / s],
     };
+  }
+  // Put the canvas into world coordinates (y up), composing base→screen with the current view. Whatever is drawn
+  // after this is in metres; restore() undoes it. Used for the floor-plan backdrop.
+  function worldTransform() {
+    ctx.save();
+    ctx.translate(view.ox, view.oy); ctx.scale(view.s, view.s);                       // base → screen
+    ctx.translate(base.ox - base.minx * base.s, cv.height - base.oy + base.miny * base.s);
+    ctx.scale(base.s, -base.s);                                                        // world → base (y up)
   }
   const toScreen = (x, y) => { const [bx, by] = base.toCv(x, y); return [bx * view.s + view.ox, by * view.s + view.oy]; };
   const toWorld = (sx, sy) => base.toWorld((sx - view.ox) / view.s, (sy - view.oy) / view.s);
@@ -172,9 +204,18 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   }
   let rafPending = false;
   function requestDraw() { if (rafPending) return; rafPending = true; requestAnimationFrame(() => { rafPending = false; draw(); }); }
+  function drawBackdrop() {
+    const t = backdrop.transform;
+    worldTransform();
+    ctx.globalAlpha = t.opacity == null ? 0.7 : t.opacity;
+    ctx.translate(t.tx, t.ty); ctx.rotate(t.rot || 0); ctx.scale(t.scale * (t.flip ? -1 : 1), -t.scale);
+    try { ctx.drawImage(backdrop.img, 0, 0); } catch (e) {}
+    ctx.restore();
+  }
   function draw() {
     ctx.fillStyle = col("--bg"); ctx.fillRect(0, 0, cv.width, cv.height);
     if (!base) { ctx.fillStyle = "#888"; ctx.fillText("No positions for this map.", 20, 30); return; }
+    if (backdrop && backdrop.img && backdrop.transform && !hidden.has(backdrop.floor)) drawBackdrop();
     if ($("showHeat").checked)
       ctx.drawImage(heatCv, 0, 0, cv.width, cv.height, view.ox, view.oy, cv.width * view.s, cv.height * view.s);
     if ($("showWalls").checked) {
@@ -199,21 +240,35 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
     ctx.fillText(r.name + (suggested ? " ?" : ""), cx + 8, cy + 4);
   }
 
-  // ── pan / zoom / click ──
+  // ── pan / zoom / click (and, in align mode, move/resize the backdrop image) ──
   let down = null, moved = false;
-  cv.addEventListener("pointerdown", (e) => { down = { x: e.offsetX, y: e.offsetY, ox: view.ox, oy: view.oy }; moved = false; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener("pointerdown", (e) => {
+    const t = backdrop && backdrop.transform;
+    down = { x: e.offsetX, y: e.offsetY, ox: view.ox, oy: view.oy, tx: t ? t.tx : 0, ty: t ? t.ty : 0 };
+    moved = false; try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  });
   cv.addEventListener("pointermove", (e) => {
     if (!down) return;
     const dx = e.offsetX - down.x, dy = e.offsetY - down.y;
-    if (Math.abs(dx) + Math.abs(dy) > 4) { moved = true; cv.classList.add("panning"); view.ox = down.ox + dx; view.oy = down.oy + dy; requestDraw(); }
+    if (Math.abs(dx) + Math.abs(dy) <= 4) return;
+    moved = true; cv.classList.add("panning");
+    if (aligning && backdrop) {
+      const per = view.s * base.s;      // screen pixels per world metre
+      backdrop.transform.tx = down.tx + dx / per; backdrop.transform.ty = down.ty - dy / per;
+      backdrop.dirty = true;
+    } else { view.ox = down.ox + dx; view.oy = down.oy + dy; }
+    requestDraw();
   });
   cv.addEventListener("pointerup", (e) => {
     cv.classList.remove("panning");
-    if (down && !moved) addPendingAt(e.offsetX * cv.width / cv.clientWidth, e.offsetY * cv.height / cv.clientHeight);
+    if (down && !moved && !aligning) addPendingAt(e.offsetX * cv.width / cv.clientWidth, e.offsetY * cv.height / cv.clientHeight);
     down = null;
   });
   cv.addEventListener("wheel", (e) => {
     e.preventDefault();
+    if (aligning && backdrop) {
+      backdrop.transform.scale *= e.deltaY < 0 ? 1.08 : 1 / 1.08; backdrop.dirty = true; requestDraw(); return;
+    }
     const mx = e.offsetX * cv.width / cv.clientWidth, my = e.offsetY * cv.height / cv.clientHeight;
     const f = e.deltaY < 0 ? 1.2 : 1 / 1.2, ns = Math.max(0.6, Math.min(12, view.s * f));
     const k = ns / view.s;
@@ -259,12 +314,12 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
       floor = b.dataset.f;
       $("floorRow").querySelectorAll("button[data-f]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
       hidden = new Set(data.floors.map(f => f.name).filter(n => n !== floor));
-      hint(`Labelling ${floor}. Pick a type and click a room.`); buildHeatBitmap(); draw();
+      hint(`Labelling ${floor}. Pick a type and click a room.`); buildHeatBitmap(); draw(); loadBackdrop(floor);
     }));
     $("allFloors").addEventListener("click", () => {
       floor = null; hidden = new Set();
       $("floorRow").querySelectorAll("button[data-f]").forEach(x => x.setAttribute("aria-pressed", "false"));
-      hint("Showing all floors. Pick one floor to add pins."); buildHeatBitmap(); draw();
+      hint("Showing all floors. Pick one floor to add pins."); buildHeatBitmap(); draw(); loadBackdrop(null);
     });
   }
   function kindButtons() {
@@ -280,6 +335,78 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   $("showWalls").addEventListener("change", draw);
   $("showHeat").addEventListener("change", () => { buildHeatBitmap(); draw(); });
   $("resetView").addEventListener("click", resetView);
+
+  // ── floor-plan backdrop image ──
+  const curMap = () => $("mapSel").value;
+  function backdropControls() {
+    const hasFloor = !!floor, has = !!(backdrop && backdrop.img);
+    $("bdFloor").textContent = floor || "pick a floor";
+    $("bdUpload").disabled = !hasFloor;
+    $("bdAlign").disabled = !has;
+    $("bdRemove").disabled = !has;
+    $("bdOpacity").disabled = !has;
+    if (!has && aligning) { aligning = false; }
+    $("bdAlign").textContent = aligning ? "Done aligning" : "Align";
+    $("bdAlign").className = aligning ? "mini" : "ghost mini";
+    $("bdAlignCtl").style.display = aligning ? "block" : "none";
+    if (has) $("bdOpacity").value = Math.round((backdrop.transform.opacity ?? 0.7) * 100);
+  }
+  function defaultTransform(img) {
+    const b = data.bounds, mw = b.maxx - b.minx, mh = b.maxy - b.miny;
+    const scale = Math.min(mw / img.width, mh / img.height) || 0.05;
+    const cx = (b.minx + b.maxx) / 2, cy = (b.miny + b.maxy) / 2;
+    return { scale, rot: 0, flip: false, opacity: 0.7, tx: cx - scale * img.width / 2, ty: cy + scale * img.height / 2 };
+  }
+  async function loadBackdrop(fl) {
+    backdrop = null; aligning = false;
+    if (fl) {
+      try {
+        const meta = await api(`/api/v1/rooms/backdrop?map=${encodeURIComponent(curMap())}&floor=${encodeURIComponent(fl)}`);
+        if (meta.has_image) {
+          const res = await fetch(server() + `/api/v1/rooms/backdrop/image?map=${encodeURIComponent(curMap())}&floor=${encodeURIComponent(fl)}`,
+            { headers: { Authorization: `Bearer ${key}` }, cache: "no-store", referrerPolicy: "no-referrer" });
+          const img = await createImageBitmap(await res.blob());
+          backdrop = { floor: fl, img, transform: meta.transform || defaultTransform(img), dirty: !meta.transform };
+        }
+      } catch (e) { /* backdrop optional */ }
+    }
+    backdropControls(); draw();
+  }
+  $("bdUpload").addEventListener("click", () => $("bdFile").click());
+  $("bdFile").addEventListener("change", async (ev) => {
+    const f = ev.target.files[0]; ev.target.value = ""; if (!f || !floor) return;
+    $("bdMsg").textContent = "Uploading…"; $("bdMsg").className = "small muted";
+    const fd = new FormData(); fd.append("file", f, f.name);
+    try {
+      await fetch(server() + `/api/v1/rooms/backdrop?map=${encodeURIComponent(curMap())}&floor=${encodeURIComponent(floor)}`,
+        { method: "POST", headers: { Authorization: `Bearer ${key}` }, body: fd, referrerPolicy: "no-referrer" })
+        .then(r => { if (!r.ok) return r.json().then(j => { throw new Error(j.detail || r.status); }); });
+      await loadBackdrop(floor); aligning = true; backdropControls(); draw();
+      $("bdMsg").innerHTML = `<span class="good">Loaded. Drag/scroll to line it up with the dots, then Save.</span>`;
+    } catch (e) { $("bdMsg").innerHTML = `<span class="L">${esc(e.message)}</span>`; }
+  });
+  $("bdAlign").addEventListener("click", () => { if (!backdrop) return; aligning = !aligning; backdropControls(); hint(aligning ? "Aligning the image: drag to move, scroll to resize." : "Done. Pin rooms on the plan."); });
+  $("bdOpacity").addEventListener("input", () => { if (backdrop) { backdrop.transform.opacity = +$("bdOpacity").value / 100; backdrop.dirty = true; requestDraw(); } });
+  const rot = (d) => { if (backdrop) { backdrop.transform.rot = (backdrop.transform.rot || 0) + d; backdrop.dirty = true; requestDraw(); } };
+  $("bdRotL").addEventListener("click", () => rot(-Math.PI / 2));
+  $("bdRotR").addEventListener("click", () => rot(Math.PI / 2));
+  $("bdRotLf").addEventListener("click", () => rot(-Math.PI / 90));
+  $("bdRotRf").addEventListener("click", () => rot(Math.PI / 90));
+  $("bdFlip").addEventListener("click", () => { if (backdrop) { backdrop.transform.flip = !backdrop.transform.flip; backdrop.dirty = true; requestDraw(); } });
+  $("bdSave").addEventListener("click", async () => {
+    if (!backdrop) return;
+    try {
+      await api(`/api/v1/rooms/backdrop/transform?map=${encodeURIComponent(curMap())}&floor=${encodeURIComponent(floor)}`,
+        { method: "PUT", body: { transform: backdrop.transform } });
+      backdrop.dirty = false; $("bdMsg").innerHTML = `<span class="good">Alignment saved.</span>`;
+    } catch (e) { $("bdMsg").innerHTML = `<span class="L">${esc(e.message)}</span>`; }
+  });
+  $("bdRemove").addEventListener("click", async () => {
+    if (!backdrop || !confirm("Remove this floor's image?")) return;
+    try { await api(`/api/v1/rooms/backdrop?map=${encodeURIComponent(curMap())}&floor=${encodeURIComponent(floor)}`, { method: "DELETE" });
+      backdrop = null; aligning = false; backdropControls(); draw(); $("bdMsg").textContent = ""; }
+    catch (e) { $("bdMsg").innerHTML = `<span class="L">${esc(e.message)}</span>`; }
+  });
 
   async function loadWalls(map, rebuild) {
     walls = [];
@@ -299,9 +426,9 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
     catch (e) { hint("Could not load: " + e.message, true); return; }
     rooms = (data.rooms || []).map(r => ({ kind: "room", ...r }));
     floor = null; hidden = new Set(); dirty = false; $("saveBtn").disabled = true; pending = null;
-    view = { s: 1, ox: 0, oy: 0 };
+    view = { s: 1, ox: 0, oy: 0 }; backdrop = null; aligning = false;
     $("mapInfo").textContent = `${data.points.length} points · ${(data.floors || []).length} floors`;
-    fitBase(); buildHeatBitmap(); floorButtons(); renderRooms(); draw();
+    fitBase(); buildHeatBitmap(); floorButtons(); kindButtons(); renderRooms(); backdropControls(); draw();
     hint(rooms.length ? "Loaded saved pins. Pick a floor to add more." : "Pick a floor and a type, then click a room.");
     loadWalls(map, false);
   }

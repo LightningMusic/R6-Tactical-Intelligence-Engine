@@ -49,6 +49,11 @@ def _ensure_table(conn) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS map_structures (
         map TEXT NOT NULL, floor TEXT NOT NULL DEFAULT '', reinforced INTEGER NOT NULL DEFAULT 0,
         x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL)""")
+    # A floor-plan image (the host uploads one per map+floor, e.g. an r6maps screenshot) and how it's placed in
+    # our world coordinates (transform set by the host dragging/scaling it to line up with the heatmap).
+    conn.execute("""CREATE TABLE IF NOT EXISTS map_backdrops (
+        map TEXT NOT NULL, floor TEXT NOT NULL, filename TEXT NOT NULL, transform_json TEXT,
+        updated_at TEXT NOT NULL, PRIMARY KEY (map, floor))""")
 
 
 def maps_with_positions() -> list[dict]:
@@ -258,6 +263,122 @@ def rooms_by_map() -> dict[str, list[dict]]:
         out.setdefault(r["map"], []).append({"name": r["name"], "floor": r["floor"],
                                              "x": r["x"], "y": r["y"], "z": r["z"]})
     return out
+
+
+# ── Floor-plan backdrop image per map+floor ──────────────────────────────────
+
+import hashlib
+import json
+import re as _re
+from datetime import datetime, timezone
+
+BACKDROP_EXT = {"png": "png", "jpg": "jpg", "jpeg": "jpg", "webp": "webp"}
+MAX_BACKDROP_BYTES = 10 * 1024 * 1024
+_FLOOR_RE = _re.compile(r"^[A-Za-z0-9]{0,4}$")
+
+
+def _images_dir() -> Path:
+    d = server_settings.DATA_DIR / "map_images"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def save_backdrop(map_name: str, floor: str, data: bytes, ext: str) -> dict:
+    """Store a floor image for this map+floor (replacing any existing one). Returns the saved record."""
+    if not _FLOOR_RE.match(floor or ""):
+        raise ValueError("Bad floor.")
+    ext = BACKDROP_EXT.get((ext or "").lower().lstrip("."))
+    if not ext:
+        raise ValueError("Image must be a PNG, JPG or WEBP.")
+    if not data or len(data) > MAX_BACKDROP_BYTES:
+        raise ValueError(f"Image must be between 1 byte and {MAX_BACKDROP_BYTES // (1024 * 1024)} MB.")
+    name = f"{hashlib.sha256(data).hexdigest()[:20]}.{ext}"
+    (_images_dir() / name).write_bytes(data)
+    with _conn() as conn:
+        _ensure_table(conn)
+        old = conn.execute("SELECT filename FROM map_backdrops WHERE map = ? AND floor = ?", (map_name, floor)).fetchone()
+        conn.execute("""INSERT INTO map_backdrops (map, floor, filename, transform_json, updated_at)
+                        VALUES (?, ?, ?, NULL, ?)
+                        ON CONFLICT(map, floor) DO UPDATE SET filename = excluded.filename, transform_json = NULL,
+                        updated_at = excluded.updated_at""", (map_name, floor, name, _now_iso()))
+        conn.commit()
+    if old and old[0] and old[0] != name:
+        _maybe_remove_image(old[0])
+    return {"floor": floor, "has_image": True, "transform": None}
+
+
+def get_backdrop(map_name: str, floor: str) -> Optional[dict]:
+    with _conn() as conn:
+        _ensure_table(conn)
+        r = conn.execute("SELECT filename, transform_json FROM map_backdrops WHERE map = ? AND floor = ?",
+                         (map_name, floor)).fetchone()
+    if not r or not (_images_dir() / r["filename"]).exists():
+        return None
+    return {"floor": floor, "has_image": True,
+            "transform": json.loads(r["transform_json"]) if r["transform_json"] else None}
+
+
+def backdrop_floors(map_name: str) -> list[str]:
+    with _conn() as conn:
+        _ensure_table(conn)
+        return [r[0] for r in conn.execute("SELECT floor FROM map_backdrops WHERE map = ?", (map_name,))]
+
+
+def backdrop_bytes(map_name: str, floor: str) -> Optional[tuple[bytes, str]]:
+    with _conn() as conn:
+        _ensure_table(conn)
+        r = conn.execute("SELECT filename FROM map_backdrops WHERE map = ? AND floor = ?", (map_name, floor)).fetchone()
+    if not r:
+        return None
+    path = _images_dir() / r["filename"]
+    if not path.exists():
+        return None
+    media = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}.get(path.suffix.lstrip("."), "image/png")
+    return path.read_bytes(), media
+
+
+def set_backdrop_transform(map_name: str, floor: str, transform: dict) -> bool:
+    if not isinstance(transform, dict):
+        raise ValueError("transform must be an object.")
+    keep = {}
+    for k in ("scale", "rot", "tx", "ty", "opacity"):
+        try:
+            keep[k] = float(transform.get(k))
+        except (TypeError, ValueError):
+            raise ValueError(f"transform.{k} must be a number.")
+    keep["flip"] = bool(transform.get("flip"))
+    with _conn() as conn:
+        _ensure_table(conn)
+        cur = conn.execute("UPDATE map_backdrops SET transform_json = ?, updated_at = ? WHERE map = ? AND floor = ?",
+                           (json.dumps(keep), _now_iso(), map_name, floor))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_backdrop(map_name: str, floor: str) -> bool:
+    with _conn() as conn:
+        _ensure_table(conn)
+        r = conn.execute("SELECT filename FROM map_backdrops WHERE map = ? AND floor = ?", (map_name, floor)).fetchone()
+        cur = conn.execute("DELETE FROM map_backdrops WHERE map = ? AND floor = ?", (map_name, floor))
+        conn.commit()
+    if r and r[0]:
+        _maybe_remove_image(r[0])
+    return cur.rowcount > 0
+
+
+def _maybe_remove_image(filename: str) -> None:
+    """Delete an image file only when no backdrop row still references it (same image can be shared)."""
+    with _conn() as conn:
+        still = conn.execute("SELECT 1 FROM map_backdrops WHERE filename = ? LIMIT 1", (filename,)).fetchone()
+    if not still:
+        try:
+            (_images_dir() / filename).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def room_of(rooms: list[dict], x: float, y: float, z: float, max_m: float = ROOM_MAX_M) -> Optional[str]:

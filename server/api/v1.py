@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from server import invites
 from server.auth import VoicePrincipal, verify_api_token, verify_voice_token
@@ -537,6 +537,55 @@ def rooms_structures(map: str, rebuild: bool = False, _client: str = Depends(ver
     """The map's breakable walls/hatches read from the stored replays (cached; ?rebuild=true re-reads them)."""
     from server.services import rooms
     return rooms.structures(map, rebuild=rebuild)
+
+
+# ── Floor-plan backdrop image per map+floor ──────────────────────────────────
+
+@router.get("/rooms/backdrop")
+def rooms_backdrop_get(map: str, floor: str, _client: str = Depends(verify_api_token)) -> dict:
+    from server.services import rooms
+    bd = rooms.get_backdrop(map, floor)
+    return bd or {"floor": floor, "has_image": False, "transform": None}
+
+
+@router.post("/rooms/backdrop")
+def rooms_backdrop_upload(map: str, floor: str, file: UploadFile = File(...),
+                          _client: str = Depends(verify_api_token)) -> dict:
+    from server.services import rooms
+    data = file.file.read()
+    ext = (file.filename or "").rsplit(".", 1)[-1] if "." in (file.filename or "") else ""
+    try:
+        return rooms.save_backdrop(map, floor, data, ext)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/rooms/backdrop/image")
+def rooms_backdrop_image(map: str, floor: str, _client: str = Depends(verify_api_token)):
+    from server.services import rooms
+    got = rooms.backdrop_bytes(map, floor)
+    if got is None:
+        raise HTTPException(status_code=404, detail="No backdrop for this floor.")
+    data, media = got
+    return Response(content=data, media_type=media, headers={"Cache-Control": "no-store"})
+
+
+@router.put("/rooms/backdrop/transform")
+def rooms_backdrop_transform(body: dict, map: str, floor: str, _client: str = Depends(verify_api_token)) -> dict:
+    from server.services import rooms
+    try:
+        ok = rooms.set_backdrop_transform(map, floor, body.get("transform") or {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not ok:
+        raise HTTPException(status_code=404, detail="No backdrop for this floor.")
+    return {"ok": True}
+
+
+@router.delete("/rooms/backdrop")
+def rooms_backdrop_delete(map: str, floor: str, _client: str = Depends(verify_api_token)) -> dict:
+    from server.services import rooms
+    return {"removed": rooms.delete_backdrop(map, floor)}
 
 
 # ── Unknown maps (host names them; the client names its own copy but the server keeps its own catalog) ──
