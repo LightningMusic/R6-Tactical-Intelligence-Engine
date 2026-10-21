@@ -285,3 +285,21 @@ def at(pts: list, t: float) -> Optional[list]:
     if k >= len(pts):
         return pts[-1] if t - pts[-1][0] <= 2.0 else None
     return pts[k]
+
+
+def yaw_at(pts: list, t: float, window: float = 2.5) -> Optional[float]:
+    """The body's facing (degrees, atan2(dy, dx) frame) at time t: the nearest sample carrying a yaw,
+    preferring the last one at or before t — where the player was looking when hit. A standing body still
+    sends aim packets, so a yaw is usually available even with no movement. None if none is within window."""
+    best = None            # (after_t, |dt|) -> smaller is better; at-or-before t wins ties
+    for p in pts or ():
+        y = p[4]
+        if y is None:
+            continue
+        dt = p[0] - t
+        if abs(dt) > window:
+            continue
+        key = (1 if dt > 1e-4 else 0, abs(dt))
+        if best is None or key < best[0]:
+            best = (key, y)
+    return best[1] if best else None

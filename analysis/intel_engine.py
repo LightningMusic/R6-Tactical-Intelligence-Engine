@@ -598,7 +598,15 @@ class IntelEngine:
             if sum(1 for r in rounds if r["site"]) < 3:
                 return None
             fl = places.floors(rounds)
-            return places.site_model(rounds, fl), fl, places.walk_map(rounds, fl), places.wall_spots(rounds)
+            rooms = []                                    # host's hand-labelled callouts for this map, if any
+            try:
+                with repo.db.get_connection() as conn:
+                    rooms = [{"name": r[0], "floor": r[1], "kind": r[2], "x": r[3], "y": r[4], "z": r[5]}
+                             for r in conn.execute("SELECT name, floor, kind, x, y, z FROM map_rooms WHERE map = ?",
+                                                   (match.map,))]
+            except Exception:
+                rooms = []                                # table absent (older DB) or map not labelled
+            return places.site_model(rounds, fl), fl, places.walk_map(rounds, fl), places.wall_spots(rounds), rooms
         except Exception as e:
             print(f"[AI] Places for {getattr(match, 'map', '?')} unavailable: {e}")
             return None

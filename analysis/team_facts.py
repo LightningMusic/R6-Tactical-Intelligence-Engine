@@ -425,8 +425,10 @@ def positioning_lines(p: dict[str, Any], usual: Optional[dict[str, Any]] = None)
     return out
 
 
-def death_places(match: Any, ours: Optional[set[str]], positions: dict[int, dict], model: dict, fl: list) -> list[str]:
-    """Where our players died, as places ('2F at Armory Lockers / Archives'), most common first."""
+def death_places(match: Any, ours: Optional[set[str]], positions: dict[int, dict], model: dict, fl: list,
+                 rooms: Optional[list] = None) -> list[str]:
+    """Where our players died, as places ('2F Security Room', or '2F at Armory Lockers / Archives' when
+    the map isn't room-labelled), most common first."""
     from analysis.places import area
     from integration.positions import at
     counts: collections.Counter = collections.Counter()
@@ -436,11 +438,64 @@ def death_places(match: Any, ours: Optional[set[str]], positions: dict[int, dict
             if (ours is None or norm(n) in ours) and n in players:
                 p = at(players[n]["pts"], t - 0.5)
                 if p is not None:
-                    counts[area(model, fl, p[1], p[2], p[3])] += 1
+                    counts[area(model, fl, p[1], p[2], p[3], rooms)] += 1
     if not counts:
         return []
     top = ", ".join(f"{place} x{n}" for place, n in counts.most_common(3))
     return [f"- Where our players died most: {top}."]
+
+
+FACING_AWAY_DEG = 90.0         # killed while looking this far from the shooter: caught facing the wrong way
+FACING_MIN_DEATHS = 6          # too few measurable deaths to call a pattern
+FACING_POINT_BLANK_M = 2.0     # closer than this, the bearing to the killer is just noise
+
+
+def facing_at_death(match: Any, ours: Optional[set[str]], positions: dict[int, dict],
+                    events: dict[int, dict], display: Optional[dict] = None) -> list[str]:
+    """Where our players were looking when they died: their decoded heading (yaw) vs the bearing to the
+    killer's position at the kill's second. Deaths with the player turned FACING_AWAY_DEG+ from the shot
+    were facing the wrong way. Needs the aim track and the killer's spot to line up, so it measures the
+    subset where both are known and stays silent when too little does."""
+    from integration.positions import at, yaw_at
+    disp = display or {}
+    total = 0
+    turned: list[tuple[int, str, float]] = []
+    for rnd, ev in (events or {}).items():
+        pos = positions.get(rnd)
+        if not pos:
+            continue
+        players = pos.get("players") or {}
+        for k in ev.get("kills") or []:
+            victim, killer, t = k.get("victim"), k.get("killer"), k.get("t")
+            if t is None or not victim or not killer or norm(victim) == norm(killer):
+                continue
+            if ours is not None and norm(victim) not in ours:
+                continue
+            vp, kp = players.get(victim), players.get(killer)
+            if not vp or not kp:
+                continue
+            v, kpos = at(vp.get("pts") or [], t), at(kp.get("pts") or [], t)
+            if v is None or kpos is None or abs(v[3] - kpos[3]) > FLOOR_STEP:   # need both, same floor
+                continue
+            if math.dist((v[1], v[2]), (kpos[1], kpos[2])) < FACING_POINT_BLANK_M:
+                continue
+            yaw = yaw_at(vp.get("pts") or [], t)
+            if yaw is None:
+                continue
+            bearing = math.degrees(math.atan2(kpos[2] - v[2], kpos[1] - v[1]))
+            diff = abs((yaw - bearing + 180.0) % 360.0 - 180.0)
+            total += 1
+            if diff >= FACING_AWAY_DEG:
+                turned.append((int(rnd), disp.get(norm(victim), victim), diff))
+    if total < FACING_MIN_DEATHS:
+        return []
+    if not turned:
+        return [f"- Facing when killed: on the {total} deaths we could measure, nobody was caught looking far "
+                f"from the shot (good angle discipline)."]
+    turned.sort(key=lambda e: -e[2])
+    eg = "; ".join(f"R{r:02d} {who} {d:.0f}° off" for r, who, d in turned[:3])
+    return [f"- Caught looking the wrong way: {len(turned)} of {total} measurable deaths had the player turned "
+            f"90°+ from where the shot came from ({eg})."]
 
 
 # ── site setup and breaches (integration/walls.py) ────────────────────────
@@ -1164,7 +1219,9 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
             walk = places[2] if places and len(places) > 2 else None
             pos_lines = positioning_lines(positioning(match, ours, positions, walk), usual)
             if places and places[0]:
-                pos_lines += death_places(match, ours, positions, places[0], places[1])
+                rooms = places[4] if places and len(places) > 4 else None
+                pos_lines += death_places(match, ours, positions, places[0], places[1], rooms)
+            pos_lines += facing_at_death(match, ours, positions, events, display)
         except Exception:                                  # a nicety: never a reason to lose the debrief
             pos_lines = []
     wall_lines: list[str] = []

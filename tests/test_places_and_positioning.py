@@ -116,6 +116,69 @@ def test_where_our_players_died_most():
     assert tf.death_places(match_of("loss"), {"me", "mate"}, pos, model, fl) == ["- Where our players died most: 2F at Armory Lockers / Archives x2."]
 
 
+ROOMS = [{"name": "CCTV", "floor": "2F", "kind": "room", "x": 91.0, "y": -68.0, "z": 4.2},
+         {"name": "Armory Lockers", "floor": "2F", "kind": "site", "x": 150.0, "y": -68.0, "z": 4.2},
+         {"name": "Tellers", "floor": "1F", "kind": "site", "x": 104.0, "y": -75.0, "z": 0.0}]
+
+
+def test_labelled_rooms_name_a_spot_precisely_when_the_map_is_labelled():
+    fl = PL.floors(ROUNDS)
+    model = PL.site_model(ROUNDS, fl)
+    # a death right in CCTV -> the labelled room, not the bomb site
+    assert PL.area(model, fl, 91, -68, 4.2, ROOMS) == "2F CCTV"
+    assert PL.where(model, fl, 91, -68, 4.2, ROOMS) == "2F CCTV"
+    # a room only counts on the same floor: the 2F point ignores the 1F Tellers pin
+    assert PL.room_at(ROOMS, fl, 104, -75, 4.2) is None
+    assert PL.room_at(ROOMS, fl, 104, -75, 0.0) == "Tellers"
+    # far from every labelled room -> falls back to the site model
+    assert PL.area(model, fl, 91, -40, 4.2, ROOMS) == "2F, away from the sites"
+    # no rooms given -> unchanged behaviour
+    assert PL.area(model, fl, 91, -68, 4.2, None) == "2F at Armory Lockers / Archives"
+
+
+def test_death_places_uses_labelled_rooms_when_present():
+    fl = PL.floors(ROUNDS)
+    model = PL.site_model(ROUNDS, fl)
+    pos = {1: {"died": {"Me": 10.0, "Mate": 12.0}, "players": {"Me": {"team": 1, "pts": still(91, -68, 4.2, t1=10)},
+                                                               "Mate": {"team": 1, "pts": still(92, -69, 4.2, t1=12)}}}}
+    assert tf.death_places(match_of("loss"), {"me", "mate"}, pos, model, fl, ROOMS) == ["- Where our players died most: 2F CCTV x2."]
+
+
+def test_yaw_at_takes_the_last_heading_before_the_shot():
+    from integration.positions import yaw_at
+    pts = [[8.0, 0, 0, 4, 10.0], [9.0, 0, 0, 4, 20.0], [11.0, 0, 0, 4, 200.0]]
+    assert yaw_at(pts, 10.0) == 20.0                                   # at-or-before t wins over the later sample
+    assert yaw_at([[10.0, 0, 0, 4, None], [9.5, 0, 0, 4, 42.0]], 10.0) == 42.0   # a None yaw is skipped
+    assert yaw_at([[0.0, 0, 0, 4, 10.0]], 10.0) is None                # nothing within the window
+
+
+def _aim(x, y, yaw):
+    return [[float(t), x, y, 4.0, yaw] for t in range(0, 20)]
+
+
+def test_facing_at_death_flags_looking_the_wrong_way(monkeypatch):
+    monkeypatch.setattr(tf, "FACING_MIN_DEATHS", 2)
+    # Me looks east (yaw 0) but the killer is due north (bearing 90) -> 90 off, wrong way.
+    # Mate looks north (yaw 90) straight at the killer due north -> facing, 0 off.
+    positions = {1: {"died": {"Me": 10.0, "Mate": 12.0}, "players": {
+        "Me":    {"team": 1, "pts": _aim(0, 0, 0.0)},
+        "Enemy": {"team": 0, "pts": _aim(0, 10, 0.0)},
+        "Mate":  {"team": 1, "pts": _aim(20, 0, 90.0)},
+        "Foe":   {"team": 0, "pts": _aim(20, 10, 0.0)},
+    }}}
+    events = {1: {"kills": [{"t": 10.0, "killer": "Enemy", "victim": "Me"},
+                            {"t": 12.0, "killer": "Foe", "victim": "Mate"}]}}
+    lines = tf.facing_at_death(match_of("loss"), {"me", "mate"}, positions, events)
+    assert lines and "1 of 2 measurable deaths" in lines[0] and "Me 90" in lines[0]
+
+
+def test_facing_at_death_is_silent_without_enough_measurable_deaths():
+    positions = {1: {"players": {"Me": {"team": 1, "pts": _aim(0, 0, 0.0)},
+                                 "Enemy": {"team": 0, "pts": _aim(0, 10, 0.0)}}}}
+    events = {1: {"kills": [{"t": 10.0, "killer": "Enemy", "victim": "Me"}]}}
+    assert tf.facing_at_death(match_of("loss"), {"me"}, positions, events) == []
+
+
 def test_the_report_gets_a_positioning_section_only_when_positions_exist():
     m = NS(rounds=[NS(round_number=1, side="defense", outcome="loss", site="", player_stats=[])])
     facts = tf.build_match_facts(m, {"me"}, {}, {})

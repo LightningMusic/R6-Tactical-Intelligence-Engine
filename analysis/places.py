@@ -119,8 +119,32 @@ def short_site(site: str) -> str:
     return " / ".join(part.split(" ", 1)[1] if " " in part else part for part in site.split(", "))
 
 
-def where(model, fl, x, y, z) -> str:
+def room_at(rooms, fl, x, y, z, max_m: float = 8.0) -> Optional[str]:
+    """Nearest hand-labelled room on the same floor within max_m metres, else None. `rooms` is the
+    saved map_rooms for the map (list of {name, floor, kind, x, y, z}); when the host has labelled a
+    map this names a spot precisely ('CCTV'), where the site model only knows the bomb sites."""
+    if not rooms:
+        return None
+    fz = floor_of(fl, z)[0]
+    best = None
+    for r in rooms:
+        try:
+            rx, ry, rz = float(r["x"]), float(r["y"]), float(r["z"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if abs(floor_of(fl, rz)[0] - fz) >= 0.1:
+            continue
+        d = math.dist((x, y), (rx, ry))
+        if d <= max_m and (best is None or d < best[0]):
+            best = (d, str(r.get("name") or ""))
+    return best[1] if best and best[1] else None
+
+
+def where(model, fl, x, y, z, rooms=None) -> str:
     name = floor_of(fl, z)[1].rstrip("?")
+    room = room_at(rooms, fl, x, y, z)
+    if room:
+        return f"{name} {room}"
     d, site = nearest_site(model, fl, x, y, z)
     if site is None:
         return name
@@ -257,9 +281,13 @@ def usual_walls(spots: dict[str, dict], site: str) -> list[dict]:
     return [w for w in s["walls"] if w["rounds"] / s["rounds"] >= USUAL_WALL_SHARE]
 
 
-def area(model, fl, x, y, z) -> str:
-    """A coarse place for grouping: on a site, near one (within 20 m), or just the floor."""
+def area(model, fl, x, y, z, rooms=None) -> str:
+    """A place for grouping: a hand-labelled room when the host has labelled the map, else on a site,
+    near one (within 20 m), or just the floor."""
     name = floor_of(fl, z)[1].rstrip("?")
+    room = room_at(rooms, fl, x, y, z)
+    if room:
+        return f"{name} {room}"
     d, site = nearest_site(model, fl, x, y, z)
     if site is None:
         return name
