@@ -274,7 +274,7 @@ from datetime import datetime, timezone
 
 BACKDROP_EXT = {"png": "png", "jpg": "jpg", "jpeg": "jpg", "webp": "webp"}
 MAX_BACKDROP_BYTES = 10 * 1024 * 1024
-_FLOOR_RE = _re.compile(r"^[A-Za-z0-9]{0,4}$")
+_FLOOR_RE = _re.compile(r"^[A-Za-z0-9?. ]{1,16}$")   # floor names can be "B", "2F", "3F?" or "level 10"
 
 
 def _images_dir() -> Path:
