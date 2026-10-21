@@ -284,6 +284,14 @@
         <button id="playerCreateBtn" style="margin:0; padding:8px 12px; font-size:12px;">Create link</button>
       </div>
     </div>
+    <div class="card" id="unknownMapsCard" style="display:none;">
+      <h2>Maps that need a name</h2>
+      <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">
+        The server parsed these but doesn't know the map (a new map, or one you named on the stick after it uploaded).
+        Name it here and every match on it is relabelled — the room tool and debriefs use the real name.
+      </div>
+      <div id="unknownMapsList" style="font-size:12px; color:var(--muted);"></div>
+    </div>
     <div class="footer-note">Auto-refreshes every 15s · data stays on this server, nothing leaves your network</div>
   </div>
 </main>
@@ -385,6 +393,7 @@
       renderSessions(data.sessions || []);
       loadVoice();
       loadInvites();
+      loadUnknownMaps();
       if (!roster.length) loadRoster();
     } catch (e) {
       $("statusDot").className = "bad";
@@ -803,6 +812,31 @@
     catch (e) { document.execCommand("copy"); $("playerCopyBtn").textContent = "Copied"; }
     setTimeout(() => { $("playerCopyBtn").textContent = "Copy link"; }, 1500);
   });
+
+  // ── Maps that need a name ───────────────────────────────
+  async function loadUnknownMaps() {
+    let list;
+    try { list = (await apiFetch("/api/v1/maps/unknown")).maps || []; }
+    catch (e) { return; }                 // older server without the endpoint
+    const card = $("unknownMapsCard");
+    card.style.display = list.length ? "block" : "none";
+    if (!list.length) return;
+    $("unknownMapsList").innerHTML = list.map(m => {
+      const sites = (m.sites || "").split(" | ").filter(Boolean).join(", ");
+      return `<div class="detail-row" style="flex-wrap:wrap; gap:6px;">
+        <span class="k">Map ${escapeHtml(String(m.game_id))} <span style="color:var(--muted-dim)">${escapeHtml(sites)}</span> · ${m.matches} match${m.matches === 1 ? "" : "es"}</span>
+        <span class="v" style="display:flex; gap:6px;"><input type="text" data-gid="${escapeHtml(String(m.game_id))}" placeholder="Map name" style="font-size:12px;">
+        <a href="#" data-name="${escapeHtml(String(m.game_id))}">name it</a></span></div>`;
+    }).join("");
+    $("unknownMapsList").querySelectorAll("a[data-name]").forEach(a => a.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      const inp = $("unknownMapsList").querySelector(`input[data-gid="${a.dataset.name}"]`);
+      const name = (inp && inp.value || "").trim();
+      if (!name) { showError("Type the map name first."); return; }
+      try { await apiFetch("/api/v1/maps/name", { method: "POST", body: { game_id: Number(a.dataset.name), name } }); loadUnknownMaps(); }
+      catch (e) { showError(e.message); }
+    }));
+  }
 
   async function loadVoice() {
     let companions = "";

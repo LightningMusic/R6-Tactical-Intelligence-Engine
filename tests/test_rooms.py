@@ -89,6 +89,26 @@ def test_structures_returns_cached_walls_without_rebuilding(match_db):
     assert sum(w["reinforced"] for w in s["walls"]) == 1
 
 
+def test_naming_an_unknown_map_relabels_its_matches(match_db):
+    # The server parses a new map it can't name; naming it backfills the match and clears the flag.
+    from database import game_catalog
+    from server.match_db import ensure_match_database
+    db = ensure_match_database()
+    with db.get_connection() as conn:
+        conn.execute("INSERT INTO matches (match_id, datetime, opponent_name, map, map_game_id) "
+                     "VALUES (90, '2026-10-20T18:00', 'x', 'Unknown', 441408792952)")
+        conn.execute("INSERT INTO unknown_maps (game_id, dissect_name, sites, first_seen, times_seen) "
+                     "VALUES (441408792952, 'Map(441408792952)', '2F Server Room | B1 Kayaks', '2026-10-20', 1)")
+        conn.commit()
+    pending = game_catalog.pending_unknown_maps(db)
+    assert any(p["game_id"] == 441408792952 for p in pending)
+    final, n = game_catalog.name_unknown_map(db, 441408792952, "Kanal")
+    assert final == "Kanal" and n == 1
+    with db.get_connection() as conn:
+        assert conn.execute("SELECT map FROM matches WHERE match_id = 90").fetchone()[0] == "Kanal"
+    assert game_catalog.pending_unknown_maps(db) == [] or all(p["game_id"] != 441408792952 for p in game_catalog.pending_unknown_maps(db))
+
+
 def test_maps_list_counts_rounds_and_labels(match_db):
     match_db.save_rooms("Border", [{"name": "CCTV", "floor": "2F", "x": 0, "y": 0, "z": 10}])
     maps = {m["map"]: m for m in match_db.maps_with_positions()}

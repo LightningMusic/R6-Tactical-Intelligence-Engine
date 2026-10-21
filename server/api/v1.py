@@ -539,6 +539,32 @@ def rooms_structures(map: str, rebuild: bool = False, _client: str = Depends(ver
     return rooms.structures(map, rebuild=rebuild)
 
 
+# ── Unknown maps (host names them; the client names its own copy but the server keeps its own catalog) ──
+
+@router.get("/maps/unknown")
+def maps_unknown(_client: str = Depends(verify_api_token)) -> dict:
+    """Maps the server parsed but couldn't name (a new map, or named on the client after upload)."""
+    from database import game_catalog
+    from server.match_db import ensure_match_database
+    return {"maps": game_catalog.pending_unknown_maps(ensure_match_database())}
+
+
+@router.post("/maps/name")
+def maps_name(body: dict, _client: str = Depends(verify_api_token)) -> dict:
+    """{"game_id": <int>, "name": "Kanal"} names an unknown map and backfills every match already on it."""
+    from database import game_catalog
+    from server.match_db import ensure_match_database
+    try:
+        game_id = int(body.get("game_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="game_id must be a number.")
+    try:
+        final, backfilled = game_catalog.name_unknown_map(ensure_match_database(), game_id, str(body.get("name", "")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"name": final, "matches_updated": backfilled}
+
+
 @router.post("/sessions/{session_id}/reread-replays", status_code=202)
 def reread_replays(session_id: str, ai: bool = True, _client: str = Depends(verify_api_token)) -> dict:
     """Re-read this session's stored replays for gadget usage, objective facts and the kill order (no
