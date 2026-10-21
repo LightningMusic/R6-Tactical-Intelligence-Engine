@@ -431,6 +431,10 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
     fitBase(); buildHeatBitmap(); floorButtons(); kindButtons(); renderRooms(); backdropControls(); draw();
     hint(rooms.length ? "Loaded saved pins. Pick a floor to add more." : "Pick a floor and a type, then click a room.");
     loadWalls(map, false);
+    // Jump straight to the first floor so its plan, walls and pins show without an extra click
+    // (the "all floors" view can't show a per-floor backdrop and stacks every floor's pins at once).
+    const firstFloor = $("floorRow").querySelector("button[data-f]");
+    if (firstFloor) firstFloor.click();
   }
   $("mapSel").addEventListener("change", () => {
     if (dirty && !confirm("Switch maps? Unsaved pins will be lost.")) return;
