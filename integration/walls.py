@@ -157,15 +157,21 @@ def wall_spot(pts: list, t: float) -> Optional[tuple[float, float, float]]:
     return (round(p[1] + REACH_M * math.cos(a), 2), round(p[2] + REACH_M * math.sin(a), 2), round(p[3], 2))
 
 
-def map_objects(data: bytes) -> dict[int, tuple[float, float, float]]:
-    """level id -> position of every destructible surface the replay introduces."""
-    out: dict[int, tuple[float, float, float]] = {}
+def map_objects(data: bytes) -> dict[int, tuple[float, float, float, Optional[float]]]:
+    """level id -> (x, y, z, yaw) of every destructible surface the replay introduces. The introduction
+    packet carries the object's rotation quaternion right after its position (at +28); yaw_deg turns that
+    into the wall's line direction on the map plane (degrees, atan2(dy,dx) frame), validated by drawing it
+    over the aligned floor plans. yaw is None when the quaternion isn't a unit rotation."""
+    from integration.positions import yaw_deg
+    out: dict[int, tuple[float, float, float, Optional[float]]] = {}
     i = data.find(OBJECT)
     while i != -1:
         if i + 61 <= len(data) and struct.unpack_from("<I", data, i + 57)[0] == SURFACE:
             x, y, z = struct.unpack_from("<3f", data, i + 16)
             if all(math.isfinite(v) and abs(v) < 1000 for v in (x, y, z)):
-                out.setdefault(struct.unpack_from("<Q", data, i + 4)[0], (x, y, z))
+                q = struct.unpack_from("<4f", data, i + 28)
+                yaw = yaw_deg(q) if all(math.isfinite(c) for c in q) and 0.9 < sum(c * c for c in q) < 1.1 else None
+                out.setdefault(struct.unpack_from("<Q", data, i + 4)[0], (x, y, z, yaw))
         i = data.find(OBJECT, i + 1)
     return out
 

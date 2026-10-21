@@ -49,6 +49,10 @@ def _ensure_table(conn) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS map_structures (
         map TEXT NOT NULL, floor TEXT NOT NULL DEFAULT '', reinforced INTEGER NOT NULL DEFAULT 0,
         x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL)""")
+    try:
+        conn.execute("ALTER TABLE map_structures ADD COLUMN yaw REAL")   # wall line direction (deg), null on older rows
+    except Exception:
+        pass        # column already there
     # A floor-plan image (the host uploads one per map+floor, e.g. an r6maps screenshot) and how it's placed in
     # our world coordinates (transform set by the host dragging/scaling it to line up with the heatmap).
     conn.execute("""CREATE TABLE IF NOT EXISTS map_backdrops (
@@ -184,8 +188,8 @@ def structures(map_name: str, rebuild: bool = False) -> dict:
     if rebuild or not have:
         _build_structures(map_name)
     with _conn() as conn:
-        rows = conn.execute("SELECT floor, reinforced, x, y, z FROM map_structures WHERE map = ?", (map_name,)).fetchall()
-    return {"map": map_name, "walls": [{"floor": r["floor"], "reinforced": bool(r["reinforced"]),
+        rows = conn.execute("SELECT floor, reinforced, x, y, z, yaw FROM map_structures WHERE map = ?", (map_name,)).fetchall()
+    return {"map": map_name, "walls": [{"floor": r["floor"], "reinforced": bool(r["reinforced"]), "yaw": r["yaw"],
                                         "x": r["x"], "y": r["y"], "z": r["z"]} for r in rows]}
 
 
@@ -220,7 +224,7 @@ def _build_structures(map_name: str, max_packages: int = 12) -> int:
             if pk and pk[0] not in hashes:
                 hashes.append(pk[0])
 
-    surfaces: dict[tuple, list] = {}      # rounded (x,y,z) -> [x,y,z]
+    surfaces: dict[tuple, list] = {}      # rounded (x,y,z) -> [x, y, z, yaw]
     for h in hashes[:max_packages]:
         pkg = server_settings.UPLOADS_DIR / f"{h}.r6session"
         if not pkg.exists():
@@ -232,23 +236,26 @@ def _build_structures(map_name: str, max_packages: int = 12) -> int:
                     for n in recs:
                         z.extract(n, tmp)
                         try:
-                            for (x, y, zz) in W.map_objects(read_rec(Path(tmp) / n)).values():
+                            for (x, y, zz, yaw) in W.map_objects(read_rec(Path(tmp) / n)).values():
                                 key = (round(x * 1.5) / 1.5, round(y * 1.5) / 1.5, round(zz))
-                                surfaces.setdefault(key, [x, y, zz])
+                                cur = surfaces.setdefault(key, [x, y, zz, yaw])
+                                if cur[3] is None and yaw is not None:    # keep an orientation if any round has one
+                                    cur[3] = yaw
                         except Exception:
                             continue
         except Exception as e:                                   # noqa: BLE001 - a bad package must not stop the rest
             print(f"[Rooms] structures: could not read {h[:12]} for {map_name}: {e}")
 
     rows = []
-    for (x, y, z) in surfaces.values():
+    for (x, y, z, yaw) in surfaces.values():
         floor = _floor_of(z, floors)
         reinforced = any(abs(rz - z) < FLOOR_GAP and math.dist((rx, ry), (x, y)) < 1.5 for rx, ry, rz in reinf)
-        rows.append((map_name, floor, 1 if reinforced else 0, round(x, 2), round(y, 2), round(z, 2)))
+        rows.append((map_name, floor, 1 if reinforced else 0, round(x, 2), round(y, 2), round(z, 2),
+                     None if yaw is None else round(yaw, 1)))
     with _conn() as conn:
         _ensure_table(conn)
         conn.execute("DELETE FROM map_structures WHERE map = ?", (map_name,))
-        conn.executemany("INSERT INTO map_structures (map, floor, reinforced, x, y, z) VALUES (?, ?, ?, ?, ?, ?)", rows)
+        conn.executemany("INSERT INTO map_structures (map, floor, reinforced, x, y, z, yaw) VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
         conn.commit()
     print(f"[Rooms] structures for {map_name}: {len(rows)} surfaces from {len(hashes[:max_packages])} packages.")
     return len(rows)

@@ -219,11 +219,22 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
     if ($("showHeat").checked)
       ctx.drawImage(heatCv, 0, 0, cv.width, cv.height, view.ox, view.oy, cv.width * view.s, cv.height * view.s);
     if ($("showWalls").checked) {
-      // Real breakable walls from the replay (object positions) — accurate points, not inferred lines.
-      const sz = Math.max(2.5, 2.6 * view.s);
+      // Real breakable walls from the replay: each surface drawn as a short segment along its own
+      // orientation (decoded from the object's rotation) so they read as wall lines. Older data with no
+      // orientation falls back to a dot. toScreen flips y, so the world angle maps straight through.
+      const sz = Math.max(2.5, 2.6 * view.s), L = 0.75;      // L = half a segment, metres
+      ctx.lineCap = "round"; ctx.lineWidth = Math.max(1.6, 1.9 * view.s);
       for (const w of walls) { if (hidden.has(w.floor)) continue; const [cx, cy] = toScreen(w.x, w.y);
-        if (cx < -5 || cy < -5 || cx > cv.width + 5 || cy > cv.height + 5) continue;
-        ctx.fillStyle = w.reinforced ? col("--reinf") : col("--wall"); ctx.fillRect(cx - sz / 2, cy - sz / 2, sz, sz); }
+        if (cx < -10 || cy < -10 || cx > cv.width + 10 || cy > cv.height + 10) continue;
+        const color = w.reinforced ? col("--reinf") : col("--wall");
+        if (w.yaw === null || w.yaw === undefined) {
+          ctx.fillStyle = color; ctx.fillRect(cx - sz / 2, cy - sz / 2, sz, sz);
+        } else {
+          const a = w.yaw * Math.PI / 180, dx = L * Math.cos(a), dy = L * Math.sin(a);
+          const [x1, y1] = toScreen(w.x + dx, w.y + dy), [x2, y2] = toScreen(w.x - dx, w.y - dy);
+          ctx.strokeStyle = color; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+        }
+      }
     }
     if ($("showSug").checked) for (const r of (data.suggested || [])) pin(r, true);
     for (const r of rooms) pin(r, false);
