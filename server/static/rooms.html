@@ -111,8 +111,6 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   const cv = $("cv"), ctx = cv.getContext("2d");
   let data = null, walls = [], rooms = [], floor = null, kind = "room", hidden = new Set(), dirty = false;
   let base = null, view = { s: 1, ox: 0, oy: 0 };
-  let outlineSegs = [], wallSegs = [];     // precomputed once per map: footprint outline + breakable-wall lines
-  const LINK_M = 1.7;                        // breakable-wall points within this many metres are joined into a line
 
   function fitBase() {
     const b = data.bounds;
@@ -147,54 +145,41 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
     }
     return b;
   }
-  // The footprint outline: players never cross walls, so the edge of where everyone walked is a wall. Built once
-  // per map in the unzoomed base-canvas frame, then transformed by the view each draw (stable under zoom).
-  const OC = 5;
-  function buildOutline() {
-    outlineSegs = [];
-    if (!base) return;
-    const gw = Math.ceil(cv.width / OC), gh = Math.ceil(cv.height / OC);
-    (data.floors || []).forEach((f, fi) => {
-      const g = new Float32Array(gw * gh);
-      for (const p of data.points) { if (p[2] !== fi) continue; const [bx, by] = base.toCv(p[0], p[1]);
-        const gx = bx / OC | 0, gy = by / OC | 0; if (gx >= 0 && gy >= 0 && gx < gw && gy < gh) g[gy * gw + gx]++; }
-      const bl = blur3(g, gw, gh), occ = new Uint8Array(gw * gh);
-      for (let i = 0; i < bl.length; i++) occ[i] = bl[i] >= 0.6 ? 1 : 0;
-      for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
-        if (!occ[y * gw + x]) continue; const X = x * OC, Y = y * OC;
-        if (x + 1 >= gw || !occ[y * gw + x + 1]) outlineSegs.push([X + OC, Y, X + OC, Y + OC, f.name]);
-        if (x - 1 < 0 || !occ[y * gw + x - 1]) outlineSegs.push([X, Y, X, Y + OC, f.name]);
-        if (y + 1 >= gh || !occ[(y + 1) * gw + x]) outlineSegs.push([X, Y + OC, X + OC, Y + OC, f.name]);
-        if (y - 1 < 0 || !occ[(y - 1) * gw + x]) outlineSegs.push([X, Y, X + OC, Y, f.name]);
-      }
-    });
-  }
-  function buildWallSegs() {
-    wallSegs = []; const l2 = LINK_M * LINK_M;
-    for (let i = 0; i < walls.length; i++) for (let j = i + 1; j < walls.length; j++) {
-      const a = walls[i], b = walls[j]; if (a.floor !== b.floor) continue;
-      const dx = a.x - b.x, dy = a.y - b.y; if (dx * dx + dy * dy > l2) continue;
-      wallSegs.push([a.x, a.y, b.x, b.y, a.reinforced && b.reinforced, a.floor]);
-      if (wallSegs.length > 14000) return;
+  // The heatmap is rendered once into an offscreen canvas in the unzoomed base frame, then just stamped under the
+  // view each draw — so pan and zoom never recompute it (that recompute every frame was snoozing the tab).
+  // Rebuilt only when the map, the floor filter or the heatmap toggle changes.
+  const heatCv = document.createElement("canvas"); heatCv.width = cv.width; heatCv.height = cv.height;
+  function buildHeatBitmap() {
+    const h = heatCv.getContext("2d");
+    h.clearRect(0, 0, heatCv.width, heatCv.height);
+    if (!base || !$("showHeat").checked) return;
+    const gw = Math.ceil(cv.width / CELL), gh = Math.ceil(cv.height / CELL), grid = new Float32Array(gw * gh);
+    for (const p of data.points) {
+      if (hidden.has((data.floors[p[2]] || {}).name)) continue;
+      const [bx, by] = base.toCv(p[0], p[1]);
+      const gx = bx / CELL | 0, gy = by / CELL | 0;
+      if (gx >= 0 && gy >= 0 && gx < gw && gy < gh) grid[gy * gw + gx]++;
     }
+    const blur = blur3(grid, gw, gh);
+    let bmax = 1; for (let i = 0; i < blur.length; i++) if (blur[i] > bmax) bmax = blur[i];
+    const norm = Math.max(1, bmax * 0.6);
+    const img = h.createImageData(cv.width, cv.height), d = img.data;
+    for (let y = 0; y < cv.height; y++) { const gy = (y / CELL | 0) * gw;
+      for (let x = 0; x < cv.width; x++) { const v = blur[gy + (x / CELL | 0)]; if (!v) continue;
+        const [r, g, b, a] = heat(Math.pow(v / norm, 0.5)); const o = (y * cv.width + x) * 4;
+        d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = a; } }
+    h.putImageData(img, 0, 0);
   }
+  let rafPending = false;
+  function requestDraw() { if (rafPending) return; rafPending = true; requestAnimationFrame(() => { rafPending = false; draw(); }); }
   function draw() {
     ctx.fillStyle = col("--bg"); ctx.fillRect(0, 0, cv.width, cv.height);
     if (!base) { ctx.fillStyle = "#888"; ctx.fillText("No positions for this map.", 20, 30); return; }
-    if ($("showHeat").checked) drawHeat();
+    if ($("showHeat").checked)
+      ctx.drawImage(heatCv, 0, 0, cv.width, cv.height, view.ox, view.oy, cv.width * view.s, cv.height * view.s);
     if ($("showWalls").checked) {
-      // footprint outline (room/building walls, incl. the solid ones)
-      ctx.strokeStyle = col("--ink"); ctx.globalAlpha = 0.55; ctx.lineWidth = 1.3; ctx.beginPath();
-      for (const s of outlineSegs) { if (hidden.has(s[4])) continue;
-        ctx.moveTo(s[0] * view.s + view.ox, s[1] * view.s + view.oy); ctx.lineTo(s[2] * view.s + view.ox, s[3] * view.s + view.oy); }
-      ctx.stroke(); ctx.globalAlpha = 1;
-      // breakable walls, joined into lines
-      ctx.lineWidth = Math.max(1.6, 1.4 * view.s);
-      for (const s of wallSegs) { if (hidden.has(s[5])) continue;
-        ctx.strokeStyle = s[4] ? col("--reinf") : col("--wall"); ctx.beginPath();
-        ctx.moveTo(...toScreen(s[0], s[1])); ctx.lineTo(...toScreen(s[2], s[3])); ctx.stroke(); }
-      // the wall points themselves, so isolated ones aren't lost
-      const sz = Math.max(2, 2 * view.s);
+      // Real breakable walls from the replay (object positions) — accurate points, not inferred lines.
+      const sz = Math.max(2.5, 2.6 * view.s);
       for (const w of walls) { if (hidden.has(w.floor)) continue; const [cx, cy] = toScreen(w.x, w.y);
         if (cx < -5 || cy < -5 || cx > cv.width + 5 || cy > cv.height + 5) continue;
         ctx.fillStyle = w.reinforced ? col("--reinf") : col("--wall"); ctx.fillRect(cx - sz / 2, cy - sz / 2, sz, sz); }
@@ -202,30 +187,6 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
     if ($("showSug").checked) for (const r of (data.suggested || [])) pin(r, true);
     for (const r of rooms) pin(r, false);
     if (pending) { const [cx, cy] = toScreen(pending.x, pending.y); ctx.beginPath(); ctx.arc(cx, cy, 7, 0, 7); ctx.strokeStyle = col("--good"); ctx.lineWidth = 2; ctx.stroke(); }
-  }
-  function drawHeat() {
-    const gw = Math.ceil(cv.width / CELL), gh = Math.ceil(cv.height / CELL), grid = new Float32Array(gw * gh);
-    for (const p of data.points) {
-      if (hidden.has((data.floors[p[2]] || {}).name)) continue;
-      const [cx, cy] = toScreen(p[0], p[1]);
-      const gx = cx / CELL | 0, gy = cy / CELL | 0;
-      if (gx >= 0 && gy >= 0 && gx < gw && gy < gh) grid[gy * gw + gx]++;
-    }
-    const blur = new Float32Array(gw * gh);
-    for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) {
-      let s = 0, n = 0;
-      for (let dy = -1; dy <= 1; dy++) { const yy = gy + dy; if (yy < 0 || yy >= gh) continue;
-        for (let dx = -1; dx <= 1; dx++) { const xx = gx + dx; if (xx < 0 || xx >= gw) continue; s += grid[yy * gw + xx]; n++; } }
-      blur[gy * gw + gx] = s / n;
-    }
-    let bmax = 1; for (let i = 0; i < blur.length; i++) if (blur[i] > bmax) bmax = blur[i];
-    const norm = Math.max(1, bmax * 0.6);
-    const img = ctx.createImageData(cv.width, cv.height), d = img.data;
-    for (let y = 0; y < cv.height; y++) { const gy = (y / CELL | 0) * gw;
-      for (let x = 0; x < cv.width; x++) { const v = blur[gy + (x / CELL | 0)]; if (!v) continue;
-        const [r, g, b, a] = heat(Math.pow(v / norm, 0.5)); const o = (y * cv.width + x) * 4;
-        d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = a; } }
-    ctx.putImageData(img, 0, 0);
   }
   function pin(r, suggested) {
     if (hidden.has(r.floor)) return;
@@ -244,7 +205,7 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   cv.addEventListener("pointermove", (e) => {
     if (!down) return;
     const dx = e.offsetX - down.x, dy = e.offsetY - down.y;
-    if (Math.abs(dx) + Math.abs(dy) > 4) { moved = true; cv.classList.add("panning"); view.ox = down.ox + dx; view.oy = down.oy + dy; draw(); }
+    if (Math.abs(dx) + Math.abs(dy) > 4) { moved = true; cv.classList.add("panning"); view.ox = down.ox + dx; view.oy = down.oy + dy; requestDraw(); }
   });
   cv.addEventListener("pointerup", (e) => {
     cv.classList.remove("panning");
@@ -257,7 +218,7 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
     const f = e.deltaY < 0 ? 1.2 : 1 / 1.2, ns = Math.max(0.6, Math.min(12, view.s * f));
     const k = ns / view.s;
     view.ox = mx - (mx - view.ox) * k; view.oy = my - (my - view.oy) * k; view.s = ns;
-    draw();
+    requestDraw();
   }, { passive: false });
 
   let pending = null;
@@ -298,12 +259,12 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
       floor = b.dataset.f;
       $("floorRow").querySelectorAll("button[data-f]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
       hidden = new Set(data.floors.map(f => f.name).filter(n => n !== floor));
-      hint(`Labelling ${floor}. Pick a type and click a room.`); draw();
+      hint(`Labelling ${floor}. Pick a type and click a room.`); buildHeatBitmap(); draw();
     }));
     $("allFloors").addEventListener("click", () => {
       floor = null; hidden = new Set();
       $("floorRow").querySelectorAll("button[data-f]").forEach(x => x.setAttribute("aria-pressed", "false"));
-      hint("Showing all floors. Pick one floor to add pins."); draw();
+      hint("Showing all floors. Pick one floor to add pins."); buildHeatBitmap(); draw();
     });
   }
   function kindButtons() {
@@ -317,14 +278,14 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   const hint = (t, warn) => { const h = $("hint"); h.textContent = t; h.className = "small " + (warn ? "good" : "muted"); };
   $("showSug").addEventListener("change", draw);
   $("showWalls").addEventListener("change", draw);
-  $("showHeat").addEventListener("change", draw);
+  $("showHeat").addEventListener("change", () => { buildHeatBitmap(); draw(); });
   $("resetView").addEventListener("click", resetView);
 
   async function loadWalls(map, rebuild) {
     walls = [];
     try { walls = (await api(`/api/v1/rooms/structures?map=${encodeURIComponent(map)}${rebuild ? "&rebuild=true" : ""}`)).walls || []; }
     catch (e) { /* walls are optional */ }
-    buildWallSegs(); draw();
+    draw();
   }
   $("rebuildWalls").addEventListener("click", async () => {
     const map = $("mapSel").value; if (!map) return;
@@ -340,7 +301,7 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
     floor = null; hidden = new Set(); dirty = false; $("saveBtn").disabled = true; pending = null;
     view = { s: 1, ox: 0, oy: 0 };
     $("mapInfo").textContent = `${data.points.length} points · ${(data.floors || []).length} floors`;
-    fitBase(); buildOutline(); floorButtons(); renderRooms(); draw();
+    fitBase(); buildHeatBitmap(); floorButtons(); renderRooms(); draw();
     hint(rooms.length ? "Loaded saved pins. Pick a floor to add more." : "Pick a floor and a type, then click a room.");
     loadWalls(map, false);
   }
