@@ -53,6 +53,7 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   <span style="flex:1"></span>
   <label class="small"><input type="checkbox" id="showHeat" checked> heatmap</label>
   <label class="small"><input type="checkbox" id="showWalls" checked> walls</label>
+  <label class="small"><input type="checkbox" id="showObjects"> cams/hatches</label>
   <label class="small"><input type="checkbox" id="showSug" checked> sites</label>
   <button id="saveBtn" disabled>Save labels</button>
   <span id="saveMsg" class="small"></span>
@@ -131,7 +132,7 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   }
 
   const cv = $("cv"), ctx = cv.getContext("2d");
-  let data = null, walls = [], rooms = [], floor = null, kind = "room", hidden = new Set(), dirty = false;
+  let data = null, walls = [], features = [], rooms = [], floor = null, kind = "room", hidden = new Set(), dirty = false;
   let base = null, view = { s: 1, ox: 0, oy: 0 };
   let backdrop = null, aligning = false;    // {floor, img, transform:{scale,rot,tx,ty,flip,opacity}, dirty}
 
@@ -233,6 +234,24 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
           const a = w.yaw * Math.PI / 180, dx = L * Math.cos(a), dy = L * Math.sin(a);
           const [x1, y1] = toScreen(w.x + dx, w.y + dy), [x2, y2] = toScreen(w.x - dx, w.y - dy);
           ctx.strokeStyle = color; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+        }
+      }
+    }
+    if ($("showObjects").checked) {
+      // Fixed map objects decoded from the replay: cameras (mounted) and a fixed floor feature (hatch/door).
+      // Kinds are provisional. Camera draws as a ring + a stub along its facing; hatch as a small diamond.
+      for (const f of features) { if (hidden.has(f.floor)) continue; const [cx, cy] = toScreen(f.x, f.y);
+        if (cx < -10 || cy < -10 || cx > cv.width + 10 || cy > cv.height + 10) continue;
+        if (f.kind === "cam") {
+          ctx.strokeStyle = col("--good"); ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 7); ctx.stroke();
+          if (f.yaw !== null && f.yaw !== undefined) {
+            const a = f.yaw * Math.PI / 180, [ex, ey] = toScreen(f.x + 1.4 * Math.cos(a), f.y + 1.4 * Math.sin(a));
+            ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(ex, ey); ctx.stroke();
+          }
+        } else {
+          ctx.strokeStyle = col("--warn"); ctx.lineWidth = 2; const d = Math.max(4, 3 * view.s);
+          ctx.beginPath(); ctx.moveTo(cx, cy - d); ctx.lineTo(cx + d, cy); ctx.lineTo(cx, cy + d); ctx.lineTo(cx - d, cy); ctx.closePath(); ctx.stroke();
         }
       }
     }
@@ -344,6 +363,7 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   const hint = (t, warn) => { const h = $("hint"); h.textContent = t; h.className = "small " + (warn ? "good" : "muted"); };
   $("showSug").addEventListener("change", draw);
   $("showWalls").addEventListener("change", draw);
+  $("showObjects").addEventListener("change", draw);
   $("showHeat").addEventListener("change", () => { buildHeatBitmap(); draw(); });
   $("resetView").addEventListener("click", resetView);
 
@@ -420,9 +440,11 @@ li a { color: var(--warn); text-decoration: none; cursor: pointer; }
   });
 
   async function loadWalls(map, rebuild) {
-    walls = [];
-    try { walls = (await api(`/api/v1/rooms/structures?map=${encodeURIComponent(map)}${rebuild ? "&rebuild=true" : ""}`)).walls || []; }
-    catch (e) { /* walls are optional */ }
+    walls = []; features = [];
+    try {
+      const s = await api(`/api/v1/rooms/structures?map=${encodeURIComponent(map)}${rebuild ? "&rebuild=true" : ""}`);
+      walls = s.walls || []; features = s.features || [];
+    } catch (e) { /* walls are optional */ }
     draw();
   }
   $("rebuildWalls").addEventListener("click", async () => {

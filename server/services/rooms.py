@@ -53,6 +53,10 @@ def _ensure_table(conn) -> None:
         conn.execute("ALTER TABLE map_structures ADD COLUMN yaw REAL")   # wall line direction (deg), null on older rows
     except Exception:
         pass        # column already there
+    try:
+        conn.execute("ALTER TABLE map_structures ADD COLUMN kind TEXT NOT NULL DEFAULT 'wall'")  # wall|cam|hatch
+    except Exception:
+        pass        # column already there
     # A floor-plan image (the host uploads one per map+floor, e.g. an r6maps screenshot) and how it's placed in
     # our world coordinates (transform set by the host dragging/scaling it to line up with the heatmap).
     conn.execute("""CREATE TABLE IF NOT EXISTS map_backdrops (
@@ -188,9 +192,12 @@ def structures(map_name: str, rebuild: bool = False) -> dict:
     if rebuild or not have:
         _build_structures(map_name)
     with _conn() as conn:
-        rows = conn.execute("SELECT floor, reinforced, x, y, z, yaw FROM map_structures WHERE map = ?", (map_name,)).fetchall()
-    return {"map": map_name, "walls": [{"floor": r["floor"], "reinforced": bool(r["reinforced"]), "yaw": r["yaw"],
-                                        "x": r["x"], "y": r["y"], "z": r["z"]} for r in rows]}
+        rows = conn.execute("SELECT floor, reinforced, x, y, z, yaw, kind FROM map_structures WHERE map = ?", (map_name,)).fetchall()
+    walls = [{"floor": r["floor"], "reinforced": bool(r["reinforced"]), "yaw": r["yaw"],
+              "x": r["x"], "y": r["y"], "z": r["z"]} for r in rows if (r["kind"] or "wall") == "wall"]
+    features = [{"floor": r["floor"], "kind": r["kind"], "yaw": r["yaw"], "x": r["x"], "y": r["y"], "z": r["z"]}
+                for r in rows if (r["kind"] or "wall") != "wall"]
+    return {"map": map_name, "walls": walls, "features": features}
 
 
 def _build_structures(map_name: str, max_packages: int = 12) -> int:
@@ -225,6 +232,7 @@ def _build_structures(map_name: str, max_packages: int = 12) -> int:
                 hashes.append(pk[0])
 
     surfaces: dict[tuple, list] = {}      # rounded (x,y,z) -> [x, y, z, yaw]
+    features: dict[tuple, list] = {}      # (kind, rx, ry, rz) -> [kind, x, y, z, yaw]  (cameras, hatches)
     for h in hashes[:max_packages]:
         pkg = server_settings.UPLOADS_DIR / f"{h}.r6session"
         if not pkg.exists():
@@ -236,11 +244,16 @@ def _build_structures(map_name: str, max_packages: int = 12) -> int:
                     for n in recs:
                         z.extract(n, tmp)
                         try:
-                            for (x, y, zz, yaw) in W.map_objects(read_rec(Path(tmp) / n)).values():
+                            rdata = read_rec(Path(tmp) / n)
+                            for (x, y, zz, yaw) in W.map_objects(rdata).values():
                                 key = (round(x * 1.5) / 1.5, round(y * 1.5) / 1.5, round(zz))
                                 cur = surfaces.setdefault(key, [x, y, zz, yaw])
                                 if cur[3] is None and yaw is not None:    # keep an orientation if any round has one
                                     cur[3] = yaw
+                            for (kind, x, y, zz, yaw) in W.map_features(rdata):
+                                fcur = features.setdefault((kind, round(x), round(y), round(zz)), [kind, x, y, zz, yaw])
+                                if fcur[4] is None and yaw is not None:
+                                    fcur[4] = yaw
                         except Exception:
                             continue
         except Exception as e:                                   # noqa: BLE001 - a bad package must not stop the rest
@@ -251,11 +264,14 @@ def _build_structures(map_name: str, max_packages: int = 12) -> int:
         floor = _floor_of(z, floors)
         reinforced = any(abs(rz - z) < FLOOR_GAP and math.dist((rx, ry), (x, y)) < 1.5 for rx, ry, rz in reinf)
         rows.append((map_name, floor, 1 if reinforced else 0, round(x, 2), round(y, 2), round(z, 2),
-                     None if yaw is None else round(yaw, 1)))
+                     None if yaw is None else round(yaw, 1), "wall"))
+    for (kind, x, y, z, yaw) in features.values():
+        rows.append((map_name, _floor_of(z, floors), 0, round(x, 2), round(y, 2), round(z, 2),
+                     None if yaw is None else round(yaw, 1), kind))
     with _conn() as conn:
         _ensure_table(conn)
         conn.execute("DELETE FROM map_structures WHERE map = ?", (map_name,))
-        conn.executemany("INSERT INTO map_structures (map, floor, reinforced, x, y, z, yaw) VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+        conn.executemany("INSERT INTO map_structures (map, floor, reinforced, x, y, z, yaw, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
         conn.commit()
     print(f"[Rooms] structures for {map_name}: {len(rows)} surfaces from {len(hashes[:max_packages])} packages.")
     return len(rows)

@@ -157,6 +157,35 @@ def wall_spot(pts: list, t: float) -> Optional[tuple[float, float, float]]:
     return (round(p[1] + REACH_M * math.cos(a), 2), round(p[2] + REACH_M * math.sin(a), 2), round(p[3], 2))
 
 
+# Other fixed level-object types seen in the introduction stream, beside breakable SURFACEs. Counts across
+# Border/Villa/Chalet/Nighthaven: CAM varies 8-11 (more on camera-dense maps) and is mounted high -> security
+# cameras; HATCH is exactly 8 on every map, at floor level in doorways -> a fixed floor feature (hatches or the
+# main barricadable doors; kind is provisional until confirmed on the map).
+FEATURE_TYPES = {0x725A7F58: "cam", 0x2959F6D0: "hatch"}
+
+
+def map_features(data: bytes) -> list[tuple[str, float, float, float, Optional[float]]]:
+    """Fixed non-wall map objects: (kind, x, y, z, yaw) per object, deduped by level id. Same packet as
+    map_objects (position at +16, rotation at +28, type at +57); kinds are provisional (see FEATURE_TYPES)."""
+    from integration.positions import yaw_deg
+    seen: set = set()
+    out: list[tuple[str, float, float, float, Optional[float]]] = []
+    i = data.find(OBJECT)
+    while i != -1:
+        if i + 61 <= len(data):
+            t = struct.unpack_from("<I", data, i + 57)[0]
+            if t in FEATURE_TYPES:
+                x, y, z = struct.unpack_from("<3f", data, i + 16)
+                oid = struct.unpack_from("<Q", data, i + 4)[0]
+                if oid not in seen and all(math.isfinite(v) and abs(v) < 2000 for v in (x, y, z)):
+                    seen.add(oid)
+                    q = struct.unpack_from("<4f", data, i + 28)
+                    yaw = yaw_deg(q) if all(math.isfinite(c) for c in q) and 0.9 < sum(c * c for c in q) < 1.1 else None
+                    out.append((FEATURE_TYPES[t], x, y, z, yaw))
+        i = data.find(OBJECT, i + 1)
+    return out
+
+
 def map_objects(data: bytes) -> dict[int, tuple[float, float, float, Optional[float]]]:
     """level id -> (x, y, z, yaw) of every destructible surface the replay introduces. The introduction
     packet carries the object's rotation quaternion right after its position (at +28); yaw_deg turns that
