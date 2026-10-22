@@ -179,6 +179,39 @@ def test_facing_at_death_is_silent_without_enough_measurable_deaths():
     assert tf.facing_at_death(match_of("loss"), {"me"}, positions, events) == []
 
 
+ROOMS_CALL = [{"name": "Workshop", "floor": "2F", "kind": "room", "x": 10.0, "y": 10.0, "z": 4.0},
+              {"name": "Archives", "floor": "2F", "kind": "site", "x": 80.0, "y": 80.0, "z": 4.0},
+              {"name": "Break Room", "floor": "2F", "kind": "room", "x": 50.0, "y": 50.0, "z": 4.0}]
+
+
+def test_called_rooms_matches_distinctive_words_but_not_generic_ones():
+    idx = tf._room_index(ROOMS_CALL)
+    assert [r["name"] for r in tf._called_rooms("they are workshop", idx)] == ["Workshop"]
+    assert tf._called_rooms("break the cam, oh", idx) == []            # 'break' alone is not Break Room
+    assert [r["name"] for r in tf._called_rooms("push break room now", idx)] == ["Break Room"]
+    assert tf._called_rooms("insecurity about this", idx) == []        # whole-word, so no false substring hit
+
+
+def _hold(x, y, z, t0=40, t1=120):
+    return [[float(t), x, y, z, None] for t in range(t0, t1)]
+
+
+def test_callout_accuracy_checks_calls_against_enemy_positions(monkeypatch):
+    monkeypatch.setattr(tf, "CALLOUT_MIN_CHECKS", 1)
+    positions = {1: {"players": {
+        "Me": {"team": 1, "pts": _hold(0, 0, 4.0)},
+        "EnemyX": {"team": 0, "pts": _hold(10, 10, 4.0)},     # sits in Workshop all round
+    }}}
+    timeline = {"rounds": [{"round_number": 1, "ours": ["James"], "items": [
+        {"kind": "speech", "speaker": "James", "t": 20, "text": "they are workshop"},   # enemy IS there -> match
+        {"kind": "speech", "speaker": "James", "t": 30, "text": "one in archives"},     # enemy NOT there -> miss
+        {"kind": "speech", "speaker": "James", "t": 35, "text": "break the cam oh"},     # not a room call
+        {"kind": "speech", "speaker": "Enemy", "t": 40, "text": "workshop"},            # not our speaker
+    ]}]}
+    lines = tf.callout_accuracy(timeline, positions, ROOMS_CALL, {"me"})
+    assert lines and "1 of 2 checkable room calls" in lines[0] and "James 1/2" in lines[0]
+
+
 def test_the_report_gets_a_positioning_section_only_when_positions_exist():
     m = NS(rounds=[NS(round_number=1, side="defense", outcome="loss", site="", player_stats=[])])
     facts = tf.build_match_facts(m, {"me"}, {}, {})

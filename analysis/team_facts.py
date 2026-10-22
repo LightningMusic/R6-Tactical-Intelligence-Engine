@@ -498,6 +498,100 @@ def facing_at_death(match: Any, ours: Optional[set[str]], positions: dict[int, d
             f"90°+ from where the shot came from ({eg})."]
 
 
+# ── callouts vs reality (comms timeline + positions + labelled rooms) ──────
+
+CALLOUT_LOOKBACK = 12.0        # a call can be about an enemy seen up to this many seconds earlier
+CALLOUT_LOOKAHEAD = 3.0        # ...or just about to be where the caller says
+CALLOUT_NEAR_M = 9.0           # an enemy this close to the called room's pin counts as "there"
+CALLOUT_MIN_CHECKS = 4         # too few checkable calls to report
+_GENERIC_ROOM = {"room", "hallway", "stairs", "main", "break", "waiting", "exit", "check", "corridor", "desk"}
+_WORDS = re.compile(r"[a-z]+")
+
+
+def _room_index(rooms: list) -> list:
+    """Each room -> how it's named in speech: a distinctive single word (>=4 chars) when it has one, else the
+    full name (so 'Break Room' needs the phrase, not a stray 'break')."""
+    out = []
+    for r in rooms or []:
+        name = str(r.get("name") or "")
+        words = [w for w in _WORDS.findall(name.lower()) if len(w) >= 4]
+        keys = [w for w in words if w not in _GENERIC_ROOM]
+        out.append((r, keys, name.lower()))
+    return out
+
+
+def _called_rooms(text: str, idx: list) -> list:
+    toks = set(_WORDS.findall((text or "").lower()))
+    padded = " " + (text or "").lower() + " "
+    hits = []
+    for r, keys, full in idx:
+        if keys:
+            if any(k in toks for k in keys):
+                hits.append(r)
+        elif full and (" " + full + " ") in padded:
+            hits.append(r)
+    return hits
+
+
+def callout_accuracy(timeline: Optional[dict], positions: dict[int, dict], rooms: Optional[list],
+                     ours: Optional[set[str]]) -> list[str]:
+    """Did our players' room callouts match where an enemy actually was? For each in-round speech line that
+    names a labelled room, check the opposing team's positions in a window around it; the call is 'matched'
+    when an enemy was within range of that room on that floor. Approximate: leans on the transcript and on
+    the call being about an enemy, so it only reports when there are enough checkable calls."""
+    if not timeline or not rooms or not positions:
+        return []
+    from integration.positions import at, PREP_SEC
+    idx = _room_index(rooms)
+    checked: collections.Counter = collections.Counter()
+    matched: collections.Counter = collections.Counter()
+    for rnd in timeline.get("rounds") or []:
+        rn = rnd.get("round_number")
+        pos = positions.get(rn) if rn is not None else None
+        if pos is None:
+            continue
+        players = pos.get("players") or {}
+        our_teams = {p.get("team") for n, p in players.items() if norm(n) in (ours or set())}
+        if not our_teams:
+            continue
+        enemies = [p for n, p in players.items() if p.get("team") not in our_teams]
+        team_names = set(rnd.get("ours") or [])
+        for it in rnd.get("items") or []:
+            if it.get("kind") != "speech" or it.get("speaker") not in team_names:
+                continue
+            tc = it.get("t")
+            if tc is None or tc <= 0:
+                continue
+            called = _called_rooms(it.get("text") or "", idx)
+            if not called:
+                continue
+            tp = tc + PREP_SEC                                   # comms clock -> positions clock
+            sp = it["speaker"]
+            checked[sp] += 1                                      # one call per line (a word may name 2 nearby rooms)
+            found = False
+            for rm in called:
+                for p in enemies:
+                    pts = p.get("pts") or []
+                    for tt in (tp - CALLOUT_LOOKBACK, tp - CALLOUT_LOOKBACK / 2, tp, tp + CALLOUT_LOOKAHEAD):
+                        s = at(pts, tt)
+                        if s and abs(s[3] - rm["z"]) < FLOOR_STEP and math.dist((s[1], s[2]), (rm["x"], rm["y"])) <= CALLOUT_NEAR_M:
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    break
+            if found:
+                matched[sp] += 1
+    total = sum(checked.values())
+    if total < CALLOUT_MIN_CHECKS:
+        return []
+    good = sum(matched.values())
+    detail = ", ".join("%s %d/%d" % (sp, matched[sp], n) for sp, n in checked.most_common(5))
+    return [f"- Location calls that matched an enemy there: {good} of {total} checkable room calls ({detail}). "
+            f"Rough read — from the transcript and where enemies actually were."]
+
+
 # ── site setup and breaches (integration/walls.py) ────────────────────────
 
 ON_WALL_M = 2.0             # a breach this close to a reinforced spot (same floor) went through that wall
@@ -1184,7 +1278,7 @@ def focus_points(match: Any, facts: dict[str, Any]) -> str:
 def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, dict],
                       display: dict[str, str], report_players: Optional[set[str]] = None,
                       usual: Optional[dict[str, int]] = None, positions: Optional[dict[int, dict]] = None,
-                      places: Optional[tuple[dict, list]] = None) -> dict[str, Any]:
+                      places: Optional[tuple[dict, list]] = None, timeline: Optional[dict] = None) -> dict[str, Any]:
     """`ours`: our whole team (team numbers). `report_players`: who is listed by name (the saved team list).
     `usual`: totals over the team's earlier matches (usual_baseline), when there are enough.
     `positions`: {round: player paths} from the replays; `places`: (site model, floors[, walk map[, usual walls]])
@@ -1218,10 +1312,11 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
         try:
             walk = places[2] if places and len(places) > 2 else None
             pos_lines = positioning_lines(positioning(match, ours, positions, walk), usual)
+            rooms = places[4] if places and len(places) > 4 else None
             if places and places[0]:
-                rooms = places[4] if places and len(places) > 4 else None
                 pos_lines += death_places(match, ours, positions, places[0], places[1], rooms)
             pos_lines += facing_at_death(match, ours, positions, events, display)
+            pos_lines += callout_accuracy(timeline, positions, rooms, ours)
         except Exception:                                  # a nicety: never a reason to lose the debrief
             pos_lines = []
     wall_lines: list[str] = []

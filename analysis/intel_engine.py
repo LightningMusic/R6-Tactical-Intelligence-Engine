@@ -659,7 +659,8 @@ class IntelEngine:
                                                 report_players=team_facts.ours_set(report_players),
                                                 usual=self._team_usual(repo, match_id),
                                                 positions=positions,
-                                                places=self._map_places(repo, match) if positions else None)
+                                                places=self._map_places(repo, match) if positions else None,
+                                                timeline=self._comms_timeline(repo, match_id) if positions else None)
                    if ours else None)
         if facts:
             facts["comms_counts"] = self._comms_counts(repo, match_id)
@@ -801,16 +802,23 @@ class IntelEngine:
         """How many flagged moments of each kind the comms timeline found."""
         counts: dict[str, int] = {}
         try:
+            for f in (self._comms_timeline(repo, match_id) or {}).get("flags") or []:
+                counts[f["kind"]] = counts.get(f["kind"], 0) + 1
+        except Exception:
+            pass
+        return counts
+
+    def _comms_timeline(self, repo, match_id: int) -> Optional[dict]:
+        """The stored comms timeline (rounds -> speech items with round-relative times), for callout checks."""
+        try:
             with repo.db.get_connection() as conn:
                 row = conn.execute(
                     "SELECT metric_text FROM derived_metrics WHERE match_id = ? AND metric_name = 'comms_timeline'",
                     (match_id,),
                 ).fetchone()
-            for f in (json.loads(row[0]).get("flags") or []) if row and row[0] else []:
-                counts[f["kind"]] = counts.get(f["kind"], 0) + 1
+            return json.loads(row[0]) if row and row[0] else None
         except Exception:
-            pass
-        return counts
+            return None
 
     def _get_round_events(self, match_id: int) -> dict[int, dict]:
         """
