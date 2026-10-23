@@ -653,6 +653,13 @@ class IntelEngine:
             return {"error": f"Match {match_id} not found."}
 
         ours    = self._resolve_ours(repo, match_id, match, our_players)
+        # When a roster is set, only its players are "ours": in a pug the recording player's in-game team
+        # also holds randoms, who shouldn't be counted as teammates (reinforcement credit, trade support...).
+        roster = team_facts.ours_set(report_players)
+        if ours and roster:
+            kept = ours & roster
+            if kept:
+                ours = kept
         display = {str(k).lower(): v for k, v in (display_names or {}).items()}
         positions = self._round_positions(repo, match_id)
         facts   = (team_facts.build_match_facts(match, ours, self._get_round_events(match_id), display,
@@ -710,6 +717,11 @@ class IntelEngine:
             return {}
 
         ours    = self._resolve_ours(repo, match_id, match, our_players)
+        roster = team_facts.ours_set(report_players)      # roster-only "ours" (drop pug randoms); see analyze_match
+        if ours and roster:
+            kept = ours & roster
+            if kept:
+                ours = kept
         display = {str(k).lower(): v for k, v in (display_names or {}).items()}
 
         engine  = MetricsEngine(match)
