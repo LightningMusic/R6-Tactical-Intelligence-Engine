@@ -36,6 +36,15 @@ def serve_dashboard() -> HTMLResponse:
     return HTMLResponse(content=_load_dashboard_html())
 
 
+_DASHBOARD_BETA_PATH = Path(__file__).parent / "static" / "dashboard-beta.html"
+
+
+@router.get("/dashboard-beta", response_class=HTMLResponse, include_in_schema=False)
+def serve_dashboard_beta() -> HTMLResponse:
+    """Redesigned dashboard, served alongside the stable one for review (not the default yet)."""
+    return HTMLResponse(content=_DASHBOARD_BETA_PATH.read_text(encoding="utf-8"))
+
+
 _REVIEW_HTML_PATH = Path(__file__).parent / "static" / "review.html"
 
 
