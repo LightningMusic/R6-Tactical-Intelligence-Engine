@@ -1,7 +1,6 @@
 from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget, QApplication
 
 from app.app_controller import AppController
-from gui.dashboard_view import DashboardView
 from gui.match_view import MatchView
 from gui.recording_view import RecordingView
 from gui.analysis_view import AnalysisView
@@ -65,14 +64,12 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
 
         # ── Views ─────────────────────────────────────────────
-        self.dashboard_view = DashboardView()
         self.recording_view = RecordingView(controller=self.controller)
         self.match_view     = MatchView()
         self.analysis_view  = AnalysisView(parent=self, controller=self.controller)
         self.settings_view  = SettingsView()
         self.export_view    = ExportView(parent=self, controller=self.controller)
 
-        self.tabs.addTab(self.dashboard_view, "🏠 Dashboard")
         self.tabs.addTab(self.recording_view, "🎙 Recording")
         self.tabs.addTab(self.match_view,     "📋 Match Input")
         self.tabs.addTab(self.analysis_view,  "📊 Analysis")
