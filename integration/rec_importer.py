@@ -61,6 +61,8 @@ class RecImporter:
         failed_files:  list[str]  = []
         map_name:      Optional[str] = None
         map_game_id:   Optional[int] = None
+        game_mode:     Optional[str] = None
+        match_type:    Optional[dict] = None
         last_scored_round = 0
         played_at:     Optional[str] = None
         score_us:      Optional[int] = None
@@ -97,6 +99,12 @@ class RecImporter:
                     map_name = meta["map_name"]
                     map_game_id = meta.get("map_game_id")
                     self._log(f"  Map (as the replay reports it): {map_name}")
+                if game_mode is None and meta.get("game_mode"):
+                    game_mode = meta["game_mode"]
+                    self._log(f"  Game mode: {game_mode}")
+                if match_type is None and meta.get("match_type"):
+                    match_type = meta["match_type"]
+                    self._log(f"  Match type: {(match_type or {}).get('name')}")
                 # A replay's team scores are the running score after that
                 # round, so the match score is the LAST round's. Taking the
                 # first file's (as this used to) made every match 1-0 or 0-1.
@@ -162,6 +170,8 @@ class RecImporter:
                 map_name=map_name,
                 map_game_id=map_game_id,
                 dissect_map_name=map_name,
+                game_mode=game_mode,
+                match_type=match_type,
             )
 
         if failed_files:
@@ -178,6 +188,8 @@ class RecImporter:
             map_name=map_name,
             map_game_id=map_game_id,
             dissect_map_name=map_name,
+            game_mode=game_mode,
+            match_type=match_type,
             score_us=score_us,
             score_them=score_them,
             rounds=parsed_rounds,
@@ -293,6 +305,25 @@ class RecImporter:
             "theirs": theirs,
             "events": events,
         }
+
+    @classmethod
+    def peek_match_type(cls, folder: Path, dissect_path: Path = R6_DISSECT_PATH) -> Optional[dict]:
+        """A cheap look at just the match type of a replay folder: dissect only the FIRST
+        .rec and read its ``matchType`` ({"name", "id"}), without parsing the whole match.
+        Lets the server decide whether an upload is one of our competition games before it
+        spends anything on transcription or AI. None when there's nothing to read."""
+        recs = sorted(Path(folder).glob("*.rec"))
+        if not recs:
+            return None
+        try:
+            importer = cls(dissect_path=dissect_path)
+            raw, _err = importer._run_dissect_with_retry(recs[0])
+        except Exception:
+            return None
+        if not isinstance(raw, dict):
+            return None
+        mt = raw.get("matchType")
+        return mt if isinstance(mt, dict) else None
 
     def import_multiple_folders(
         self,
@@ -809,6 +840,8 @@ class RecImporter:
             "map_name":         dissect_map_name,
             "map_game_id":      map_game_id,
             "dissect_map_name": dissect_map_name,
+            "game_mode":        str((data.get("gamemode") or {}).get("name") or "").strip() or None,
+            "match_type":       data.get("matchType") if isinstance(data.get("matchType"), dict) else None,
             "score_us":         score_us,
             "score_them":       score_them,
         }

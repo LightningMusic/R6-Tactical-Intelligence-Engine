@@ -219,3 +219,56 @@ def test_the_report_gets_a_positioning_section_only_when_positions_exist():
     facts["positioning_lines"] = ["- Deaths with no teammate within 10 m: 1 of 1 (100%)."]
     rep = tf.assemble_report("## MATCH SUMMARY\nx", facts, "- y")
     assert rep.index("## ROUND PATTERNS") < rep.index("## POSITIONING") < rep.index("## WHAT TO FOCUS")
+
+
+# ── trade geometry: deaths split by side into isolated (spacing) vs in-range-but-untraded (reaction) ──
+def _tg_rounds(sides):
+    return NS(rounds=[NS(round_number=i + 1, side=s, outcome="loss", site="", player_stats=[])
+                      for i, s in enumerate(sides)])
+
+
+def _tg_pos(z=0.0):
+    # Me(0), Four(6) and Mate(5) are clustered; Third(25 m) is off on his own. Third, Me, Mate die in that
+    # order while Four survives, so every death still has a living teammate to be measured against.
+    return {"died": {"Third": 40.0, "Me": 50.0, "Mate": 60.0},
+            "players": {"Me": {"team": 1, "pts": still(0, 0, z)},
+                        "Mate": {"team": 1, "pts": still(5, 0, z)},
+                        "Third": {"team": 1, "pts": still(25, 0, z)},
+                        "Four": {"team": 1, "pts": still(6, 0, z)},
+                        "Enemy": {"team": 0, "pts": still(60, 0, z)}}}
+
+
+def _tg_events():
+    return {"kill_order": True, "kills": [{"victim": "Third", "trade": False},
+                                          {"victim": "Me", "trade": True},
+                                          {"victim": "Mate", "trade": False}]}
+
+
+OURS_TG = {"me", "mate", "third", "four"}
+
+
+def test_trade_geometry_splits_by_side_and_separates_spacing_from_reaction():
+    positions = {1: _tg_pos(), 2: _tg_pos(), 3: _tg_pos()}
+    events = {1: _tg_events(), 2: _tg_events(), 3: _tg_events()}
+    tg = tf.trade_geometry(_tg_rounds(["defense", "defense", "attack"]), OURS_TG, positions, events)
+    # each round: Third isolated & untraded, Me in-range & traded, Mate in-range & untraded (Four = last alive)
+    assert tg["defense"] == {"deaths": 6, "isolated": 2, "in_range": 4, "in_range_traded": 2, "traded": 2}
+    assert tg["attack"] == {"deaths": 3, "isolated": 1, "in_range": 2, "in_range_traded": 1, "traded": 1}
+
+
+def test_trade_geometry_lines_report_only_the_side_above_the_threshold():
+    positions = {1: _tg_pos(), 2: _tg_pos(), 3: _tg_pos()}
+    events = {1: _tg_events(), 2: _tg_events(), 3: _tg_events()}
+    lines = tf.trade_geometry_lines(
+        tf.trade_geometry(_tg_rounds(["defense", "defense", "attack"]), OURS_TG, positions, events))
+    assert len(lines) == 1                              # attack has only 3 measured deaths (< TG_MIN_DEATHS)
+    assert lines[0].startswith("- On defense: 2 of 6 deaths were traded (33%).")
+    assert "2 were isolated" in lines[0]
+    assert "of the 4 where a teammate was close enough, 2 got traded." in lines[0]
+
+
+def test_trade_geometry_ignores_rounds_without_a_reliable_kill_order():
+    positions = {1: _tg_pos(), 2: _tg_pos()}
+    events = {1: dict(_tg_events(), kill_order=False), 2: dict(_tg_events(), kill_order=False)}
+    tg = tf.trade_geometry(_tg_rounds(["defense", "defense"]), OURS_TG, positions, events)
+    assert tg["defense"]["deaths"] == 0                 # no graded round -> nothing measured

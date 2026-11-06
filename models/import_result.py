@@ -24,6 +24,15 @@ class ImportResult:
     # the ID rather than trusting whatever name happened to be printed.
     map_game_id:  Optional[int]  = None
     dissect_map_name: Optional[str] = None
+    # The replay's game mode name (r6-dissect "gamemode", e.g. "Bomb",
+    # "Secure Area", "Hostage"). Respawn modes make the per-round death
+    # count mean something different, so the reader needs to know it.
+    game_mode: Optional[str] = None
+    # The replay's match type (r6-dissect "matchType", e.g.
+    # {"name": "CustomGameOnline", "id": 4} vs "Ranked"/"Standard"). A custom
+    # lobby is how we recognise one of our competition games; see
+    # analysis/match_type.py and the server's competition gate.
+    match_type: Optional[dict] = None
     # Set by the catalog when this match's map could not be identified and
     # was flagged for someone to name.
     map_needs_name: bool = False

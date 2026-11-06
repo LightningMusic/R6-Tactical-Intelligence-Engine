@@ -304,7 +304,7 @@ def get_session_comms(session_id: str, _client: str = Depends(verify_api_token))
 
 _VOICE_USERNAME = re.compile(r"^[A-Za-z0-9_.\-]{2,32}$")
 _VOICE_RECORDING = re.compile(r"^[0-9a-f]{32}$")
-_VOICE_SUFFIXES = {".ogg", ".opus", ".flac", ".wav"}
+_VOICE_SUFFIXES = {".ogg", ".opus", ".flac", ".wav", ".webm"}   # .webm: the browser's MediaRecorder (transcoded on ingest)
 _VOICE_MAX_BYTES = 60 * 1024 * 1024
 
 
@@ -539,6 +539,22 @@ def rooms_structures(map: str, rebuild: bool = False, _client: str = Depends(ver
     return rooms.structures(map, rebuild=rebuild)
 
 
+# ── Spatial film room: our deaths placed in each round, for the /film page ────
+
+@router.get("/film/matches")
+def film_matches(_client: str = Depends(verify_api_token)) -> dict:
+    """Every match that has position traces, newest first, with its roster usernames (the pickers)."""
+    from server.services import film
+    return {"matches": film.matches_with_film()}
+
+
+@router.get("/film")
+def film_get(match_id: int, player: str = "", _client: str = Depends(verify_api_token)) -> dict:
+    """Deaths placed in each round for one match — whole team, or just ?player=<username>."""
+    from server.services import film
+    return film.film(match_id, player or None)
+
+
 # ── Floor-plan backdrop image per map+floor ──────────────────────────────────
 
 @router.get("/rooms/backdrop")
@@ -771,7 +787,12 @@ def companion_heartbeat(body: dict, principal: VoicePrincipal = Depends(verify_v
         # The host decides, not the page: pages follow the host's sessions, and a page older than the one the
         # server now serves reloads itself between sessions.
         from server.dashboard_routes import join_page_version
-        reply.update(policy={"mode": "follow"}, page_version=join_page_version())
+        policy = {"mode": "follow"}
+        # A named teammate can be moved onto MediaRecorder capture (survives a tab hidden behind a fullscreen
+        # game) without touching anyone else's proven recorder; the page applies it between sessions.
+        if (principal.username or username).lower() in server_settings.media_capture_usernames():
+            policy["capture"] = "media"
+        reply.update(policy=policy, page_version=join_page_version())
     return reply
 
 

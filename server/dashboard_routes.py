@@ -63,6 +63,15 @@ def serve_rooms() -> HTMLResponse:
     return HTMLResponse(content=_ROOMS_HTML_PATH.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
 
 
+_FILM_HTML_PATH = Path(__file__).parent / "static" / "film.html"
+
+
+@router.get("/film", response_class=HTMLResponse, include_in_schema=False)
+def serve_film() -> HTMLResponse:
+    """Spatial film room: our deaths placed in each round, per player (uses the dashboard's saved key)."""
+    return HTMLResponse(content=_FILM_HTML_PATH.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+
+
 _JOIN_HTML_PATH = Path(__file__).parent / "static" / "join.html"
 
 # The recorder page handles a bearer-like invite token (kept in the URL

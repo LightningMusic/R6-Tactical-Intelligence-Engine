@@ -316,6 +316,36 @@ class ServerSettings:
         flag takes effect without restarting the server."""
         return self.ANALYSIS_PAUSE_FLAG.exists()
 
+    def competitions_only(self) -> bool:
+        """When true (the default), the worker runs the full, expensive treatment — Whisper
+        transcription + Ollama debrief — only for our competition games (custom lobbies). A
+        ranked/standard pug is still uploaded and kept with its basic map/score summary, but
+        gets no debrief, so the machine (which doubles as a gaming PC) isn't spent on games we
+        don't review. Read fresh from server_config.json's "competitions_only" on each use
+        (like the pause flag and the media-capture list), so it can be flipped without a
+        restart; absent or unreadable config means the default, on."""
+        try:
+            if self.CONFIG_FILE.exists():
+                val = json.loads(self.CONFIG_FILE.read_text(encoding="utf-8")).get("competitions_only")
+                if val is not None:
+                    return bool(val)
+        except Exception:
+            pass
+        return True
+
+    def media_capture_usernames(self) -> set:
+        """In-game usernames whose browser recorder should use MediaRecorder capture instead of the AudioWorklet
+        -- a tab that keeps recording while it's hidden behind a fullscreen game. Read fresh from
+        server_config.json's "media_capture_users" list on each call (like the pause flag), so a teammate can be
+        moved onto it, or off it, without restarting the server. Empty by default: nobody is switched."""
+        try:
+            if self.CONFIG_FILE.exists():
+                data = json.loads(self.CONFIG_FILE.read_text(encoding="utf-8"))
+                return {str(u).strip().lower() for u in (data.get("media_capture_users") or []) if str(u).strip()}
+        except Exception:
+            pass
+        return set()
+
     def ensure_directories(self) -> None:
         for d in (
             self.DATA_DIR, self.UPLOADS_DIR, self.WORK_DIR, self.REPORTS_DIR,

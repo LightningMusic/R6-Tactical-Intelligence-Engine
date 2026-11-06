@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Film Room</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b24; --panel2:#1d2430; --line:#2a3340;
+    --fg:#e8edf3; --mut:#93a0b0; --dim:#63707f;
+    --atk:#f0a53e; --def:#38b6c7; --hs:#e4584b; --mate:#5fd08a; --enemy:#e4584b;
+    --good:#5fd08a; --bad:#e4584b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.5;}
+  .wrap{max-width:1060px;margin:0 auto;padding:18px 16px 60px;}
+  h1{font-size:1.5rem;margin:0 0 2px;letter-spacing:.3px;}
+  .sub{color:var(--mut);font-size:.88rem;margin-bottom:16px;}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px;}
+  select{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;
+    padding:8px 10px;font-size:.9rem;font-family:inherit;max-width:100%;}
+  label.sel{display:flex;flex-direction:column;gap:3px;font-size:.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;}
+  #status{color:var(--mut);font-size:.85rem;margin:8px 0;}
+  #status.err{color:var(--bad);}
+  .meta{color:var(--mut);font-size:.9rem;margin-bottom:10px;}
+  .meta b{color:var(--fg);}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:18px;}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  @media(max-width:620px){.cols{grid-template-columns:1fr;}}
+  .sidehead{font-weight:700;text-transform:uppercase;letter-spacing:1.3px;font-size:.78rem;
+    display:flex;align-items:center;gap:8px;margin-bottom:10px;}
+  .dot{width:10px;height:10px;border-radius:50%;display:inline-block;}
+  .dot.atk{background:var(--atk)} .dot.def{background:var(--def)}
+  .m{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid var(--line);font-size:.86rem;}
+  .m:first-of-type{border-top:none;} .m .lab{color:var(--mut);} .m .v{font-weight:700;}
+  .bad{color:var(--bad)} .good{color:var(--good)}
+  .floorwrap{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+  @media(max-width:860px){.floorwrap{grid-template-columns:1fr;}}
+  .floor h3{font-size:.9rem;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px;
+    display:flex;justify-content:space-between;color:var(--fg);}
+  .floor h3 .n{color:var(--dim);font-size:.72rem;}
+  svg.map{width:100%;height:auto;display:block;background:var(--panel);border:1px solid var(--line);border-radius:10px;}
+  .legend{display:flex;flex-wrap:wrap;gap:12px 16px;margin-top:12px;font-size:.8rem;color:var(--mut);}
+  .legend span{display:inline-flex;align-items:center;gap:6px;}
+  .lg{width:15px;height:15px;}
+  .deaths{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:4px;}
+  @media(max-width:620px){.deaths{grid-template-columns:1fr;}}
+  .drow{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;cursor:pointer;}
+  .drow:hover{border-color:var(--atk);} .drow.sel{border-color:var(--atk);box-shadow:0 0 0 1px var(--atk);}
+  .drow .top{display:flex;justify-content:space-between;align-items:center;gap:8px;}
+  .rnd{font-weight:700;} .pill{font-size:.64rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;padding:2px 7px;border-radius:12px;}
+  .pill.atk{background:rgba(240,165,62,.2);color:var(--atk);} .pill.def{background:rgba(56,182,199,.2);color:var(--def);}
+  .drow .d{color:var(--mut);font-size:.8rem;margin-top:5px;} .drow .d b{color:var(--fg);}
+  .tag{display:inline-block;font-size:.68rem;padding:1px 6px;border-radius:5px;margin:5px 5px 0 0;background:var(--panel2);color:var(--dim);}
+  .tag.hs{color:var(--hs)} .tag.alone{color:var(--atk)} .tag.open{color:var(--hs)}
+  h2{font-size:1.1rem;margin:22px 0 10px;}
+  a{color:var(--def);}
+  .note{color:var(--dim);font-size:.76rem;margin-top:22px;border-top:1px solid var(--line);padding-top:12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Film Room</h1>
+  <div class="sub">Where our deaths happened, read from the replay traces. Pick a match and a player.</div>
+
+  <div class="controls">
+    <label class="sel">Match<select id="match"></select></label>
+    <label class="sel">Player<select id="player"></select></label>
+  </div>
+  <div id="status">Loading…</div>
+
+  <div id="out" hidden>
+    <div class="meta" id="metaline"></div>
+
+    <div class="card">
+      <h3 style="margin:0 0 10px;font-size:.95rem;text-transform:uppercase;letter-spacing:1px;">Trade geometry</h3>
+      <div class="cols" id="tradecols"></div>
+      <div style="color:var(--mut);font-size:.82rem;margin-top:12px;">
+        <b style="color:var(--fg)">Isolated</b> = no living teammate within 10&nbsp;m when you died, so a trade was impossible (spacing).
+        The rest had someone close enough — whether they got traded is a reaction/refrag question.
+      </div>
+    </div>
+
+    <h2>Death map</h2>
+    <div class="floorwrap" id="floors"></div>
+    <div class="legend">
+      <span><svg class="lg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="var(--def)"/></svg>Defense</span>
+      <span><svg class="lg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="var(--atk)"/></svg>Attack</span>
+      <span><svg class="lg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--hs)" stroke-width="2.5"/></svg>Headshot</span>
+      <span><svg class="lg" viewBox="0 0 16 16"><path d="M3 3 L13 13 M13 3 L3 13" stroke="var(--enemy)" stroke-width="2"/></svg>Killer</span>
+      <span><svg class="lg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="var(--mate)" stroke-width="2"/></svg>Nearest living mate</span>
+    </div>
+
+    <h2>Round by round</h2>
+    <div class="deaths" id="deaths"></div>
+  </div>
+
+  <div class="note">
+    Positions are metres in the engine's own coordinate space, oriented consistently within a floor but not aligned to a
+    real floor-plan image. &ldquo;Isolated&rdquo; uses a 10&nbsp;m radius, the same threshold as the debrief's positioning facts.
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const LS_URL = "r6_dashboard_server_url", LS_TOKEN = "r6_dashboard_api_token";
+  const get = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const server = () => (get(LS_URL) || location.origin).replace(/\/$/, "");
+  const key = get(LS_TOKEN);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  const ISO_M = 10;
+
+  async function api(path) {
+    const res = await fetch(server() + path, { headers: { Authorization: `Bearer ${key}` }, cache: "no-store", referrerPolicy: "no-referrer" });
+    let data = null; try { data = await res.json(); } catch (e) {}
+    if (!res.ok) throw new Error((data && data.detail) || `HTTP ${res.status}`);
+    return data;
+  }
+  const setStatus = (msg, err) => { const s = $("status"); s.textContent = msg || ""; s.className = err ? "err" : ""; s.hidden = !msg; };
+
+  let MATCHES = [], film = null, selected = null;
+
+  async function init() {
+    if (!key) { setStatus("No API key saved on this device. Open the dashboard first and enter your key.", true); return; }
+    try {
+      MATCHES = (await api("/api/v1/film/matches")).matches || [];
+    } catch (e) { setStatus("Could not load matches: " + e.message, true); return; }
+    if (!MATCHES.length) { setStatus("No matches have position traces yet.", true); return; }
+    $("match").innerHTML = MATCHES.map((m, i) =>
+      `<option value="${i}">${esc((m.datetime || "").slice(0,10))} · ${esc(m.map)} · vs ${esc(m.opponent || "?")} · ${esc(m.result || "")}</option>`).join("");
+    $("match").onchange = onMatch;
+    $("player").onchange = () => load();
+    onMatch();
+  }
+  function onMatch() {
+    const m = MATCHES[+$("match").value];
+    $("player").innerHTML = `<option value="">Whole team</option>` +
+      (m.players || []).map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+    load();
+  }
+  async function load() {
+    const m = MATCHES[+$("match").value];
+    const player = $("player").value;
+    setStatus("Loading film…"); $("out").hidden = true; selected = null;
+    try {
+      film = await api(`/api/v1/film?match_id=${m.match_id}` + (player ? `&player=${encodeURIComponent(player)}` : ""));
+    } catch (e) { setStatus("Could not load film: " + e.message, true); return; }
+    if (film.error) { setStatus(film.error, true); return; }
+    setStatus(""); $("out").hidden = false;
+    render();
+  }
+
+  // ── trade geometry, computed from the placed deaths (mirrors the debrief metric) ──
+  function tradeBySide() {
+    const sides = { attack: blank(), defense: blank() };
+    for (const d of film.deaths) {
+      if (d.mates_alive === 0) continue;                 // last alive: says nothing about spacing
+      const s = sides[d.side]; if (!s) continue;
+      s.deaths++;
+      const inRange = d.near_mate && d.near_mate.dist_m <= ISO_M;
+      if (d.traded) s.traded++;
+      if (inRange) { s.in_range++; if (d.traded) s.in_range_traded++; } else s.isolated++;
+    }
+    return sides;
+    function blank(){ return { deaths:0, isolated:0, in_range:0, in_range_traded:0, traded:0 }; }
+  }
+  function renderTrade() {
+    const tg = tradeBySide();
+    $("tradecols").innerHTML = ["defense", "attack"].map(side => {
+      const s = tg[side], d = s.deaths;
+      if (!d) return `<div><div class="sidehead"><span class="dot ${side==='attack'?'atk':'def'}"></span>${side}</div><div style="color:var(--dim);font-size:.85rem;">no measured deaths</div></div>`;
+      const pct = Math.round(100 * s.traded / d);
+      return `<div>
+        <div class="sidehead"><span class="dot ${side==='attack'?'atk':'def'}"></span>${side}</div>
+        <div class="m"><span class="lab">Deaths traded</span><span class="v ${pct<10?'bad':''}">${pct}%<span style="color:var(--dim);font-weight:400;"> ${s.traded}/${d}</span></span></div>
+        <div class="m"><span class="lab">Isolated (no one in range)</span><span class="v">${s.isolated}</span></div>
+        <div class="m"><span class="lab">In range but not traded</span><span class="v ${(s.in_range-s.in_range_traded)>0?'bad':''}">${s.in_range - s.in_range_traded}<span style="color:var(--dim);font-weight:400;"> of ${s.in_range}</span></span></div>
+      </div>`;
+    }).join("");
+  }
+
+  // ── floor maps ──
+  const W = 300, H = 300, PAD = 24, NS = "http://www.w3.org/2000/svg";
+  const floorEls = {};
+  function floorsPresent(){ return (film.floors || []).slice().sort((a,b)=>order(b)-order(a)); }
+  function order(f){ return f==="Basement" ? -1 : (parseInt(f) || 0); }   // 2F top, then 1F, Basement last
+
+  function frameFor(deaths) {
+    let a=1e9,b=-1e9,c=1e9,d=-1e9; const add=(x,y)=>{ if(x==null||y==null)return; a=Math.min(a,x);b=Math.max(b,x);c=Math.min(c,y);d=Math.max(d,y); };
+    for (const k of deaths){ add(k.x,k.y); if(k.killer_xy)add(k.killer_xy[0],k.killer_xy[1]); if(k.near_mate&&k.near_mate.xy)add(k.near_mate.xy[0],k.near_mate.xy[1]); for(const p of k.path)add(p[0],p[1]); }
+    if (a>b){a=-10;b=10;c=-10;d=10;}
+    const span=Math.max(Math.max(b-a,4),Math.max(d-c,4))*1.12, cx=(a+b)/2, cy=(c+d)/2;
+    return { x0:cx-span/2, y0:cy-span/2, span };
+  }
+  const mapper = (fr) => { const s=(W-2*PAD)/fr.span; return (x,y)=>[PAD+(x-fr.x0)*s, H-PAD-(y-fr.y0)*s]; };
+
+  function renderFloors() {
+    const box = $("floors"); box.innerHTML = ""; for (const k in floorEls) delete floorEls[k];
+    const floors = floorsPresent();
+    if (!floors.length) { box.innerHTML = `<div style="color:var(--dim)">No placed deaths.</div>`; return; }
+    for (const f of floors) {
+      const deaths = film.deaths.filter(d => d.floor === f);
+      const wrap = document.createElement("div"); wrap.className = "floor";
+      wrap.innerHTML = `<h3><span>${esc(f==='Basement'?'Basement':f)}</span><span class="n">${deaths.length} death${deaths.length===1?'':'s'}</span></h3>`;
+      const svg = document.createElementNS(NS, "svg"); svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("class", "map");
+      wrap.appendChild(svg); box.appendChild(wrap);
+      floorEls[f] = { svg, deaths, frame: deaths.length ? frameFor(deaths) : null };
+    }
+    drawFloors();
+  }
+  function line(svg,x1,y1,x2,y2,stroke,w,op,dash){ const l=document.createElementNS(NS,"line");
+    l.setAttribute("x1",x1);l.setAttribute("y1",y1);l.setAttribute("x2",x2);l.setAttribute("y2",y2);
+    l.setAttribute("stroke",stroke);l.setAttribute("stroke-width",w);l.setAttribute("opacity",op); if(dash)l.setAttribute("stroke-dasharray",dash); svg.appendChild(l); return l; }
+  function drawFloors() {
+    for (const f in floorEls) {
+      const o = floorEls[f], svg = o.svg; svg.textContent = "";
+      for (let i=1;i<4;i++){ line(svg, PAD+i*(W-2*PAD)/4, PAD, PAD+i*(W-2*PAD)/4, H-PAD, "var(--line)",1,.5);
+        line(svg, PAD, PAD+i*(H-2*PAD)/4, W-PAD, PAD+i*(H-2*PAD)/4, "var(--line)",1,.5); }
+      if (!o.frame) continue;
+      const m = mapper(o.frame);
+      for (const d of o.deaths) {
+        const isSel = selected === d.round, dim = selected !== null && !isSel;
+        const col = d.side === "attack" ? "var(--atk)" : "var(--def)";
+        const g = document.createElementNS(NS, "g"); g.setAttribute("opacity", dim ? ".16" : "1"); g.style.cursor = "pointer";
+        g.addEventListener("click", () => select(d.round));
+        if (d.path.length > 1) { const pl=document.createElementNS(NS,"polyline");
+          pl.setAttribute("points", d.path.map(p=>m(p[0],p[1]).join(",")).join(" "));
+          pl.setAttribute("fill","none"); pl.setAttribute("stroke",col); pl.setAttribute("stroke-width",isSel?2.2:1.4);
+          pl.setAttribute("opacity",isSel?.85:.4); pl.setAttribute("stroke-linejoin","round"); g.appendChild(pl); }
+        const [dx,dy] = m(d.x,d.y);
+        if (d.killer_xy) { const [kx,ky]=m(d.killer_xy[0],d.killer_xy[1]);
+          if (isSel || selected===null) line(svg, kx,ky,dx,dy, "var(--enemy)", isSel?1.6:1, isSel?.8:.3, "3 3");
+          line(g, kx-4,ky-4,kx+4,ky+4, "var(--enemy)",2,isSel?1:.55); line(g, kx+4,ky-4,kx-4,ky+4, "var(--enemy)",2,isSel?1:.55); }
+        if (d.near_mate && d.near_mate.xy) { const [mx,my]=m(d.near_mate.xy[0],d.near_mate.xy[1]);
+          const c=document.createElementNS(NS,"circle"); c.setAttribute("cx",mx);c.setAttribute("cy",my);c.setAttribute("r",5);
+          c.setAttribute("fill","none");c.setAttribute("stroke","var(--mate)");c.setAttribute("stroke-width",2);c.setAttribute("opacity",isSel?1:.5); g.appendChild(c); }
+        const c=document.createElementNS(NS,"circle"); c.setAttribute("cx",dx);c.setAttribute("cy",dy);c.setAttribute("r",isSel?8:6.5);c.setAttribute("fill",col); g.appendChild(c);
+        if (d.hs) { const hr=document.createElementNS(NS,"circle"); hr.setAttribute("cx",dx);hr.setAttribute("cy",dy);hr.setAttribute("r",isSel?11:9.5);
+          hr.setAttribute("fill","none");hr.setAttribute("stroke","var(--hs)");hr.setAttribute("stroke-width",2); g.appendChild(hr); }
+        const t=document.createElementNS(NS,"text"); t.setAttribute("x",dx);t.setAttribute("y",dy+3.3);t.setAttribute("text-anchor","middle");
+        t.setAttribute("font-size","8.5");t.setAttribute("font-weight","700");t.setAttribute("fill", d.side==="attack"?"#1a1200":"#04171a"); t.textContent=d.round; g.appendChild(t);
+        svg.appendChild(g);
+      }
+    }
+  }
+
+  function renderList() {
+    $("deaths").innerHTML = film.deaths.map(d => {
+      const near = d.near_mate ? `${esc(d.near_mate.who)} ${d.near_mate.dist_m}m` : "nobody alive";
+      const tr = d.traded === true ? '<span class="tag good">traded</span>' : (d.traded === false ? '<span class="tag">not traded</span>' : "");
+      return `<div class="drow" data-r="${d.round}">
+        <div class="top"><span class="rnd">R${d.round} · ${esc(d.clock)}</span><span class="pill ${d.side==='attack'?'atk':'def'}">${esc(d.side)}</span></div>
+        <div class="d"><b>${esc(d.op||'?')}</b> · died <b>${esc(d.floor)}</b> · site ${esc(d.site||'?')}<br>by <b>${esc(d.killer||'?')}</b> · nearest mate <b>${near}</b></div>
+        <div>${d.opening?'<span class="tag open">opening</span>':''}${d.hs?'<span class="tag hs">headshot</span>':''}${d.mates_alive===0?'<span class="tag alone">last alive</span>':`<span class="tag">${d.mates_alive} mates alive</span>`}${tr}</div>
+      </div>`;
+    }).join("") || `<div style="color:var(--dim)">No deaths for this selection.</div>`;
+    $("deaths").querySelectorAll(".drow").forEach(el => el.addEventListener("click", () => select(+el.dataset.r)));
+  }
+  function select(r){ selected = (selected===r)?null:r;
+    document.querySelectorAll(".drow").forEach(e=>e.classList.toggle("sel", selected!==null && +e.dataset.r===selected));
+    drawFloors(); }
+
+  function render() {
+    const m = film.match || {};
+    $("metaline").innerHTML = `<b>${esc(film.player)}</b> · ${esc(m.map||'?')} vs ${esc(m.opponent||'?')} · ${esc(m.result||'')} ${esc(m.score||'')} · ${film.deaths.length} death${film.deaths.length===1?'':'s'}`;
+    renderTrade(); renderFloors(); renderList();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

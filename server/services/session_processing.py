@@ -72,6 +72,27 @@ class SessionProcessingService:
                 )
                 conn.commit()
 
+            # ── Competition gate ──────────────────────────────────────────
+            # The team only plays customs for its competitions, so a custom
+            # lobby is the signal that an upload is worth the full, expensive
+            # debrief; a ranked/standard pug is not. When competitions_only is
+            # on (the default), a pug keeps its basic map/score summary above
+            # but skips transcription + AI, so this machine (also a gaming PC)
+            # isn't spent on games nobody reviews. The match type comes from
+            # the client's metadata when present (no extra work), else from a
+            # cheap one-round peek at the replay for older packages.
+            if server_settings.competitions_only():
+                from analysis import match_type as mt
+                mtype = cls._resolve_match_type(work_dir, meta_data)
+                if not mt.is_competition(mtype):
+                    ServerRepository().update_analysis_status(
+                        session_id, "skipped",
+                        error=f"Not a competition ({mt.label(mtype)}) — uploaded and summarised, no debrief.",
+                    )
+                    print(f"[SessionProcessing] Session {session_id}: {mt.label(mtype)} is not a "
+                          f"competition — skipping transcription and AI (competitions_only).")
+                    return summary
+
             # ── Milestone 4: transcription (phase 1), then full AI analysis
             # (phase 2) — in that order, since analysis wants the transcript
             # already in hand if one exists. Both are entirely best-effort:
@@ -85,6 +106,22 @@ class SessionProcessingService:
 
         finally:
             storage_manager.cleanup_work_directory(job_id)
+
+    @classmethod
+    def _resolve_match_type(cls, work_dir: Path, meta_data: Optional[dict]) -> Optional[dict]:
+        """The replay's match type for the competition gate: the client's metadata value if it
+        carries one (no extra work), otherwise a cheap one-round peek at the replay for older
+        packages that predate it. None when neither is available (treated as unknown)."""
+        mt = (meta_data or {}).get("match_type")
+        if isinstance(mt, dict) and mt.get("name"):
+            return mt
+        try:
+            from integration.rec_importer import RecImporter
+            return RecImporter.peek_match_type(work_dir / "replays",
+                                               dissect_path=server_settings.R6_DISSECT_PATH)
+        except Exception as e:
+            print(f"[SessionProcessing] Could not read match type for the competition gate: {e}")
+            return None
 
     @classmethod
     def _maybe_transcribe(cls, work_dir: Path, session_id: str, meta_data: Optional[dict] = None) -> None:

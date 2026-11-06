@@ -425,6 +425,81 @@ def positioning_lines(p: dict[str, Any], usual: Optional[dict[str, Any]] = None)
     return out
 
 
+TG_MIN_DEATHS = 6              # per side, fewer measured deaths than this is too noisy to split
+
+
+def _tg_zero() -> dict[str, int]:
+    return {"deaths": 0, "isolated": 0, "in_range": 0, "in_range_traded": 0, "traded": 0}
+
+
+def trade_geometry(match: Any, ours: Optional[set[str]], positions: dict[int, dict],
+                   events: dict[int, dict]) -> dict[str, dict[str, int]]:
+    """Per side (attack/defense): our deaths split by whether a living teammate was within trade range
+    (ISOLATION_M, same floor) at the moment of death, and how many of each were actually avenged within
+    seconds. This separates the two reasons a death goes un-traded: nobody was close enough to begin with
+    (spacing), versus a teammate was right there and still didn't refrag (reaction). Only rounds whose kill
+    feed is in true order carry a trustworthy trade flag, so only those deaths are counted."""
+    from integration.positions import at
+    side_of = {int(r.round_number): getattr(r, "side", None) for r in match.rounds}
+    graded = ordered(events)                       # rounds with a reliable trade flag
+    traded_flag: dict[tuple[int, str], bool] = {}
+    for rn, e in graded.items():
+        for k in e.get("kills") or []:
+            v = norm(k.get("victim"))
+            if ours is None or v in ours:
+                traded_flag[(int(rn), v)] = bool(k.get("trade"))
+    sides = {"attack": _tg_zero(), "defense": _tg_zero()}
+    for rn, pos in sorted(positions.items()):
+        if int(rn) not in graded:
+            continue
+        side = side_of.get(int(rn))
+        if side not in sides:
+            continue
+        players = pos.get("players") or {}
+        mine = [n for n in players if ours is None or norm(n) in ours]
+        if len(mine) < 2:
+            continue
+        died = {n: t for n, t in (pos.get("died") or {}).items() if n in mine}
+        for n, t in died.items():
+            me = at(players[n]["pts"], t - 0.5)
+            if me is None:
+                continue
+            others = [p for p in (at(players[o]["pts"], t - 0.5) for o in mine if o != n and died.get(o, 1e9) > t)
+                      if p is not None]
+            if not others:
+                continue                           # the last of us: nobody left to trade, says nothing about spacing
+            avenged = traded_flag.get((int(rn), norm(n)), False)
+            s = sides[side]
+            s["deaths"] += 1
+            s["traded"] += avenged
+            if min(_gap(me, o) for o in others) <= ISOLATION_M:
+                s["in_range"] += 1
+                s["in_range_traded"] += avenged
+            else:
+                s["isolated"] += 1
+    return sides
+
+
+def trade_geometry_lines(tg: dict[str, dict[str, int]]) -> list[str]:
+    out = []
+    for side in ("attack", "defense"):
+        s = tg.get(side) or {}
+        d = s.get("deaths", 0)
+        if d < TG_MIN_DEATHS:
+            continue
+        word = "On attack" if side == "attack" else "On defense"
+        line = (f"- {word}: {s['traded']} of {d} deaths were traded ({s['traded'] / d:.0%}). "
+                f"{s['isolated']} were isolated — no teammate within {ISOLATION_M:.0f} m on the same floor, "
+                f"so a trade was impossible")
+        if s["in_range"]:
+            line += (f"; of the {s['in_range']} where a teammate was close enough, "
+                     f"{s['in_range_traded']} got traded.")
+        else:
+            line += "."
+        out.append(line)
+    return out
+
+
 def death_places(match: Any, ours: Optional[set[str]], positions: dict[int, dict], model: dict, fl: list,
                  rooms: Optional[list] = None) -> list[str]:
     """Where our players died, as places ('2F Security Room', or '2F at Armory Lockers / Archives' when
@@ -1316,6 +1391,7 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
             if places and places[0]:
                 pos_lines += death_places(match, ours, positions, places[0], places[1], rooms)
             pos_lines += facing_at_death(match, ours, positions, events, display)
+            pos_lines += trade_geometry_lines(trade_geometry(match, ours, positions, events))
             pos_lines += callout_accuracy(timeline, positions, rooms, ours)
         except Exception:                                  # a nicety: never a reason to lose the debrief
             pos_lines = []

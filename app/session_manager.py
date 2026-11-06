@@ -447,6 +447,11 @@ class SessionManager:
                 "folder_name": folder.name,
                 "client_name": settings.CLIENT_NAME,
                 "timestamp": datetime.now().isoformat(),
+                # The replay's match type, so the server can tell a competition
+                # (custom lobby) from a ranked/standard pug and gate the heavy
+                # transcription + AI on it without re-dissecting. See
+                # analysis/match_type.py.
+                "match_type": result.match_type,
             }
             # Names this client already knows for the match's in-game IDs,
             # so the server's catalog learns them too -- including a map
