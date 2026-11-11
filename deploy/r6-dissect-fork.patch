@@ -598,7 +598,7 @@ index bf55843..78ea90a 100644
  	if (u.Type == PlayerLeave || u.Type == LocateObjective) && len(u.Username) == 0 {
  		u.Type = Other
 diff --git a/dissect/header.go b/dissect/header.go
-index 91fe923..fcfc8e2 100644
+index 91fe923..e374bda 100644
 --- a/dissect/header.go
 +++ b/dissect/header.go
 @@ -55,6 +55,9 @@ type Player struct {
@@ -611,6 +611,25 @@ index 91fe923..fcfc8e2 100644
  }
  
  type stringerIntMarshal struct {
+@@ -436,6 +439,18 @@ func (r *Reader) readHeader() (Header, error) {
+ 		}
+ 		_, lastProp = props["teamscore1"]
+ 	}
++	// A player block is only committed on the next `playerid`, or the `id`/
++	// `playlistcategory` key that ends the metadata block between the two teams.
++	// The header lists defenders first, then that metadata block, then attackers,
++	// then teamscore0/teamscore1 -- and teamscore1 is this loop's exit condition.
++	// So the LAST player (always an attacker) has no terminator after it and was
++	// never appended: it got dropped from the header, losing roleName/alliance/
++	// heroName/roleImage/rolePortrait (readPlayer later re-adds that player from
++	// in-match packets, but without those header-only fields). Flush the pending
++	// block so every player keeps its role data.
++	if playerData {
++		players = append(players, currentPlayer)
++	}
+ 	h := Header{
+ 		Teams:      [2]Team{},
+ 		Players:    players,
 diff --git a/dissect/player.go b/dissect/player.go
 index f91dee9..a1e392f 100644
 --- a/dissect/player.go

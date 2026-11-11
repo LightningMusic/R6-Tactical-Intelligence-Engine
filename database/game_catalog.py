@@ -116,6 +116,16 @@ def resolve_operator(
     log = log or (lambda _m: None)
     names = [hint_name or "", dissect_name or "", role_name or ""]
 
+    # roleName is the operator the player LOCKED IN (the game's own name for it).
+    # dissect's `operator`/game_id is the pick *before* attacker op-swaps (see
+    # r6-dissect player.go: "Op before atk role swaps"), so it is wrong whenever a
+    # player swapped operator in prep. Trust a resolvable roleName over the id/name
+    # paths; fall through only when it names no operator we already know.
+    if role_name:
+        by_role = _operator_by_fold(conn, [role_name])
+        if by_role:
+            return by_role
+
     if not game_id:
         return _operator_by_fold(conn, names)
     if game_id == RECRUIT_GAME_ID or "recruit" in {fold(n) for n in names}:
