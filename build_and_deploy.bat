@@ -698,7 +698,6 @@ if not exist "%USB_DEST%\data\recordings" mkdir "%USB_DEST%\data\recordings"
 if not exist "%USB_DEST%\data\transcripts" mkdir "%USB_DEST%\data\transcripts"
 if not exist "%USB_DEST%\data\reports" mkdir "%USB_DEST%\data\reports"
 if not exist "%USB_DEST%\exports" mkdir "%USB_DEST%\exports"
-if not exist "%USB_SERVER_DEST%" mkdir "%USB_SERVER_DEST%"
 echo [OK] USB folder layout ready.
 echo.
 
@@ -774,34 +773,13 @@ if errorlevel 1 (
     echo [OK] Root launcher: %USB_DRIVE%\Start R6Analyzer.cmd
 )
 
-REM -- Copy the server build onto the USB too --------------------
-REM The server doesn't run from the USB in normal use -- it runs on
-REM whichever machine (this one, your laptop) you designate as the host.
-REM Putting a copy on the USB just means that machine is wherever you plug
-REM the stick in next: copy %USB_SERVER_DEST% off onto that machine and run
-REM R6Server.exe there. server_data\ (its database and config, including
-REM the self-provisioned API token) is preserved here between builds the
-REM same way the client's data\ and exports\ folders are above.
-REM NOTE: this always runs, even if the client sync above failed -- it is
-REM an independent deploy to an independent USB folder and must not be
-REM skipped just because the client copy hit a problem.
-robocopy "%SERVER_DIST_DIR%" "%USB_SERVER_DEST%" /E /PURGE /XO /R:3 /W:5 ^
-    /XD server_data
-if errorlevel 8 (
-    echo [WARN] Robocopy encountered an error while syncing the server build to the USB -- code !errorlevel!.
-    echo        The server exe is still available locally at %SERVER_DIST_DIR%\%SERVER_APP_NAME%.exe
-    set "DEPLOY_WARNINGS=1"
-) else (
-    echo [OK] Server build synced to %USB_SERVER_DEST%
-)
-
-REM -- Teammates' recorder onto the USB, ready to hand out ----------
-if exist "dist\R6Voice.exe" (
-    if not exist "%USB_DRIVE%\R6Voice" mkdir "%USB_DRIVE%\R6Voice"
-    copy /Y "dist\R6Voice.exe" "%USB_DRIVE%\R6Voice\R6Voice.exe" >nul
-    copy /Y "voice_recorder\FOR_TEAMMATES.txt" "%USB_DRIVE%\R6Voice\FOR_TEAMMATES.txt" >nul
-    echo [OK] Teammate recorder copied to %USB_DRIVE%\R6Voice
-)
+REM -- The server build and the R6Voice recorder are deliberately NOT copied
+REM    onto the R6_PROJ client stick ----------------------------------------
+REM That stick is just the owner's analyzer. The server runs in Docker
+REM (deploy\r6ctl), and relocating it does not use this stick; R6Voice is not
+REM handed out from here either. Both still build locally (dist\R6Server,
+REM dist\R6Voice) if ever needed, and R6Companion is still deployed to the
+REM R6_COMPANION stick just below.
 
 REM -- Teammates' companion sticks (label R6_COMPANION), if plugged in ----
 if exist "dist\R6Companion.exe" (
@@ -845,12 +823,11 @@ echo ============================================================
 echo  DEPLOY COMPLETE
 echo  Client exe (USB)   : %USB_DEST%\R6Analyzer.exe
 echo  One-click launcher : %USB_DRIVE%\Start R6Analyzer.cmd  -- double-click this
-echo  Server exe (USB)   : %USB_SERVER_DEST%\R6Server.exe
-echo  Server exe (local) : %SERVER_DIST_DIR%\R6Server.exe
+echo  Server exe (local) : %SERVER_DIST_DIR%\R6Server.exe  (not copied to the client stick)
 echo  USB drive          : %USB_DRIVE%\
 echo.
-echo  To run the server: copy the R6Server folder (from the USB or from
-echo  dist\R6Server) to whichever machine will host it, and double-click
+echo  To run the server: copy the R6Server folder from dist\R6Server to
+echo  whichever machine will host it, and double-click
 echo  R6Server.exe there. It self-configures on first run and prints an
 echo  API token to paste into the client's Settings -> Remote Sync tab
 echo  (only needed if this build had no server configured to embed).
@@ -874,7 +851,6 @@ echo    %USB_DEST%\data\models\model.gguf
 echo    %USB_DEST%\data\models\whisper-base.pt
 echo    %USB_DEST%\data\settings.json
 echo    %USB_DEST%\data\matches.db
-echo    %USB_SERVER_DEST%\R6Server.exe
 echo    %SERVER_DIST_DIR%\server_data\models\whisper-base.pt  (local build, not copied to USB)
 echo.
 if "%DEPLOY_WARNINGS%"=="1" (
