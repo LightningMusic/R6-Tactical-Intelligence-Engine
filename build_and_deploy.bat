@@ -759,6 +759,21 @@ if errorlevel 8 (
     if not "%ASSET_SYNC_EXIT%"=="0" set "DEPLOY_WARNINGS=1"
 )
 
+REM -- One-click launcher at the USB ROOT ------------------------
+REM So you don't have to open the R6Analyzer folder first: double-click this at
+REM the top of the stick and it starts the app. %~dp0 = its own folder, so it
+REM works on any drive letter (here and on the practice PC). It sits at the
+REM root, which the /PURGE client sync above never touches. (Windows blocks
+REM true autorun-on-insert for USB sticks, so a root launcher is as close as
+REM it gets to "opens straight up".)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build_scripts\write_usb_launcher.ps1" -Root "%USB_DRIVE%" -ExeRel "R6Analyzer\R6Analyzer.exe" -Name "Start R6Analyzer.cmd"
+if errorlevel 1 (
+    echo [WARN] Could not write the root launcher to %USB_DRIVE%\
+    set "DEPLOY_WARNINGS=1"
+) else (
+    echo [OK] Root launcher: %USB_DRIVE%\Start R6Analyzer.cmd
+)
+
 REM -- Copy the server build onto the USB too --------------------
 REM The server doesn't run from the USB in normal use -- it runs on
 REM whichever machine (this one, your laptop) you designate as the host.
@@ -829,6 +844,7 @@ echo.
 echo ============================================================
 echo  DEPLOY COMPLETE
 echo  Client exe (USB)   : %USB_DEST%\R6Analyzer.exe
+echo  One-click launcher : %USB_DRIVE%\Start R6Analyzer.cmd  -- double-click this
 echo  Server exe (USB)   : %USB_SERVER_DEST%\R6Server.exe
 echo  Server exe (local) : %SERVER_DIST_DIR%\R6Server.exe
 echo  USB drive          : %USB_DRIVE%\

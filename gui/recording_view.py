@@ -110,6 +110,7 @@ class RecordingView(QWidget):
     navigate_to_match_input      = Signal()
     navigate_to_match_input_partial = Signal(object)
     _obs_started                 = Signal(bool)
+    _obs_connected               = Signal(bool)
 
     def __init__(
         self,
@@ -130,7 +131,14 @@ class RecordingView(QWidget):
         self._session_log = None     # open text file mirroring the recording panel for the current session
         self._starting              = False
         self._obs_started.connect(self._finish_start_session)
+        self._obs_connected.connect(self._on_obs_connected)
+        self._obs_connecting = False
         self._build_ui()
+        # Auto-launch + connect OBS the moment the app opens, in the background,
+        # so OBS is already up by the time you hit Start Session -- no need to
+        # click "Connect to OBS" first. connect() launches OBS from the USB if
+        # it isn't running; if it's already up it just connects.
+        self._connect_obs()
 
     def _shutdown_and_eject(self) -> None:
             from PySide6.QtWidgets import QMessageBox
@@ -424,17 +432,36 @@ class RecordingView(QWidget):
     # =====================================================
 
     def _connect_obs(self) -> None:
-        self._log_message("Connecting to OBS...")
+        # Non-blocking: launching OBS and the websocket handshake can take ~10s,
+        # so it runs on a worker thread and the window stays responsive. Fired
+        # once automatically at startup, and again if the user clicks "Connect
+        # to OBS" to retry after a failure.
+        if self._obs_connecting or self.obs.is_connected:
+            return
+        self._obs_connecting = True
+        self._log_message("Connecting to OBS (launching it from the USB if needed)...")
         self._obs_status_label.setText("OBS: Connecting...")
         self._obs_status_label.setStyleSheet("color: #e0a830;")
+        # Keep Start Session (and the game/stream buttons) disabled until the
+        # connect finishes, so nothing kicks off a second connect mid-launch.
+        self._update_start_button()
 
-        from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()
+        import threading
+        def _worker():
+            try:
+                ok = bool(self.obs.connect())
+            except Exception as e:
+                print(f"[OBS] Auto-connect failed: {e}")
+                ok = False
+            self._obs_connected.emit(ok)
+        threading.Thread(target=_worker, daemon=True, name="ObsConnect").start()
 
-        if self.obs.connect():
+    def _on_obs_connected(self, ok: bool) -> None:
+        self._obs_connecting = False
+        if ok:
             self._obs_status_label.setText("OBS: Connected ✅")
             self._obs_status_label.setStyleSheet("color: #55e07a;")
-            self._log_message("OBS connected.")
+            self._log_message("OBS connected — ready to Start Session.")
         else:
             self._obs_status_label.setText("OBS: Failed ❌")
             self._obs_status_label.setStyleSheet("color: #e05555;")
@@ -442,7 +469,8 @@ class RecordingView(QWidget):
                 "Failed to connect to OBS. Every saved profile in Settings "
                 "was tried and none worked -- check that OBS is running "
                 "with the websocket server enabled, and that one of the "
-                "saved profiles has the correct password for this PC."
+                "saved profiles has the correct password for this PC. "
+                "Click \"Connect to OBS\" to retry."
             )
         self._update_start_button()
 

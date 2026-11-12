@@ -49,6 +49,14 @@ Copy-Item $exe "$dest\R6Companion.exe" -Force
 if (-not (Test-Path "$dest\ffmpeg.exe")) { Copy-Item (Join-Path $RepoRoot 'ffmpeg.exe') "$dest\ffmpeg.exe" }
 Copy-Item (Join-Path $RepoRoot 'companion\START_HERE.txt') "$dest\START_HERE.txt" -Force
 
+# One-click launcher at the stick ROOT, so the teammate doesn't have to open the
+# R6Companion folder first. Drive-letter-independent (%~dp0 = the stick root);
+# written with CRLF so cmd.exe doesn't mangle it.
+$launcher = "$Drive\Start R6Companion.cmd"
+$launcherLines = @('@echo off', 'start "" "%~dp0R6Companion\R6Companion.exe"')
+[System.IO.File]::WriteAllText($launcher, (($launcherLines -join "`r`n") + "`r`n"), [System.Text.Encoding]::ASCII)
+Write-Host "[OK] Root launcher: $launcher"
+
 if ($Username) {
     $settingsPath = "$dest\data\settings.json"
     $s = @{}

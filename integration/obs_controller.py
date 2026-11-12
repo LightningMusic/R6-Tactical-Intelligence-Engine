@@ -138,6 +138,40 @@ def _discord_running() -> bool:
     return False
 
 
+def _clear_obs_crash_sentinel() -> None:
+    """Remove OBS's "did not shut down cleanly" markers so a launch goes
+    straight into OBS instead of stopping on the Safe Mode / Normal Mode
+    dialog.
+
+    The app ends OBS with TerminateProcess, which OBS always reads as a
+    crash, so without this every launch opens that dialog and waits for a
+    click -- and the dialog blocks OBS's websocket too, so Connect can't get
+    through until someone clicks it. The --disable-shutdown-check launch flag
+    used to suppress the dialog, but OBS 32.0.0 removed that flag (ignored on
+    32.0.2, restored in 32.0.3), so the dependable fix is to clear the crash
+    sentinel ourselves before launching -- the same thing companion/obs_link
+    already does for the stick's OBS.
+
+    Only ever called with OBS not running (see connect()), so any marker
+    present is stale. Harmless when a folder doesn't exist; never raises.
+    """
+    from pathlib import Path
+    import os
+    import shutil
+
+    candidates = [
+        Path(os.environ.get("APPDATA", "")) / "obs-studio" / ".sentinel",   # a normal / this PC's own OBS
+        OBS_EXE_PATH.parents[2] / "config" / "obs-studio" / ".sentinel",    # the stick's OBS run in portable mode
+    ]
+    for sentinel in candidates:
+        try:
+            if sentinel.exists():
+                shutil.rmtree(sentinel, ignore_errors=True)
+                print(f"[OBS] Cleared stale crash sentinel so OBS skips the Safe Mode prompt: {sentinel}")
+        except Exception as e:
+            print(f"[OBS] Could not clear crash sentinel {sentinel}: {e}")
+
+
 def _obs_is_running() -> bool:
     for proc in psutil.process_iter(["name", "exe"]):
         try:
@@ -201,12 +235,17 @@ class OBSController:
             return False
 
         print(f"[OBS] Launching: {OBS_EXE_PATH}")
+        # Clear OBS's stale crash sentinel first, so it opens straight up instead of stopping on the Safe
+        # Mode / Normal Mode dialog (OBS always reads our TerminateProcess shutdown as a crash). This is the
+        # part that actually works on current OBS; the --disable-shutdown-check flag below was the old fix but
+        # OBS 32 removed/neutered it. OBS isn't running here (connect() checked), so the marker is stale.
+        _clear_obs_crash_sentinel()
         try:
             subprocess.Popen(
-                # --disable-shutdown-check: the app ends OBS with TerminateProcess on exit, which OBS reads as a
-                # crash, so every launch otherwise opens the "Safe Mode?" dialog and waits for a click. This
-                # flag skips that check and starts normally. --disable-missing-files-check likewise suppresses
-                # the "some sources are missing" prompt on a fresh profile.
+                # --disable-shutdown-check: kept because it still suppresses the "Safe Mode?" dialog on OBS
+                # versions that honour it (harmlessly ignored on those that don't -- see _clear_obs_crash_sentinel).
+                # --disable-missing-files-check likewise suppresses the "some sources are missing" prompt on a
+                # fresh profile.
                 [str(OBS_EXE_PATH), "--disable-shutdown-check", "--disable-missing-files-check"],
                 cwd=str(OBS_EXE_PATH.parent),
                 # no CREATE_NO_WINDOW — let it show
