@@ -181,6 +181,52 @@ def test_the_numbers_come_from_the_players_point_of_view(server):
     assert solo.player_report(_result(), "NotInIt") is None
 
 
+def _respawn_result():
+    """One round, a respawn mode: the player dies twice, once during the prep phase (negative time)."""
+    me = {"username": "K3nyooo", "operator": "Lion", "operator_game_id": None, "role_name": "", "kills": 1,
+          "deaths": 2, "assists": 0, "teamIndex": 0, "is_our_team": True, "side": "attack"}
+    enemy = {**me, "username": "Enemy", "teamIndex": 1, "is_our_team": False, "kills": 2, "deaths": 1, "side": "defense"}
+    r1 = Round(round_id=None, match_id=None, round_number=1, side="attack", site="", outcome="loss", resources=None,
+               raw_player_stats=[me, enemy],
+               round_events=RoundEvents(kills=[_ke(30.0, "Enemy", "K3nyooo"),       # prep-phase death: 30 - 45 = -15
+                                               _ke(80.0, "K3nyooo", "Enemy"),
+                                               _ke(120.0, "Enemy", "K3nyooo")]),    # second death the same round
+               positions={})
+    return SimpleNamespace(rounds=[r1], map_name="Clubhouse", map_game_id=None, game_mode="Team Deathmatch",
+                           played_at="2026-10-26T00:00:00Z", score_us=0, score_them=1)
+
+
+def test_respawn_mode_counts_every_death_and_never_shows_a_negative_typical():
+    rep = solo.player_report(_respawn_result(), "k3nyooo")
+    assert rep["mode"] == "Team Deathmatch"
+    r1 = rep["rounds"][0]
+    assert r1["deaths_n"] == 2                           # died twice: not capped at one a round
+    assert r1["death"]["into_action"] == 0.0            # the prep-phase death clamps to 0, not -15
+    assert not r1["death"]["spawn_peek"]
+    t = rep["totals"]
+    assert t["deaths"] == 2 and t["kills"] == 1
+    assert t["typical_death_into_action"] == 0           # clamped, never negative
+
+
+def _sm(**over):
+    s = {"rounds": 20, "won": 10, "kills": 50, "deaths": 50, "headshots": 10, "survived": 10, "opening_deaths": 5,
+         "deaths_isolated": 5, "deaths_checked": 10, "typical_death_into_action": 20, "drones": 20,
+         "attack_rounds_measured": 10}
+    s.update(over)
+    return s
+
+
+def test_biggest_differences_keeps_one_row_per_metric():
+    groups = [{"name": "Full team", "matches": 4, "summary": _sm(kills=100, deaths=50)},       # K/D 2.0
+              {"name": "4 of the team", "matches": 3, "summary": _sm(kills=50, deaths=50)},     # K/D 1.0
+              {"name": "Without the team", "matches": 2, "summary": _sm(kills=25, deaths=50)}]   # K/D 0.5
+    diffs = solo._differences(groups, min_rounds=10)
+    metrics = [d["metric"] for d in diffs]
+    assert len(metrics) == len(set(metrics))             # no near-duplicate metrics
+    kd = [d for d in diffs if d["metric"] == "K/D"]
+    assert len(kd) == 1 and kd[0]["group"] == "Without the team"   # the group that differs most
+
+
 def test_an_upload_is_read_and_its_files_removed(server, monkeypatch):
     client, _ = server
     tok = _key(client)["token"]

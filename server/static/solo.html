@@ -248,7 +248,8 @@ code { font-family: var(--mono); font-size: .85em; background: var(--soft); padd
         const t = m.totals || {};
         const st = m.status === "done" ? "" : m.status === "failed" ? `<span class="chip bad" title="${esc(m.error)}">couldn't read</span>` : `<span class="chip">${m.status === "queued" ? "waiting" : "reading"}</span>`;
         const sc = m.score && m.score[0] != null ? `<span class="${m.score[0] > m.score[1] ? "W" : "L"}">${m.score[0]}–${m.score[1]}</span>` : "";
-        return `<tr class="${m.status === "done" ? "click" : ""}" data-f="${esc(m.folder)}"><td>${fmtDate(m.played_at || m.uploaded_at)}</td><td>${esc(m.map || m.folder)}</td><td>${sc}</td>
+        const mode = m.mode && m.mode.toLowerCase() !== "bomb" ? ` <span class="muted">· ${esc(m.mode)}</span>` : "";
+        return `<tr class="${m.status === "done" ? "click" : ""}" data-f="${esc(m.folder)}"><td>${fmtDate(m.played_at || m.uploaded_at)}</td><td>${esc(m.map || m.folder)}${mode}</td><td>${sc}</td>
           <td>${m.status === "done" ? `${t.kills}–${t.deaths}` : ""}</td><td>${m.status === "done" ? `${t.headshots}/${t.kills}` : ""}</td>
           <td>${m.status === "done" ? `${t.opening_kills}–${t.opening_deaths}` : ""}</td><td>${esc(m.setup || "")}</td><td>${st}</td></tr>`;
       }).join("")}</table>`;
@@ -261,7 +262,7 @@ code { font-family: var(--mono); font-size: .85em; background: var(--soft); padd
     $("mBody").textContent = "Loading…";
     let m; try { m = await api(`/api/v1/solo/matches/${encodeURIComponent(folder)}`); } catch (e) { $("mBody").textContent = e.message; return; }
     const r = m.report, t = r.totals;
-    $("mTitle").textContent = `${r.map} · ${fmtDate(r.played_at)}`;
+    $("mTitle").textContent = `${r.map}${r.mode ? " · " + r.mode : ""} · ${fmtDate(r.played_at)}`;
     const opts = [`<option value="">${m.setup && !m.setup_set_by_hand ? `from your tool: ${esc(m.setup)}` : "not set"}</option>`, ...setups.map(s => `<option ${m.setup_set_by_hand && m.setup === s.name ? "selected" : ""}>${esc(s.name)}</option>`)];
     $("mBody").innerHTML = `
       <div class="tiles">
@@ -269,7 +270,7 @@ code { font-family: var(--mono); font-size: .85em; background: var(--soft); padd
         <div class="tile"><b>${t.kills}–${t.deaths}</b><span>kills – deaths</span></div>
         <div class="tile"><b>${t.headshots}/${t.kills}</b><span>headshot kills</span></div>
         <div class="tile"><b>${t.opening_kills}–${t.opening_deaths}</b><span>opening kills – deaths</span></div>
-        <div class="tile"><b>${t.typical_death_into_action ?? "–"}${t.typical_death_into_action != null ? " s" : ""}</b><span>typical death, into the round</span></div>
+        <div class="tile"><b>${t.typical_death_into_action == null ? "–" : Math.max(0, t.typical_death_into_action) + " s"}</b><span>typical death, into the round</span></div>
         <div class="tile"><b>${t.deaths_isolated}/${t.deaths_checked}</b><span>deaths nobody could trade</span></div>
       </div>
       <div class="row" style="margin:10px 0"><label class="small" for="mSetup">Played on</label><select id="mSetup">${opts.join("")}</select>
@@ -282,7 +283,7 @@ code { font-family: var(--mono); font-size: .85em; background: var(--soft); padd
           const util = x.side === "attack" ? (x.drones == null ? "–" : `${x.drones} drone${x.drones === 1 ? "" : "s"}`) : (x.reinforced == null ? "–" : `${x.reinforced} wall${x.reinforced === 1 ? "" : "s"}`);
           const near = x.nearest_mate_m == null ? "–" : typeof x.nearest_mate_m === "number" ? `${Math.round(x.nearest_mate_m)} m` : x.nearest_mate_m;
           return `<tr><td class="${x.won ? "W" : "L"}">R${String(x.n).padStart(2, "0")}</td><td>${x.side === "attack" ? "Att" : "Def"}</td><td>${esc(x.operator || "?")}</td><td>${kills}</td>
-            <td>${d ? esc(d.killer || "?") : "–"} ${flags}</td><td>${d && d.clock ? `${esc(d.clock)}${d.into_action != null ? ` (${Math.round(d.into_action)} s in)` : ""}` : "–"}</td><td>${near}</td><td>${util}</td></tr>`;
+            <td>${d ? esc(d.killer || "?") : "–"} ${flags}</td><td>${d && d.clock ? `${esc(d.clock)}${d.into_action != null ? ` (${Math.max(0, Math.round(d.into_action))} s in)` : ""}` : "–"}</td><td>${near}</td><td>${util}</td></tr>`;
         }).join("")}</table></div>
       ${r.killed_by && r.killed_by.length ? `<p class="small muted" style="margin-top:8px">Killed you: ${r.killed_by.map(([n, c]) => `${esc(n)} ×${c}`).join(", ")}</p>` : ""}`;
     $("mSetup").addEventListener("change", async () => { try { await api(`/api/v1/solo/matches/${encodeURIComponent(folder)}/setup`, { method: "PUT", body: { setup: $("mSetup").value || null } }); } catch (e) { alertInline(e.message); } });
@@ -346,8 +347,10 @@ code { font-family: var(--mono); font-size: .85em; background: var(--soft); padd
     const kinds = Object.fromEntries(CMP);
     const head = `<tr><th></th>${c.groups.map(g => `<th>${esc(g.name)}<div class="muted" style="font-weight:400">${g.matches} match${g.matches === 1 ? "" : "es"}, ${g.summary.rounds} rds</div></th>`).join("")}</tr>`;
     const body = CMP.map(([m, kind]) => `<tr><td>${m}</td>${c.groups.map(g => `<td>${fmtv(rates(g.summary)[m], kind)}</td>`).join("")}</tr>`).join("");
+    const phrase = g => { const n = (g || "").toLowerCase();
+      return n.startsWith("without") ? n : n.startsWith("own uploads") ? "in your own uploads" : "with " + n; };
     const diffs = (c.differences || []).filter(d => d.change != null && Math.abs(d.change) >= 0.25).slice(0, 6).map(d =>
-      `<li><b>${esc(d.metric)}</b>: ${fmtv(d.full_team, kinds[d.metric])} with the full team, ${fmtv(d.other, kinds[d.metric])} with ${esc(d.group.toLowerCase())}</li>`).join("");
+      `<li><b>${esc(d.metric)}</b>: ${fmtv(d.full_team, kinds[d.metric])} with the full team, ${fmtv(d.other, kinds[d.metric])} ${esc(phrase(d.group))}</li>`).join("");
     $("cmpBody").innerHTML = `<div class="wrap"><table>${head}${body}</table></div>
       ${diffs ? `<h3>Biggest differences</h3><ul class="small">${diffs}</ul>` : `<p class="small muted">Not enough full-team rounds yet to compare (15 or more needed).</p>`}
       ${c.groups.some(g => g.name.startsWith("Own uploads")) ? `<p class="small muted">"Teammates unknown": uploads from before 15 October don't record who you played with. Delete one on the Matches tab and upload the folder again to have it sorted.</p>` : ""}`;

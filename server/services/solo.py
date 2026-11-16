@@ -293,15 +293,21 @@ def _map_name(result) -> str:
     gid = getattr(result, "map_game_id", None)
     conn = _match_db()
     if conn is not None and gid:
-        try:
-            row = conn.execute("SELECT map FROM matches WHERE map_game_id = ? AND map NOT LIKE 'Map(%' "
-                               "ORDER BY match_id DESC LIMIT 1", (gid,)).fetchone()
-            if row and row[0]:
+        # The learned catalog (database/game_catalog.py: map_game_ids -> maps, hand-named maps included) is the
+        # authoritative ID -> name, so a map named for the team shows here even without a team match on it. Fall
+        # back to an older team match recorded under this ID. Each query is guarded so a missing table still tries
+        # the next one.
+        for sql in ("SELECT m.name FROM map_game_ids g JOIN maps m ON m.map_id = g.map_id WHERE g.game_id = ?",
+                    "SELECT map FROM matches WHERE map_game_id = ? AND map NOT LIKE 'Map(%' "
+                    "ORDER BY match_id DESC LIMIT 1"):
+            try:
+                row = conn.execute(sql, (gid,)).fetchone()
+            except Exception:
+                continue
+            if row and row[0] and not str(row[0]).startswith("Map("):
+                conn.close()
                 return str(row[0])
-        except Exception:
-            pass
-        finally:
-            conn.close()
+        conn.close()
     return _display(getattr(result, "map_name", None) or "Unknown")
 
 
@@ -370,15 +376,21 @@ def player_report(result, me: str) -> Optional[dict]:
             "assists": int(mine.get("assists") or 0), "death": None, "nearest_mate_m": None,
             "drones": None, "drones_before_first_death": None, "reinforced": None,
         }
-        death = next((k for k in kills if (k.victim or "").lower() == me_l), None)
+        my_deaths = [k for k in kills if (k.victim or "").lower() == me_l]
+        # Count every death, not one a round: a respawn mode (game_mode != Bomb/Hostage/Secure Area) kills a
+        # player several times a round. The first death still drives the per-round facts below.
+        row["deaths_n"] = max(len(my_deaths), int(mine.get("deaths") or 0))
+        death = my_deaths[0] if my_deaths else None
         if death is None and int(mine.get("deaths") or 0):
             row["death"] = {"killer": None, "clock": "", "into_action": None, "opening": False, "traded": False,
                             "spawn_peek": False}
         elif death is not None:
             into = round(death.time_sec - PREP_SEC, 1) if death.time_sec is not None else None
+            spawn_peek = side == "attack" and into is not None and 0 <= into <= SPAWN_PEEK_SEC
+            if into is not None and into < 0:
+                into = 0.0                      # died during prep (run-out / early peek): 0 s in, never negative
             row["death"] = {"killer": death.killer, "clock": _clock(death.time_str, death.time_sec), "into_action": into,
-                            "opening": bool(death.is_opening), "traded": bool(death.is_trade),
-                            "spawn_peek": side == "attack" and into is not None and 0 <= into <= SPAWN_PEEK_SEC}
+                            "opening": bool(death.is_opening), "traded": bool(death.is_trade), "spawn_peek": spawn_peek}
         _position_facts(row, r.positions or {}, my_name, mates, side)
         all_mates.update(mates)
         out.append(row)
@@ -388,7 +400,8 @@ def player_report(result, me: str) -> Optional[dict]:
     if flip_score:
         us, them = them, us
     nemesis = collections.Counter(r["death"]["killer"] for r in out if r["death"] and r["death"]["killer"])
-    return {"v": 1, "player": my_name, "map": _map_name(result), "played_at": getattr(result, "played_at", None),
+    return {"v": 1, "player": my_name, "map": _map_name(result), "mode": getattr(result, "game_mode", None),
+            "played_at": getattr(result, "played_at", None),
             "score": [us, them], "rounds": out, "totals": summarize(out), "killed_by": nemesis.most_common(),
             "mates": sorted(all_mates)}
 
@@ -418,7 +431,8 @@ def _position_facts(row: dict, pos: dict, my_name: str, mates: Iterable[str], si
 
 def summarize(rounds: list[dict]) -> dict:
     """Totals over any list of round rows (one match, or every match on a map, a setup, ...)."""
-    deaths = [r["death"] for r in rounds if r.get("death")]
+    deaths = [r["death"] for r in rounds if r.get("death")]            # first death of each round, for the facts
+    total_deaths = sum(r.get("deaths_n", 1 if r.get("death") else 0) for r in rounds)  # every death (respawns)
     into = [d["into_action"] for d in deaths if d.get("into_action") is not None]
     checked = [r for r in rounds if r.get("death") and r.get("nearest_mate_m") is not None]
     attack = [r for r in rounds if r["side"] == "attack" and r.get("drones") is not None]
@@ -426,7 +440,7 @@ def summarize(rounds: list[dict]) -> dict:
     kills = [k for r in rounds for k in r.get("kills") or []]
     return {
         "rounds": len(rounds), "won": sum(1 for r in rounds if r.get("won")),
-        "kills": len(kills), "deaths": len(deaths), "headshots": sum(1 for k in kills if k.get("headshot")),
+        "kills": len(kills), "deaths": total_deaths, "headshots": sum(1 for k in kills if k.get("headshot")),
         "assists": sum(int(r.get("assists") or 0) for r in rounds),
         "survived": sum(1 for r in rounds if not r.get("death")),
         "opening_kills": sum(1 for k in kills if k.get("opening")),
@@ -435,7 +449,7 @@ def summarize(rounds: list[dict]) -> dict:
         "deaths_traded": sum(1 for d in deaths if d.get("traded")),
         "deaths_checked": len(checked),
         "deaths_isolated": sum(1 for r in checked if r["nearest_mate_m"] == "other floor" or r["nearest_mate_m"] > TRADE_NEAR_M),
-        "typical_death_into_action": round(statistics.median(into)) if into else None,
+        "typical_death_into_action": max(0, round(statistics.median(into))) if into else None,
         "attack_rounds_measured": len(attack),
         "drones": sum(r["drones"] for r in attack),
         "drones_before_first_death": sum(r["drones_before_first_death"] for r in attack),
@@ -456,7 +470,8 @@ def list_matches(owner: str) -> list[dict]:
         rep = json.loads(r["report_json"]) if r["report_json"] else None
         out.append({"folder": r["match_key"], "status": r["status"], "error": r["error"],
                     "setup": r["setup"] or inferred_setup(owner, r["played_at"]), "setup_set_by_hand": bool(r["setup"]),
-                    "played_at": r["played_at"], "map": r["map"], "rounds": r["rounds"], "won": r["won"],
+                    "played_at": r["played_at"], "map": r["map"], "mode": rep.get("mode") if rep else None,
+                    "rounds": r["rounds"], "won": r["won"],
                     "score": rep.get("score") if rep else None, "totals": rep.get("totals") if rep else None,
                     "uploaded_at": r["uploaded_at"]})
     return out
@@ -826,12 +841,16 @@ def _team_rows(conn, mid: int, username: str) -> list[dict]:
             "kills": [{"victim": k.get("victim"), "clock": k.get("time") or "", "headshot": bool(k.get("headshot")),
                        "opening": bool(k.get("opening"))} for k in kills if (k.get("killer") or "").lower() == me_l],
             "death": None, "nearest_mate_m": None, "drones": None, "drones_before_first_death": None, "reinforced": None}
-        d = next((k for k in kills if (k.get("victim") or "").lower() == me_l), None)
+        my_deaths = [k for k in kills if (k.get("victim") or "").lower() == me_l]
+        row["deaths_n"] = len(my_deaths)
+        d = my_deaths[0] if my_deaths else None
         if d is not None:
             into = round(float(d.get("t") or 0) - PREP_SEC, 1) if d.get("t") is not None else None
+            spawn_peek = side == "attack" and into is not None and 0 <= into <= SPAWN_PEEK_SEC
+            if into is not None and into < 0:
+                into = 0.0
             row["death"] = {"killer": d.get("killer"), "clock": d.get("time") or "", "into_action": into,
-                            "opening": bool(d.get("opening")), "traded": bool(d.get("trade")),
-                            "spawn_peek": side == "attack" and into is not None and 0 <= into <= SPAWN_PEEK_SEC}
+                            "opening": bool(d.get("opening")), "traded": bool(d.get("trade")), "spawn_peek": spawn_peek}
         pos = decode_blob(blobs[rn]) if rn in blobs else None
         if pos:
             players = pos.get("players") or {}
@@ -933,7 +952,7 @@ def _differences(groups: list[dict], min_rounds: int = 15) -> list[dict]:
     if not full or full["summary"]["rounds"] < min_rounds:
         return []
     base = _rates(full["summary"])
-    out = []
+    best: dict[str, dict] = {}
     for g in groups[1:]:
         if g["summary"]["rounds"] < min_rounds:
             continue
@@ -943,7 +962,10 @@ def _differences(groups: list[dict], min_rounds: int = 15) -> list[dict]:
             if a is None or b is None:
                 continue
             change = (a - b) / abs(b) if b else None
-            out.append({"metric": metric, "full_team": round(a, 3), "other": round(b, 3), "group": g["name"],
-                        "change": round(change, 3) if change is not None else None})
-    out.sort(key=lambda d: -abs(d["change"] or 0))
-    return out
+            item = {"metric": metric, "full_team": round(a, 3), "other": round(b, 3), "group": g["name"],
+                    "change": round(change, 3) if change is not None else None}
+            # One row per metric -- the group that differs most from the full team -- so the same metric doesn't
+            # appear once per group as a run of near-duplicate lines.
+            if metric not in best or abs(item["change"] or 0) > abs(best[metric]["change"] or 0):
+                best[metric] = item
+    return sorted(best.values(), key=lambda d: -abs(d["change"] or 0))
