@@ -54,6 +54,12 @@ server_data/
 laptop_smb_credentials.json
 # Docker deployment (deploy/): private settings, never commit.
 deploy/.env
+# 2026-10-28: the rule above matches only the exact path, so a copy such as
+# deploy/.env.bak-20261013 was left untracked-but-not-ignored -- one `git add -A`
+# would have staged a live credential file into a PUBLIC repo. Cover the backups
+# too, while keeping the committed template.
+deploy/.env.*
+!deploy/.env.example
 
 # Local scratch / runtime output
 server_pid.txt

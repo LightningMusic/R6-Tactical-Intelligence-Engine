@@ -128,7 +128,7 @@
   const DB_NAME = "r6rec", STORE = "chunks";
   const LS_TOKEN = "r6rec.token", LS_DEVICE = "r6rec.device", LS_MIC = "r6rec.mic";
   const PAGE_VERSION = "__PAGE_VERSION__";        // filled in by the server when it serves the page
-  const LS_AUTO = "r6rec.auto", LS_ALWAYS = "r6rec.always";   // set by the first manual Start: later opens start by themselves
+  const LS_AUTO = "r6rec.auto", LS_ALWAYS = "r6rec.always", LS_CAPTURE = "r6rec.capture";   // set by the first manual Start: later opens start by themselves
   // Nobody here is asked to pick a microphone or press anything. When the one in use sends only zeros, other
   // real microphones are tried in turn and the first that carries sound is kept (and remembered).
   const HEAL_TRY_MS = 4500;                  // how long each candidate gets to prove it carries sound
@@ -150,6 +150,10 @@
   const PROBE_VERIFY_MS = 8000;              // ...and the recording itself must get sound from it within this long
   const RATIO_MIN_SEC = 60;                  // judge the audio's speed only after a minute of recording
   const RATIO_OK = [0.93, 1.07];
+  const RATIO_REBUILD_BELOW = 0.6;           // recent delivered audio under 60% of real time: capture is starved, rebuild it
+  const RATIO_WINDOW_MS = 15 * 1000;         // ...judged over this recent window, so a bad patch triggers it even late in a recording
+  const REBUILD_COOLDOWN_MS = 20 * 1000;     // ...and no more than one rebuild this often, so it can't thrash
+  const SEG_MS = 45 * 1000;                  // MediaRecorder mode: close off a complete, decodable chunk about this often
   const TITLE = "R6 Team Recorder";
   const MAX_QUEUE_BYTES = 300 * 1024 * 1024;
   const AC = window.AudioContext || window.webkitAudioContext;
@@ -177,6 +181,8 @@
     level: 0, lastAliveAt: 0, lastSoundAt: 0, micLabel: "", micNote: "", fatal: "",
     healing: false, healAfter: 0, healedTo: "", healFailed: false, needsTap: false, autoStarted: false,
     wakeLock: null, db: null, flushing: false, authFailed: false, online: true,
+    rebuilding: false, rebuildAfter: 0, ratioMark: null,  // recovering a starved/suspended capture (background tab, busy PC)
+    captureMode: "worklet", mrMime: "", mr: null, mrBlobs: [], segStartEpoch: 0, segStartPerf: 0, meterData: null,
   };
   if (!S.deviceId) { S.deviceId = hex(8); ls.set(LS_DEVICE, S.deviceId); }
 
@@ -399,7 +405,7 @@
         while (total > MAX_QUEUE_BYTES && items.length > 1) { const d = items.shift(); total -= d.size; await qDel(d.key); }
         const it = items[0];
         const fd = new FormData();
-        fd.append("file", it.wav, "chunk.wav");
+        fd.append("file", it.blob || it.wav, it.filename || "chunk.wav");
         fd.append("recording_id", it.recording_id);
         fd.append("chunk_index", String(it.chunk_index));
         fd.append("username", S.username);
@@ -422,11 +428,17 @@
   function startCycle() {
     S.recording = true; S.recordingId = hex(16); S.chunkIndex = 0;
     S.haveT0 = false; S.cycleSamples = 0; S.buf = []; S.bufSamples = 0; S.totalSamples = 0; S.gapFilledSec = 0;
+    S.ratioMark = null;
     resetResampler();
+    if (S.captureMode === "media") startSegment();
   }
   function endCycle() {
     if (!S.recording) return;
     S.recording = false;
+    if (S.captureMode === "media") {
+      if (S.mr && S.mr.state === "recording") { try { S.mr.stop(); } catch (e) {} }   // onstop -> final chunk, no chain (recording is now false)
+      return;
+    }
     if (S.bufSamples > 0) cut(S.bufSamples, true);        // whatever is still buffered is this recording's last chunk
   }
   const shouldRecord = () => S.started && !S.paused && (S.always || S.hostWantsRecording);
@@ -434,6 +446,65 @@
     if (shouldRecord() && !S.recording) startCycle();
     else if (!shouldRecord() && S.recording) endCycle();
     render();
+  }
+
+  // ───────── MediaRecorder capture (media mode) ─────────
+  // The AudioWorklet path above rides the JS audio render thread, which a fullscreen game on a busy PC starves
+  // (one teammate's hidden tab delivered 6% of real time). MediaRecorder records through the browser's native
+  // media pipeline instead, which keeps going when the tab is hidden. Each segment is stopped and restarted so it
+  // is a complete, independently-decodable file (the server decodes chunks one at a time, and transcodes the WebM
+  // to Ogg/Opus on the way in). Opt in with ?capture=media on the invite link.
+  function pickMrMime() {
+    for (const m of ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"]) {
+      try { if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m; } catch (e) {}
+    }
+    return "";
+  }
+  function startSegment() {
+    if (!S.recording || S.captureMode !== "media" || !S.stream) return;
+    let mr;
+    try { mr = S.mrMime ? new MediaRecorder(S.stream, { mimeType: S.mrMime }) : new MediaRecorder(S.stream); }
+    catch (e) { S.micNote = "This browser couldn't start the recorder."; return; }
+    S.mr = mr; S.mrBlobs = [];
+    S.segStartEpoch = serverNow(); S.segStartPerf = performance.now();
+    mr.ondataavailable = (e) => { if (e.data && e.data.size) S.mrBlobs.push(e.data); };
+    mr.onstop = finishSegment;
+    try { mr.start(); } catch (e) { S.mr = null; S.micNote = "This browser couldn't start the recorder."; }
+  }
+  function finishSegment() {
+    const blobs = S.mrBlobs, mr = S.mr; S.mrBlobs = []; S.mr = null;
+    if (blobs && blobs.length) {
+      const type = (mr && mr.mimeType) || S.mrMime || "audio/webm";
+      const ext = type.indexOf("ogg") >= 0 ? "ogg" : "webm";
+      const blob = new Blob(blobs, { type: type });
+      const dur = Math.max(0.05, (performance.now() - S.segStartPerf) / 1000);
+      const item = {
+        key: S.recordingId + ":" + String(S.chunkIndex).padStart(4, "0"),
+        recording_id: S.recordingId, chunk_index: S.chunkIndex,
+        start_epoch: S.segStartEpoch, duration_sec: dur, is_final: !S.recording,
+        blob: blob, filename: "chunk." + ext, size: blob.size,
+      };
+      S.chunkIndex++; S.totalSamples += Math.round(dur * SR);
+      qPut(item).then(flushQueue, () => { S.micNote = "Couldn't keep audio in the browser's storage - is the disk full?"; });
+    }
+    if (S.recording && S.captureMode === "media") startSegment();   // chain the next segment
+  }
+  function segmentTick() {
+    if (S.recording && S.captureMode === "media" && S.mr && S.mr.state === "recording") {
+      try { S.mr.stop(); } catch (e) {}                   // onstop -> finishSegment -> starts the next segment
+    }
+  }
+  // Media mode records with MediaRecorder, not the worklet, so the silent-mic meter reads an analyser node
+  // instead of per-block peaks. Stale while the tab is hidden (the graph is throttled too) -- that only weakens
+  // the warning, never the recording, which MediaRecorder keeps doing.
+  function meterTick() {
+    if (S.captureMode !== "media" || !S.started || !S.node || !S.meterData) return;
+    try { S.node.getFloatTimeDomainData(S.meterData); } catch (e) { return; }
+    let peak = 0;
+    for (let i = 0; i < S.meterData.length; i++) { const a = Math.abs(S.meterData[i]); if (a > peak) peak = a; }
+    S.level = Math.max(peak, S.level * 0.92);
+    if (peak > ALIVE_PEAK) S.lastAliveAt = performance.now();
+    if (peak > DEAD_PEAK) S.lastSoundAt = performance.now();
   }
 
   // How much audio has arrived per second of real time since this recording began. It should be 1.0. On
@@ -477,6 +548,16 @@
         if (j.policy && j.policy.mode === "follow" && S.always) {
           S.always = false; ls.set(LS_ALWAYS, "0"); $("always").checked = false;
         }
+        // The server can move this page's capture backend (e.g. onto MediaRecorder, which keeps recording when
+        // the tab is hidden behind a fullscreen game). Applied the same careful way as a page-version change:
+        // persisted and reloaded between sessions, never mid-recording, so it sticks across a stale tab without
+        // anyone reopening their link.
+        const wantCap = j.policy && (j.policy.capture === "media" || j.policy.capture === "worklet") ? j.policy.capture : null;
+        if (wantCap && wantCap !== ls.get(LS_CAPTURE) && (wantCap !== "media" || window.MediaRecorder)
+            && !S.recording && !S.queued && !S.flushing) {
+          ls.set(LS_CAPTURE, wantCap);
+          location.reload();
+        }
         // A newer page on the server: reload between sessions (never mid-recording, nothing waiting to upload),
         // so a fix reaches everyone without anyone reopening their link.
         if (j.page_version && PAGE_VERSION.length === 12 && j.page_version !== PAGE_VERSION
@@ -506,6 +587,7 @@
 
   async function buildGraph() {
     if (S.ctx && S.node) return;
+    if (S.captureMode === "media") return buildMeterGraph();
     // A 16 kHz context makes the browser do the (properly filtered) resampling itself; fall back to the
     // device's own rate and resample here if the browser refuses.
     for (const rate of [SR, 0]) {
@@ -528,6 +610,20 @@
     throw new Error("This browser couldn't set up audio capture.");
   }
 
+  // Media mode doesn't record through the graph (MediaRecorder does); this exists only to meter the mic so the
+  // silent-mic warning still works. gain 0, so it's pulled but never heard.
+  async function buildMeterGraph() {
+    const ctx = new AC({ latencyHint: "interactive" });
+    try { await ctx.resume(); } catch (e) {}
+    const src = ctx.createMediaStreamSource(S.stream);
+    const an = ctx.createAnalyser(); an.fftSize = 2048;
+    const sink = ctx.createGain(); sink.gain.value = 0;
+    src.connect(an); an.connect(sink); sink.connect(ctx.destination);
+    ctx.onstatechange = () => { if (S.started && ctx.state !== "running") ctx.resume().catch(() => {}); };
+    S.ctx = ctx; S.node = an; S.sink = sink; S.source = src;
+    S.meterData = new Float32Array(an.fftSize);
+  }
+
   async function openMic(forceId) {
     const id = forceId !== undefined ? forceId : $("device").value;
     // Raw like R6Voice: echo cancellation / noise suppression / auto-gain mangle speech for Whisper, and
@@ -548,6 +644,12 @@
     S.lastAliveAt = performance.now();
     S.lastSoundAt = performance.now();
     S.micLabel = (S.stream.getAudioTracks()[0] && S.stream.getAudioTracks()[0].label) || "";
+    // Media mode records straight off the stream, so a new stream (first open, device switch, reconnect) needs a
+    // fresh MediaRecorder segment bound to it.
+    if (S.captureMode === "media" && S.recording) {
+      if (S.mr && S.mr.state === "recording") { try { S.mr.stop(); } catch (e) {} }   // onstop chains a new segment
+      else startSegment();
+    }
   }
 
   // Which microphones are worth trying next, best first: the system default (a different default is the most
@@ -607,9 +709,54 @@
     }
   }
   function watchMic() {
-    if (!S.started || S.paused || S.fatal || S.healing || reacquiring) return;
+    if (S.captureMode === "media") return;   // media mode records via MediaRecorder regardless of the mic graph; no device-switch
+    if (!S.started || S.paused || S.fatal || S.healing || reacquiring || S.rebuilding) return;
     if (performance.now() - S.lastSoundAt <= DEAD_MS || performance.now() < S.healAfter) return;
     healMic();
+  }
+
+  // healMic above handles a mic that goes dead (all zeros). A different failure: the mic is fine but the browser
+  // only delivers a fraction of real time -- a tab left behind a fullscreen game, or an AudioContext the OS
+  // throttled on a busy (gaming) PC, seen as low as 6% of real time. Switching mics can't fix that; the whole
+  // audio graph has to be torn down and rebuilt on a fresh context. The recording cycle is kept, so fillGap
+  // turns the lost span into silence and everything after it still lines up with the match.
+  async function rebuildGraph() {
+    if (S.rebuilding || !S.started) return;
+    S.rebuilding = true;
+    S.micNote = "Audio capture fell behind -- restarting it...";
+    render();
+    const old = S.ctx, oldNode = S.node, oldSrc = S.source, oldSink = S.sink;
+    S.ctx = null; S.node = null;                              // so buildGraph makes a fresh context + worklet
+    try { oldSrc && oldSrc.disconnect(); } catch (e) {}
+    try { oldNode && oldNode.disconnect(); } catch (e) {}
+    try { oldSink && oldSink.disconnect(); } catch (e) {}
+    try { old && await old.close(); } catch (e) {}
+    try {
+      await openMic(currentMicId());                          // fresh getUserMedia stream + fresh graph, same device
+      S.lastAliveAt = performance.now(); S.lastSoundAt = performance.now();
+      S.micNote = "";
+    } catch (e) {
+      reacquireMic("The audio capture had to restart.");
+    } finally {
+      S.ratioMark = null; S.rebuildAfter = performance.now() + REBUILD_COOLDOWN_MS;
+      S.rebuilding = false; render();
+    }
+  }
+
+  // Recent delivered audio (not the silence that fills gaps) against real time. Sustained below the threshold
+  // means the capture is starved, not merely jittery, so rebuild it. A cooldown keeps it from thrashing.
+  function watchRatio() {
+    if (S.captureMode === "media") return;   // audio-ratio starvation is a worklet problem; MediaRecorder doesn't have it
+    if (!S.started || S.paused || S.fatal || S.healing || reacquiring || S.rebuilding) return;
+    if (!S.recording || !S.haveT0) { S.ratioMark = null; return; }
+    if (performance.now() < S.rebuildAfter) return;
+    const now = performance.now(), delivered = (S.cycleSamples + S.bufSamples) / SR, gap = S.gapFilledSec;
+    if (!S.ratioMark) { S.ratioMark = { perf: now, delivered, gap }; return; }
+    if (now - S.ratioMark.perf < RATIO_WINDOW_MS) return;
+    const real = (delivered - S.ratioMark.delivered) - (gap - S.ratioMark.gap);   // real audio this window, holes removed
+    const recent = real / ((now - S.ratioMark.perf) / 1000);
+    S.ratioMark = { perf: now, delivered, gap };
+    if (recent < RATIO_REBUILD_BELOW) rebuildGraph();
   }
 
   // After a heal, the microphone that went quiet is still listened to in the background, and the page goes back
@@ -640,7 +787,7 @@
     const p = S.probe;
     if (!p) return;
     if (!S.started) { stopProbe(); return; }
-    if (S.healing || reacquiring) return;
+    if (S.healing || reacquiring || S.rebuilding) return;
     p.an.getFloatTimeDomainData(p.data);
     let peak = 0;
     for (let i = 0; i < p.data.length; i++) { const a = Math.abs(p.data[i]); if (a > peak) peak = a; }
@@ -848,6 +995,12 @@
 
   // ───────── boot ─────────
   async function boot() {
+    // Capture backend: ?capture=media on the invite link opts this device into MediaRecorder (survives a hidden
+    // fullscreen game, e.g. a locked-down esports PC where R6Voice can't be installed). Remembered per device.
+    const qsCap = new URLSearchParams(location.search).get("capture");
+    if (qsCap === "media" || qsCap === "worklet") ls.set(LS_CAPTURE, qsCap);
+    S.captureMode = (ls.get(LS_CAPTURE) === "media" && window.MediaRecorder) ? "media" : "worklet";
+    if (S.captureMode === "media") S.mrMime = pickMrMime();
     const fromHash = decodeURIComponent((location.hash || "").replace(/^#/, "")).trim();
     if (fromHash.startsWith("inv_")) {
       ls.set(LS_TOKEN, fromHash);
@@ -859,7 +1012,8 @@
       $("who").textContent = "No invite found on this device.";
       return setState("warn", "Open your invite link", "Use the link the host sent you - it has your name built in.");
     }
-    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && AC && window.AudioWorkletNode)) {
+    const canCapture = S.captureMode === "media" ? !!window.MediaRecorder : !!window.AudioWorkletNode;
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && AC && canCapture)) {
       $("who").textContent = "";
       return setState("bad", "This browser can't record", "Use a current Chrome, Edge or Firefox.");
     }
@@ -892,7 +1046,10 @@
     setInterval(heartbeat, HEARTBEAT_MS);
     setInterval(render, 500);
     setInterval(watchMic, 2000);
+    setInterval(watchRatio, 3000);
     setInterval(checkProbe, 1000);
+    setInterval(meterTick, 250);
+    setInterval(segmentTick, SEG_MS);
     setInterval(() => { if (S.started) takeWakeLock(); }, 30000);
     setInterval(() => { if (S.started) syncClock(3, true); }, CLOCK_RESYNC_MS);
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.started) takeWakeLock(); });

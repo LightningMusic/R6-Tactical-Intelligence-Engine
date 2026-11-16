@@ -6,6 +6,7 @@ on 2026-09-30 against a portable OBS 32.1.1: launched, set up and recording
 in 6 s; a 15 s recording came out as one mic track plus 2 kb/s video.
 """
 import hashlib
+import json
 import sys
 import time
 from pathlib import Path
@@ -51,6 +52,16 @@ def auth(t):
 def beat(c, username="Teddy_Dance", device="dev1", **status):
     return c.post("/api/v1/companion/heartbeat", headers=auth(VOICE),
                   json={"device_id": device, "username": username, "status": status})
+
+
+def test_media_capture_usernames_reads_config_fresh(tmp_path, monkeypatch):
+    cfg = tmp_path / "server_config.json"
+    monkeypatch.setattr(server_settings, "CONFIG_FILE", cfg)
+    assert server_settings.media_capture_usernames() == set()             # no file yet -> nobody switched
+    cfg.write_text(json.dumps({"media_capture_users": ["Zander", " lammTOZZZ ", ""]}), encoding="utf-8")
+    assert server_settings.media_capture_usernames() == {"zander", "lammtozzz"}   # trimmed, lowered, blanks dropped
+    cfg.write_text("not json", encoding="utf-8")
+    assert server_settings.media_capture_usernames() == set()             # unreadable -> empty, never raises
 
 
 def test_relay_host_sets_state_companions_follow(client):

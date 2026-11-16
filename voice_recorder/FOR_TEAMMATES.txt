@@ -17,10 +17,13 @@ Setup (once)
      (Settings > Time & language > Date & time > "Set time automatically").
 
 Every practice
-  - Press "Start recording" when practice starts, "Stop recording" when it
-    ends. That's it. It uploads by itself as it goes (every 5 minutes); if
-    your internet drops, it catches up later -- even after a restart.
-  - "Pause" records silence until you press "Resume".
+  - Just leave it open. With "Start and stop automatically with the team"
+    ticked (the default), it starts and stops by itself whenever the team
+    records -- you don't press anything. It uploads as it goes (every 5
+    minutes); if your internet drops, it catches up later, even after a
+    restart.
+  - Prefer to do it by hand? Untick that box and use the Start/Stop button.
+    "Pause" records silence until you press "Resume".
 
 Privacy
   - It only ever records your own mic -- nobody else's audio.
