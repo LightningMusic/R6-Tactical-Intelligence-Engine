@@ -280,6 +280,27 @@ class SessionProcessingService:
             except Exception as comms_err:
                 print(f"[SessionProcessing] Comms timeline skipped for session {session_id}: {comms_err}")
 
+            # Mark roster members as team on the server too. The shared parser saves
+            # every player as is_team_member=0 (the replay's team attribution is
+            # unreliable) and, unlike the client's Players settings, the server never
+            # stamped its saved roster -- so server-side per-team analysis was blind.
+            try:
+                from server.services.comms_service import CommsService as _RosterComms
+                roster_names = {n.strip().lower() for n in (_RosterComms.roster_usernames() or []) if n and n.strip()}
+                if roster_names:
+                    with match_repo.db.get_connection() as conn:
+                        ids = {r[0] for r in conn.execute("SELECT player_id, name FROM players").fetchall()
+                               if str(r[1]).lower() in roster_names}
+                        ids |= {r[0] for r in conn.execute("SELECT player_id, alias FROM player_aliases").fetchall()
+                                if str(r[1]).lower() in roster_names}
+                        if ids:
+                            conn.executemany("UPDATE players SET is_team_member=1 WHERE player_id=?",
+                                             [(i,) for i in ids])
+                            conn.commit()
+                            print(f"[SessionProcessing] marked {len(ids)} roster player(s) as team members.")
+            except Exception as team_err:
+                print(f"[SessionProcessing] team-flag stamp skipped: {team_err}")
+
             intel = IntelEngine(
                 ollama_exe=server_settings.OLLAMA_EXE,
                 ollama_models=server_settings.OLLAMA_MODELS_DIR,

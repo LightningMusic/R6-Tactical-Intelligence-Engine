@@ -180,6 +180,35 @@ def enroll_from_alignment(ref: np.ndarray, to_ref: Callable[[float], float], seg
     return len(embs)
 
 
+def enroll_from_clip(wav: np.ndarray, segments: list[dict], username: str,
+                     max_n: int = MAX_ENROLL_PER_SESSION) -> int:
+    """Enroll `username` from speech `segments` that are, by construction, one known
+    person on a single clip -- the host's own mic track (the host is never on the
+    Discord mix, so this is the only place their voiceprint can come from). Times are
+    in `wav`'s own seconds at SR; no alignment mapping. Returns how many stretches were
+    learned from."""
+    if not enabled() or not segments:
+        return 0
+    picks = sorted(segments, key=lambda s: float(s["end"]) - float(s["start"]), reverse=True)[:max_n]
+    embs, secs = [], 0.0
+    for s in picks:
+        a0, a1 = float(s["start"]), float(s["end"])
+        if a1 - a0 < MIN_SEG_SEC:
+            continue
+        a1 = min(a1, a0 + MAX_SEG_SEC)
+        clip = wav[max(0, int(a0 * SR)):int(a1 * SR)]
+        if len(clip) < int(MIN_SEG_SEC * SR):
+            continue
+        v = embed(clip)
+        if v is not None:
+            embs.append(v)
+            secs += len(clip) / SR
+    if embs:
+        enroll(username, embs, secs)
+        print(f"[VoiceID] learned {username}'s voice from {len(embs)} stretch(es) of their own mic.")
+    return len(embs)
+
+
 # ── naming the unassigned lines ──────────────────────────────────────────
 
 def label_team_lines(utterances: list[dict], ref: np.ndarray, seconds_in_clip: Callable[[float], float],

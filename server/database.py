@@ -221,6 +221,12 @@ class ServerDatabase:
                     line_key TEXT PRIMARY KEY
                 );
 
+                -- Sessions the host's own voice has already been enrolled from (voice_id,
+                -- via CommsService._enroll_host_voice), so a reprocess doesn't double-count.
+                CREATE TABLE IF NOT EXISTS host_voice_enrolled (
+                    session_id TEXT PRIMARY KEY
+                );
+
                 -- A teammate's own analyzer (server/players.py, server/services/solo.py): their key, the
                 -- replays they upload themselves (kept apart from the team's matches.db), the setups they
                 -- play on and the settings snapshots their sensitivity tool sends.

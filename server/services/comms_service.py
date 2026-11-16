@@ -39,6 +39,10 @@ from server.database import server_db
 SR = 16000
 VOICE_MARGIN_SEC = 120.0      # teammate audio gathered this far either side of the match window
 SETTLE_SEC = 90.0             # wait this long after a teammate's newest chunk before rebuilding
+VOICE_ID_TRUST_COVERAGE = 0.5  # a teammate whose own recording covered at least this fraction of the match is
+                               # trusted for their own lines (excluded from voice-ID); a mostly-missing track
+                               # -- e.g. a backgrounded browser tab that delivered 6% of real time -- leaves
+                               # them eligible, so voice-ID can name the Discord lines their recorder never caught
 
 _transcriber_lock = threading.Lock()
 _transcriber = None
@@ -145,6 +149,23 @@ def reassign_bleed(own: list[dict], bleed_by_user: dict[str, list], voice: list[
         out.append({**u, "speaker": speaker, "username": user, "source": "voice", "via": "host mic"})
         moved += 1
     return out, moved, dropped
+
+
+def well_covered_usernames(voice_rows: list[dict], window: float,
+                           min_coverage: float = VOICE_ID_TRUST_COVERAGE) -> set:
+    """Teammates whose own recording covered enough of the match (delivered audio over the match window) to
+    trust it for their own lines. One whose track mostly failed -- a backgrounded browser tab that delivered a
+    fraction of real time -- is left out, so voice-ID can still name the Discord lines their recorder missed.
+    An unknown window (<= 0) trusts every aligned track, as before."""
+    out: set = set()
+    for r in voice_rows:
+        a = json.loads(r.get("alignment_json") or "{}")
+        if a.get("status") != "aligned":
+            continue
+        cov = (float(a.get("covered_sec") or 0.0) / window) if window > 0 else 1.0
+        if cov >= min_coverage:
+            out.add(r["username"])
+    return out
 
 
 def voice_id_exclusions(aligned: set, rounds: list[dict], profiles: dict) -> set:
@@ -292,7 +313,9 @@ class CommsService:
             segments = result.get("segments", []) or []
             if source == "self":
                 # One person's mic: drop Whisper's inventions over silence.
-                segments = keep_voiced_segments(segments, speech_regions(_load_audio(path), SR))
+                self_audio = _load_audio(path)
+                segments = keep_voiced_segments(segments, speech_regions(self_audio, SR))
+                cls._enroll_host_voice(session_id, self_user, self_audio, segments)
             legacy_segments.extend(segments)
             if clip_relative:
                 from integration.whisper_transcriber import _find_ffmpeg, _get_audio_duration
@@ -318,6 +341,32 @@ class CommsService:
         legacy_segments.sort(key=lambda s: s.get("start", 0))
         text = " ".join((u["text"] for u in sorted(all_utts, key=lambda u: u["start"])))
         return {"text": text, "segments": legacy_segments, "word_count": len(text.split())}
+
+    @classmethod
+    def _enroll_host_voice(cls, session_id: str, self_user: str, self_audio, segments: list[dict]) -> None:
+        """Learn the host's own voice from their mic track. The host is never on the
+        Discord mix (Discord doesn't loop your own voice back), so the normal
+        alignment-based enrolment skips them -- this is the only source of a host
+        voiceprint. Used for bleed disambiguation and the review page's baseline.
+        Runs once per session (transcribe_host_audio is a one-time step); guarded so a
+        reprocess doesn't double-count."""
+        if not self_user or not segments:
+            return
+        try:
+            from server import voice_id
+            if not voice_id.enabled():
+                return
+            with server_db.get_connection() as conn:
+                if conn.execute("SELECT 1 FROM host_voice_enrolled WHERE session_id=?", (session_id,)).fetchone():
+                    return
+            n = voice_id.enroll_from_clip(self_audio, segments, self_user)
+            with server_db.get_connection() as conn:
+                conn.execute("INSERT OR IGNORE INTO host_voice_enrolled (session_id) VALUES (?)", (session_id,))
+                conn.commit()
+            if n:
+                print(f"[Comms] {session_id[:16]}: enrolled host {self_user}'s voice from {n} self-mic stretch(es).")
+        except Exception as e:                                   # never fail processing over enrolment
+            print(f"[Comms] {session_id[:16]}: host voice enrolment skipped: {e}")
 
     # ── 2. Rounds ─────────────────────────────────────────────────────
 
@@ -608,9 +657,14 @@ class CommsService:
             comms_dir = server_settings.COMMS_DIR / session_id
             clip = next(iter(sorted(comms_dir.glob("team.*"))), None)
             if team and clip is not None and voice_id.enabled() and voice_id.load_profiles():
-                aligned = {r["username"] for r in voice_rows
-                           if json.loads(r["alignment_json"] or "{}").get("status") == "aligned"}
-                aligned = voice_id_exclusions(aligned, rounds, voice_id.load_profiles())
+                # Exclude from voice-ID only teammates whose OWN recording really covers this match -- those
+                # lines are already theirs. A track that mostly failed covers almost none of what they said,
+                # so the rest lives only on the Discord track: keep them eligible so label_team_lines can name
+                # it (the few lines they did record are removed by drop_team_duplicates above, so a low-coverage
+                # teammate can't be double-counted).
+                window = float(row["window_end"] or 0.0) - float(row["window_start"] or 0.0)
+                aligned = voice_id_exclusions(well_covered_usernames(voice_rows, window),
+                                              rounds, voice_id.load_profiles())
                 display = {str(k).lower(): v for k, v in (meta.get("roster") or {}).items()}
                 display.update(cls.team_context(row["match_id"])[1])
                 team, voice_id_stats = voice_id.label_team_lines(
@@ -834,6 +888,34 @@ class CommsService:
         return out, ".ogg"
 
     @staticmethod
+    def _transcode_to_ogg(src: Path) -> tuple[Path, str]:
+        """The browser's MediaRecorder sends WebM/Opus, which libsndfile (and so the rest of this pipeline)
+        can't read. Decode it to 16 kHz mono PCM with ffmpeg and re-encode to Ogg/Opus -- the same format
+        R6Voice and the WAV path already produce. This is the ingest path for a teammate on a locked-down PC
+        that can't run R6Voice and whose browser tab is hidden behind a fullscreen game (where the Web Audio
+        capture gets throttled, so the page records with MediaRecorder instead)."""
+        import subprocess
+        import numpy as np
+        import soundfile as sf
+        from integration.whisper_transcriber import _find_ffmpeg
+        ff = _find_ffmpeg()
+        raw = src.with_suffix(".f32")
+        try:
+            subprocess.run([str(ff), "-nostdin", "-y", "-i", str(src), "-ac", "1", "-ar", str(SR),
+                            "-f", "f32le", str(raw)], check=True, capture_output=True, timeout=120)
+            data = np.fromfile(str(raw), dtype="<f4")
+        except Exception as exc:                                  # noqa: BLE001
+            raise ValueError(f"Couldn't decode that audio chunk: {exc}") from exc
+        finally:
+            raw.unlink(missing_ok=True)
+        if len(data) == 0:
+            raise ValueError("That audio chunk is empty.")
+        out = src.with_suffix(".ogg")
+        sf.write(str(out), data, SR, format="OGG", subtype="OPUS")
+        src.unlink(missing_ok=True)
+        return out, ".ogg"
+
+    @staticmethod
     def peak_of(path: Path) -> Optional[float]:
         """Loudest sample (0..1) of an audio file, or None when it can't be decoded here.
         Read in blocks, so a long chunk never needs to sit in memory whole."""
@@ -854,6 +936,8 @@ class CommsService:
                           is_final: bool, suffix: str) -> dict:
         if suffix == ".wav":
             src, suffix = CommsService._compress_wav(src)
+        elif suffix == ".webm":
+            src, suffix = CommsService._transcode_to_ogg(src)
         peak = CommsService.peak_of(src)
         sha = hashlib.sha256(src.read_bytes()).hexdigest()
         dest_dir = server_settings.VOICE_DIR / username.lower() / recording_id

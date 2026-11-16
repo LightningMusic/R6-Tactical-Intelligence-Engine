@@ -2,9 +2,36 @@
 The host sits next to a teammate, so the host's mic hears them and their words were credited to the host
 (2026-10-07: 23 and 34 lines in two matches). Whoever speaks is loud on their own mic and quiet on the other.
 """
+import json
+
 import numpy as np
 
-from server.services.comms_service import loud_elsewhere, reassign_bleed
+from server.services.comms_service import loud_elsewhere, reassign_bleed, well_covered_usernames
+
+
+def _vrow(username, status, covered_sec=None):
+    a = {"status": status}
+    if covered_sec is not None:
+        a["covered_sec"] = covered_sec
+    return {"username": username, "alignment_json": json.dumps(a)}
+
+
+def test_only_well_covered_tracks_are_trusted_for_their_own_lines():
+    """A teammate whose own recording covered the match is trusted (its lines are theirs); one whose tab
+    mostly failed stays eligible for voice-ID of the Discord lines it never caught."""
+    window = 2400.0                                       # a ~40-minute match
+    rows = [
+        _vrow("James", "aligned", covered_sec=2300.0),    # recorder worked: ~96%
+        _vrow("Zander", "aligned", covered_sec=144.0),    # backgrounded tab: 6%
+        _vrow("Hector", "not in this match", covered_sec=0.0),
+    ]
+    assert well_covered_usernames(rows, window) == {"James"}
+
+
+def test_an_unknown_window_trusts_every_aligned_track():
+    rows = [_vrow("James", "aligned", covered_sec=10.0), _vrow("Zander", "aligned")]
+    assert well_covered_usernames(rows, 0.0) == {"James", "Zander"}
+
 
 SR = 1000                       # a small rate keeps the arrays tiny; the rule doesn't care
 
