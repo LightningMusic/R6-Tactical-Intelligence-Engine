@@ -65,3 +65,5 @@ deploy/.env.*
 server_pid.txt
 Claude outputs/
 data/reports/
+# Debrief video transcripts (tools/debrief.py): personal content, never commit.
+debriefs/

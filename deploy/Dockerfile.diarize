@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+# Standalone speaker-diarization tool (pyannote). Kept OUT of the server image:
+# pyannote's dependency tree (lightning/speechbrain/torchmetrics/...) conflicts
+# with the server's tightly-pinned transcription stack, so it gets its own
+# clean, minimal image and runs as a one-off for debrief audio.
+#
+# Build (inside R6Host):  docker build -f Dockerfile.diarize -t r6diarize:local <ctx>
+# Run:  docker run --rm -e R6_HF_TOKEN=... -e HF_HOME=/data/hf_cache \
+#         -v r6_data:/data --network r6_egress r6diarize:local \
+#         python /data/_diar/run_diarize.py
+FROM python:3.12-slim-bookworm
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp
+RUN pip install --upgrade pip wheel setuptools
+# torch + torchaudio pinned to the CPU 2.2.2 wheels: pyannote.audio 3.3.2 uses
+# the old torchaudio I/O API (torchaudio.AudioMetaData), which newer torchaudio
+# (2.8+) removed. A pip CONSTRAINT keeps the pyannote install from re-resolving
+# torch/torchaudio to the newest CUDA wheels off PyPI (which is what it did
+# without it: torch 2.15.0+cu132 / torchaudio 2.11.1 -> missing AudioMetaData).
+# Constrain pyannote 3.3.2's companions to its era: torch/torchaudio 2.2.2 (CPU),
+# NumPy < 2 (torch 2.2.2 is built against the 1.x ABI), and a huggingface_hub that
+# still accepts use_auth_token (removed in >= 0.28). Without these the install
+# re-resolves to the newest wheels and pyannote breaks at load time.
+RUN printf 'torch==2.2.2\ntorchaudio==2.2.2\nnumpy<2\nhuggingface_hub==0.25.2\n' > /tmp/constraints.txt
+RUN pip install "numpy<2"
+RUN pip install torch==2.2.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install "pyannote.audio==3.3.2" soundfile -c /tmp/constraints.txt
+WORKDIR /work
+CMD ["python", "-c", "import pyannote.audio, torch; print('r6diarize ready', torch.__version__)"]
