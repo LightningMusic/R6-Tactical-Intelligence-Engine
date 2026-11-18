@@ -499,9 +499,20 @@ class CommsService:
             info["status"] = "not in this match"
             return [], info
 
+        # How much of the recording actually carries sound vs digital silence:
+        # a mostly-silent mic (wrong input device / muted) can't be aligned, so
+        # the host should see that rather than a vague "couldn't line up".
+        _win = int(0.1 * SR)
+        loud_frac = 0.0
+        if _win and len(sig) >= _win:
+            _mags = np.abs(sig[:len(sig) // _win * _win]).reshape(-1, _win).max(axis=1)
+            loud_frac = float((_mags > 0.02).mean())
+        info["loud_fraction"] = round(loud_frac, 3)
+
         a = align(ref, sig, SR)
         if a is None:
-            info["status"] = "could not line up with the Discord track"
+            info["status"] = ("mic was mostly silent -- check the input device" if loud_frac < 0.1
+                              else "could not line up with the Discord track")
             return [], info
         info.update(status="aligned", offset_sec=round(a.offset_sec, 3),
                     drift_ppm=round(a.drift_per_sec * 1e6, 1), confidence=round(a.confidence, 1))

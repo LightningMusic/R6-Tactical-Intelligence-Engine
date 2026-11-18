@@ -301,6 +301,38 @@ class SessionProcessingService:
             except Exception as team_err:
                 print(f"[SessionProcessing] team-flag stamp skipped: {team_err}")
 
+            # Callout coverage (analysis/callout_coverage): was the enemy who got
+            # each round's opening pick called out by operator beforehand? Answers
+            # the "did anyone call the flanker?" question from the comms timeline +
+            # the round's operator picks. Stored as a derived metric.
+            try:
+                from analysis.callout_coverage import analyze as _callout_analyze, operator_map_from_rows
+                from server.services.comms_service import CommsService as _CalloutComms
+                _tl = _CalloutComms.get_timeline(session_id)
+                if _tl and _tl.get("rounds"):
+                    with match_repo.db.get_connection() as conn:
+                        _rows = [{"round": r[0], "username": r[1], "operator": r[2]} for r in conn.execute(
+                            """SELECT r.round_number, p.name, o.name FROM player_round_stats prs
+                               JOIN rounds r ON r.round_id = prs.round_id
+                               JOIN players p ON p.player_id = prs.player_id
+                               JOIN operators o ON o.operator_id = prs.operator_id
+                               WHERE r.match_id = ?""", (match_id,)).fetchall()]
+                    _opmap = operator_map_from_rows(_rows)
+                    _cov = _callout_analyze(_tl["rounds"], lambda rn, u: _opmap.get((rn, u.lower()), ""))
+                    with match_repo.db.get_connection() as conn:
+                        conn.execute("DELETE FROM derived_metrics WHERE match_id = ? AND metric_name = 'callout_coverage'",
+                                     (match_id,))
+                        _mv = _cov.get("coverage")
+                        _mv = float(_mv) if _mv is not None else -1.0   # metric_value is NOT NULL; -1 = n/a
+                        conn.execute(
+                            "INSERT INTO derived_metrics (match_id, metric_name, metric_value, is_ai_generated, metric_text) "
+                            "VALUES (?, 'callout_coverage', ?, 0, ?)",
+                            (match_id, _mv, json.dumps(_cov)))
+                        conn.commit()
+                    print(f"[SessionProcessing] callout coverage: {_cov['summary']}")
+            except Exception as cov_err:
+                print(f"[SessionProcessing] callout coverage skipped: {cov_err}")
+
             intel = IntelEngine(
                 ollama_exe=server_settings.OLLAMA_EXE,
                 ollama_models=server_settings.OLLAMA_MODELS_DIR,
