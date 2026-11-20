@@ -1350,6 +1350,38 @@ def focus_points(match: Any, facts: dict[str, Any]) -> str:
 
 # ── bundle for the match prompt ───────────────────────────────────────────
 
+def callout_coverage_lines(match: Any, timeline: Optional[dict]) -> list[str]:
+    """Was the enemy who got each round's opening pick called out (by operator) first?
+    Operator-centric (opponent handles are not used): from the comms timeline's kill
+    feed + each round's operator picks (analysis.callout_coverage)."""
+    if not timeline or not timeline.get("rounds"):
+        return []
+    try:
+        from analysis.callout_coverage import analyze, operator_map_from_rows
+        rows = [{"round": int(r.round_number), "username": str(s.player.name),
+                 "operator": getattr(getattr(s, "operator", None), "name", "") or ""}
+                for r in match.rounds for s in r.player_stats]
+        opmap = operator_map_from_rows(rows)
+        cov = analyze(timeline["rounds"], lambda rn, u: opmap.get((rn, norm(u)), ""))
+    except Exception:                                      # never a reason to lose the debrief
+        return []
+    withop = cov.get("with_known_operator") or 0
+    if not withop:
+        return []
+    called = cov.get("called") or 0
+    lines = [f"- The enemy who got the opening pick was called out (by operator) beforehand in only "
+             f"{called} of {withop} rounds -- the entry fragger usually struck uncalled."]
+    reps = [r for r in (cov.get("repeat_opening_operators") or []) if r.get("operator")]
+    if reps:
+        top = ", ".join(f"{r['operator']} x{r['times']}" for r in reps[:3])
+        lines.append(f"- Operators that kept opening on us: {top}. Anticipate and call them.")
+    unc = [f for f in (cov.get("findings") or []) if not f.get("called") and f.get("operator")]
+    if unc:
+        ex = "; ".join(f"R{f['round']} {f['operator']} on {f['victim']}" for f in unc[:3])
+        lines.append(f"- Uncalled opening picks, e.g.: {ex}.")
+    return lines
+
+
 def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, dict],
                       display: dict[str, str], report_players: Optional[set[str]] = None,
                       usual: Optional[dict[str, int]] = None, positions: Optional[dict[int, dict]] = None,
@@ -1405,6 +1437,7 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
 
     return {
         "positioning_lines": pos_lines,
+        "callout_lines": callout_coverage_lines(match, timeline),
         "setup_lines": wall_lines,
         "ours": ours,
         "table": table,
@@ -1447,6 +1480,7 @@ def assemble_report(model_text: str, facts: dict[str, Any], focus: str) -> str:
         ("COMPARED WITH YOUR USUAL", "\n".join(facts.get("usual_lines") or [])),
         ("OBJECTIVE PLAY", objective),
         ("POSITIONING", "\n".join(facts.get("positioning_lines") or [])),
+        ("CALLOUTS", "\n".join(facts.get("callout_lines") or [])),
         ("SITE SETUP & BREACHES", "\n".join(facts.get("setup_lines") or [])),
         ("UTILITY & OPERATORS", "\n".join(utility)),
         ("WHAT TO FOCUS ON NEXT", focus),

@@ -83,6 +83,22 @@ def test_repeat_opening_operators_are_flagged():
     assert all("killer" not in f for f in out["findings"])
 
 
+def test_callout_coverage_lines_renders_from_a_match():
+    from types import SimpleNamespace as NS
+    from analysis.team_facts import callout_coverage_lines
+    match = NS(rounds=[NS(round_number=1, player_stats=[
+        NS(player=NS(name="enemyguy"), operator=NS(name="Nomad")),
+        NS(player=NS(name="Elijah"), operator=NS(name="Thermite")),
+    ])])
+    timeline = {"rounds": [{"round_number": 1, "items": [
+        _kill(50.0, "enemyguy", "Will", False, True),
+    ]}]}
+    lines = callout_coverage_lines(match, timeline)
+    assert any("Nomad" in ln for ln in lines)          # operator, not the handle
+    assert all("enemyguy" not in ln for ln in lines)   # handle never shown
+    assert any("0 of 1" in ln for ln in lines)         # it was uncalled
+
+
 def test_operator_map_from_rows_round_trips():
     m = operator_map_from_rows([{"round": 2, "username": "GoodSpicy", "operator": "Lion"}])
     assert m[(2, "goodspicy")] == "Lion"
