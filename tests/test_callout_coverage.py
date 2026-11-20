@@ -49,7 +49,8 @@ def test_our_opening_kill_is_not_an_enemy_pick():
     out = analyze(rounds, _ops({1: {"enemyguy": "Lion"}}))
     # the opening pick AGAINST us is the enemy kill at t=60, not our t=30 kill
     assert out["findings"][0]["clock"] is not None
-    assert out["findings"][0]["killer"] == "enemyguy" and out["findings"][0]["victim"] == "Will"
+    assert out["findings"][0]["operator"] == "Lion" and out["findings"][0]["victim"] == "Will"
+    assert "killer" not in out["findings"][0]        # enemy usernames are not stored
 
 
 def test_position_only_callout_is_alert_but_not_named():
@@ -69,15 +70,17 @@ def test_unknown_operator_excluded_from_coverage():
     assert out["coverage"] is None and "no enemy opening picks" in out["summary"]
 
 
-def test_repeat_entry_fraggers_are_flagged():
+def test_repeat_opening_operators_are_flagged():
     rounds = [
-        {"round_number": 1, "items": [_kill(50.0, "yabo", "Will", False, True)]},
-        {"round_number": 2, "items": [_kill(40.0, "yabo", "Carter", False, True)]},
-        {"round_number": 3, "items": [_kill(30.0, "other", "Elijah", False, True)]},
+        {"round_number": 1, "items": [_kill(50.0, "p1", "Will", False, True)]},
+        {"round_number": 2, "items": [_kill(40.0, "p2", "Carter", False, True)]},
+        {"round_number": 3, "items": [_kill(30.0, "p3", "Elijah", False, True)]},
     ]
-    out = analyze(rounds, _ops({1: {"yabo": "Zofia"}, 2: {"yabo": "Buck"}, 3: {"other": "Ash"}}))
-    rep = out["repeat_entry_fraggers"]
-    assert rep and rep[0]["killer"] == "yabo" and rep[0]["times"] == 2
+    # Nomad got the opening pick in rounds 1 and 2 (even on different players); Ash once
+    out = analyze(rounds, _ops({1: {"p1": "Nomad"}, 2: {"p2": "Nomad"}, 3: {"p3": "Ash"}}))
+    rep = out["repeat_opening_operators"]
+    assert rep and rep[0]["operator"] == "Nomad" and rep[0]["times"] == 2
+    assert all("killer" not in f for f in out["findings"])
 
 
 def test_operator_map_from_rows_round_trips():
