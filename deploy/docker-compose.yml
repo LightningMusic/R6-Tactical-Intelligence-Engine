@@ -39,6 +39,7 @@ services:
       R6_SERVER_SELF_RESTART: "1"          # broken but alive (e.g. out of file handles): exit so Docker restarts it
       R6_HF_TOKEN: ${R6_HF_TOKEN:-}        # HuggingFace read token: used once to fetch the gated pyannote models
       HF_HOME: /data/hf_cache              # cache the diarization model in the volume so it downloads only once
+      R6_SERVER_FAST_WHISPER_DIR: ${R6_SERVER_FAST_WHISPER_DIR:-/data/models/faster-whisper-large-v3}  # transcription model: large-v3 (clearly best; small is the fallback dir)
       OMP_NUM_THREADS: ${R6_THREADS:-6}
       MKL_NUM_THREADS: ${R6_THREADS:-6}
     cpus: ${R6_SERVER_CPUS:-6}
