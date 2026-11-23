@@ -1435,6 +1435,9 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
     sec_by_player = player_secondary(events, ours)
     secondary = secondary_summary(sec_by_player, report_players)
 
+    from analysis import plan_commit as _plan_commit
+    plan_commit_data = _plan_commit.plan_commit_summary(events, timeline, ours)
+
     util_used = util_total = 0
     gaps: list[tuple[str, str, int, int]] = []
     for name, r in table.items():
@@ -1493,6 +1496,8 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
         "secondary": secondary,
         "secondary_lines": secondary_lines(secondary),
         "secondary_player_lines": secondary_player_lines(sec_by_player, display, report_players),
+        "plan_commit": plan_commit_data,
+        "plan_commit_lines": _plan_commit.plan_commit_lines(plan_commit_data),
     }
 
 
@@ -1518,6 +1523,7 @@ def assemble_report(model_text: str, facts: dict[str, Any], focus: str) -> str:
         ("ROUND PATTERNS", facts["round_patterns"]),
         ("COMPARED WITH YOUR USUAL", "\n".join(facts.get("usual_lines") or [])),
         ("OBJECTIVE PLAY", objective),
+        ("PLAN & COMMIT", "\n".join(facts.get("plan_commit_lines") or [])),
         ("POSITIONING", "\n".join(facts.get("positioning_lines") or [])),
         ("CALLOUTS", "\n".join(facts.get("callout_lines") or [])),
         ("SITE SETUP & BREACHES", "\n".join(facts.get("setup_lines") or [])),
