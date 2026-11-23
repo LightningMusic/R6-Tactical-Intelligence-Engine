@@ -217,6 +217,24 @@ def test_secondary_lines_cover_only_the_saved_team_and_say_nothing_when_unmeasur
     assert tf.secondary_lines(tf.secondary_summary(tf.player_secondary({4: {"our_role": "attack"}}, None), None)) == []
 
 
+def test_secondary_player_lines_list_the_lowest_user_first():
+    sec = tf.player_secondary(sec_events(), {"zed", "amy"})
+    lines = tf.secondary_player_lines(sec, {}, {"zed", "amy"})
+    assert len(lines) == 2
+    assert lines[0] == "- Zed: secondary used in 1 of 2 round(s) that carried one (charges 2 of 4)."   # 0.50
+    assert lines[1].startswith("- Amy: secondary used in 2 of 3 round(s)")                              # 0.67
+    assert all("never fired it" not in ln for ln in lines)
+    assert tf.secondary_player_lines({}, {}, None) == []
+
+
+def test_a_player_who_carried_a_secondary_and_never_fired_it_is_flagged_by_name():
+    sec = {"zan": {"name": "zan", "rounds": 4, "used_rounds": 0, "charges_total": 4, "charges_used": 0,
+                   "attack": {"rounds": 2, "used_rounds": 0}, "defense": {"rounds": 2, "used_rounds": 0}}}
+    line = tf.secondary_player_lines(sec, {"zan": "Zander"}, {"zan"})[0]
+    assert line == ("- Zander: secondary used in 0 of 4 round(s) that carried one (charges 0 of 4) "
+                    "-- never fired it.")
+
+
 def test_player_secondary_text_and_a_low_use_focus_point():
     row = tf.player_secondary(sec_events(), {"zed"})["zed"]
     assert tf.secondary_text(row) == ("secondary gadget used in 1 of 2 rounds that had one (attack 0/1, defense 1/1); "

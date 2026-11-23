@@ -198,17 +198,24 @@ def test_a_drone_thrown_mid_round_is_credited_to_whoever_it_appears_next_to():
 
 
 def test_drone_and_soft_breach_lines():
-    ours = {"me", "mate"}
-    match = NS(rounds=[NS(round_number=1, side="attack", site="", outcome="win", player_stats=[stat("Me", "Sledge")]),
-                       NS(round_number=2, side="attack", site="", outcome="loss", player_stats=[stat("Me", "Ash")])])
+    ours = {"me", "mate", "quiet"}
+    roster = [("Me", "Sledge"), ("Mate", "Thermite"), ("Quiet", "Fuze")]   # Quiet is on attack but never re-drones
+    match = NS(rounds=[NS(round_number=1, side="attack", site="", outcome="win",
+                          player_stats=[stat(n, op) for n, op in roster]),
+                       NS(round_number=2, side="attack", site="", outcome="loss",
+                          player_stats=[stat(n, op) for n, op in roster])])
     w1, w2 = walls([]), walls([])
     w1["breaches"] = [{"t": 60, "op": "Sledge", "kind": "soft", "x": 0, "y": 0, "z": 4.0, "objects": 3}]
     pos = {1: {"walls": w1, "died": {"Them": 80.0}, "drones": [{"t": 50.0, "prep": False, "who": "Me", "path_m": 30},
                                                                {"t": 5.0, "prep": True, "who": None, "path_m": 60}]},
            2: {"walls": w2, "died": {"Me": 70.0}, "drones": [{"t": 90.0, "prep": False, "who": "Mate", "path_m": 10}]}}
-    text = "\n".join(tf.setup_lines(tf.setup(match, ours, pos), {"me": "Alex", "mate": "Sam"}))
+    text = "\n".join(tf.setup_lines(tf.setup(match, ours, pos), {"me": "Alex", "mate": "Sam", "quiet": "Zander"}))
     assert "- Our soft breach opened walls or floors: R01 Sledge." in text
-    assert "Drones we threw during the action (2 attack round(s)): Alex 1, Sam 1." in text
+    # per-player, with the attack-round denominator and the prep caveat
+    assert ("Drones we threw during the action (2 attack round(s), prep drones aren't attributable): "
+            "Alex 1 in 2, Sam 1 in 2.") in text
+    # the attacker who never re-droned is named (the Zander signal), prep drones excluded on purpose
+    assert "On attack but no drone of theirs went out during the action: Zander (0 of 2)." in text
     assert "No drone of ours went out before the first death in: R02." in text
 
 

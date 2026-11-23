@@ -732,7 +732,11 @@ def setup(match: Any, ours: Optional[set[str]], positions: dict[int, dict],
                                   "our_hard": sorted(_ops(r, ours, True) & HARD_BREACH),
                                   "charges": None if charges is None else [c for c in charges if mine(c)],
                                   "soft": soft, "drones": None if drones is None else ours_thrown,
-                                  "first_death": first_death})
+                                  "first_death": first_death,
+                                  # our players on attack this round, so the drone line can show who could
+                                  # have re-droned and didn't (prep drones aren't attributable to a thrower)
+                                  "players": sorted({norm(s.player.name) for s in r.player_stats
+                                                     if ours is None or norm(s.player.name) in ours})})
     return out
 
 
@@ -848,9 +852,24 @@ def setup_lines(s: dict[str, list[dict]], display: Optional[dict[str, str]] = No
             f"R{x['round']:02d} {', '.join(x['soft'])}" for x in soft_d) + ".")
     droned = [x for x in a if x.get("drones") is not None]
     if droned:
-        by_p: collections.Counter = collections.Counter(dr["who"] for x in droned for dr in x["drones"])
-        line = (f"- Drones we threw during the action ({len(droned)} attack round(s)): "
-                + (", ".join(f"{name(p)} {k}" for p, k in by_p.most_common()) if by_p else "none") + ".")
+        # action-phase drones only: a thrown drone appears next to its thrower, but a prep drone can't be
+        # tied to anyone (integration/drones.py), so "0" here means no RE-drone during the round, not that
+        # the player never droned. atk_rounds is the denominator: our attack rounds that player was in.
+        throws: collections.Counter = collections.Counter(
+            norm(dr["who"]) for x in droned for dr in x["drones"] if dr.get("who"))
+        atk_rounds: collections.Counter = collections.Counter(p for x in droned for p in x.get("players", []))
+        if throws:
+            line = (f"- Drones we threw during the action ({len(droned)} attack round(s), prep drones aren't "
+                    "attributable): "
+                    + ", ".join(f"{name(p)} {k} in {atk_rounds.get(p, k)}" for p, k in throws.most_common()) + ".")
+            silent = sorted((p for p in atk_rounds if throws.get(p, 0) == 0),
+                            key=lambda p: (-atk_rounds[p], p))
+            if silent:
+                line += (" On attack but no drone of theirs went out during the action: "
+                         + ", ".join(f"{name(p)} (0 of {atk_rounds[p]})" for p in silent) + ".")
+        else:
+            line = (f"- No drone of ours went out during the action in any of the {len(droned)} attack round(s) "
+                    "(prep drones aren't attributable).")
         blind = [x for x in droned if x["first_death"] is not None
                  and not any(dr["t"] < x["first_death"] for dr in x["drones"])]
         if blind:
@@ -944,6 +963,24 @@ def secondary_lines(summary: dict[str, Any]) -> list[str]:
     return [f"- Secondary gadgets (frags, stuns, claymores, wire and the like) were used in {summary['used']} of "
             f"{summary['rounds']} player-rounds that carried one ({summary['used'] / summary['rounds']:.0%}): "
             + ", ".join(bits) + "."]
+
+
+def secondary_player_lines(sec: dict[str, dict[str, Any]], display: dict[str, str],
+                           named: Optional[set[str]] = None) -> list[str]:
+    """One line per player, from player_secondary(): how often they used their secondary gadget in the
+    rounds that carried one. Unlike drones this is reliable per player, so a 0 is a real 'never fired it'.
+    Zero-users are listed first -- that is the signal worth seeing."""
+    rows = [r for k, r in sec.items() if named is None or k in named]
+    if not rows:
+        return []
+    rows.sort(key=lambda r: (r["used_rounds"] / r["rounds"] if r["rounds"] else 1.0, r["name"].lower()))
+    out = []
+    for r in rows:
+        who = display.get(norm(r["name"]), r["name"])
+        tail = " -- never fired it" if r["used_rounds"] == 0 and r["rounds"] else ""
+        out.append(f"- {who}: secondary used in {r['used_rounds']} of {r['rounds']} round(s) that carried one "
+                   f"(charges {r['charges_used']} of {r['charges_total']}){tail}.")
+    return out
 
 
 def secondary_text(row: dict[str, Any]) -> str:
@@ -1396,7 +1433,8 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
     objective = objective_summary(match, events)
     measured = utility_measured(match, ours, events)
     named = {n: r for n, r in table.items() if report_players is None or norm(n) in report_players}
-    secondary = secondary_summary(player_secondary(events, ours), report_players)
+    sec_by_player = player_secondary(events, ours)
+    secondary = secondary_summary(sec_by_player, report_players)
 
     util_used = util_total = 0
     gaps: list[tuple[str, str, int, int]] = []
@@ -1455,6 +1493,7 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
         "utility_lines": utility_team_lines(named, display) if measured else [],
         "secondary": secondary,
         "secondary_lines": secondary_lines(secondary),
+        "secondary_player_lines": secondary_player_lines(sec_by_player, display, report_players),
     }
 
 
@@ -1473,6 +1512,7 @@ def assemble_report(model_text: str, facts: dict[str, Any], focus: str) -> str:
     else:
         utility.append("- Gadget use could not be read from this match's replays, so it is not judged here.")
     utility += facts.get("secondary_lines") or []
+    utility += facts.get("secondary_player_lines") or []
     utility += facts.get("composition_lines") or []
     sections = [
         ("MATCH SUMMARY", section_body(model_text, "MATCH SUMMARY")),
