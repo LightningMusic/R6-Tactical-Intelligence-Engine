@@ -4,7 +4,7 @@ English words that happen to resemble a name are left alone.
 """
 import pytest
 
-from analysis.operator_vocab import correct
+from analysis.operator_vocab import INITIAL_PROMPT, correct, initial_prompt
 
 
 @pytest.mark.parametrize("heard, fixed", [
@@ -32,3 +32,17 @@ def test_ordinary_words_and_correct_names_are_untouched(text):
 
 def test_whole_words_only():
     assert correct("the yeagerish thing") == "the yeagerish thing"
+
+
+def test_priming_prompt_names_our_vocabulary():
+    p = initial_prompt()
+    assert p is INITIAL_PROMPT and p
+    # the operators most often misheard as common words, plus core jargon
+    for term in ("Fuze", "Twitch", "Buck", "Thatcher", "defuser", "drone"):
+        assert term in p
+
+
+def test_priming_prompt_fits_whispers_prompt_window():
+    # Whisper only keeps the last ~224 tokens of the prompt; a rough word count
+    # keeps us comfortably inside that so the whole vocabulary actually biases.
+    assert len(initial_prompt().split()) < 120

@@ -389,6 +389,7 @@ class WhisperTranscriber:
         model_path: Optional[Path] = None,
         model_size: Optional[str] = None,
         fast_model_dir: Optional[Path] = None,
+        initial_prompt: Optional[str] = None,
     ) -> None:
         # Defaults preserve exact prior behavior for existing (client)
         # callers that pass nothing. The overrides exist so the server's
@@ -401,6 +402,11 @@ class WhisperTranscriber:
         self._voice_encoder: Any = None  # resemblyzer.VoiceEncoder — lazy, optional dependency
         self._fast_dir: Optional[Path] = fast_model_dir
         self._fast: Any = None           # faster_whisper.WhisperModel — lazy, optional (server only)
+        # R6 vocabulary primed into the recognizer so it spells operators and
+        # callouts the way we say them. None -> use the shared default below;
+        # "" -> disable priming. Resolved once, lazily, by _priming_prompt().
+        self._initial_prompt_override: Optional[str] = initial_prompt
+        self._priming_cached: Any = False   # sentinel: not yet resolved
 
     def _get_ffmpeg(self) -> Path:
         if self._ffmpeg is None:
@@ -413,6 +419,26 @@ class WhisperTranscriber:
                 "(ffmpeg-release-essentials.zip → bin/ffmpeg.exe)"
             )
         return self._ffmpeg
+
+    def _priming_prompt(self) -> Optional[str]:
+        """R6 vocabulary primed into the recognizer so operators and callouts
+        come out spelled the way we say them ("Twitch"/"Buck", not "with"/"back").
+        Per-instance override wins; otherwise the shared operator-vocabulary
+        default. Returns None when priming is off or the vocab isn't importable
+        (e.g. a trimmed client build), so callers can pass it through as-is."""
+        if self._priming_cached is not False:
+            return self._priming_cached
+        prompt: Optional[str]
+        if self._initial_prompt_override is not None:
+            prompt = self._initial_prompt_override or None
+        else:
+            try:
+                from analysis.operator_vocab import initial_prompt
+                prompt = initial_prompt() or None
+            except Exception:
+                prompt = None
+        self._priming_cached = prompt
+        return prompt
 
     def _load_model(self) -> None:
         if self._model is not None:
@@ -493,6 +519,7 @@ class WhisperTranscriber:
         all_segments: list[dict[str, Any]] = []
         chunk_start = 0.0
         chunk_num   = 0
+        priming = self._priming_prompt()   # bias each chunk's decode toward R6 vocab
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
@@ -537,6 +564,7 @@ class WhisperTranscriber:
                         beam_size=5,
                         temperature=_DECODE_TEMPERATURES,
                         condition_on_previous_text=False,
+                        initial_prompt=priming,
                         no_speech_threshold=0.5,
                         logprob_threshold=-1.0,
                         compression_ratio_threshold=2.4,
@@ -639,8 +667,12 @@ class WhisperTranscriber:
             progress_callback(msg)
 
         started = time.time()
-        seg_iter, _info = self._fast.transcribe(  # type: ignore[union-attr]
-            audio,
+        # hotwords (not initial_prompt): with condition_on_previous_text=False
+        # the window prompt is otherwise empty, so hotwords is what biases EVERY
+        # window toward our vocabulary -- holding across a whole match, not just
+        # the opening 30 s. Older faster-whisper lacks the kwarg; fall back.
+        priming = self._priming_prompt()
+        fast_kwargs: dict[str, Any] = dict(
             language=language,
             beam_size=5,
             word_timestamps=True,
@@ -652,6 +684,13 @@ class WhisperTranscriber:
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 400},
         )
+        if priming:
+            fast_kwargs["hotwords"] = priming
+        try:
+            seg_iter, _info = self._fast.transcribe(audio, **fast_kwargs)  # type: ignore[union-attr]
+        except TypeError:
+            fast_kwargs.pop("hotwords", None)
+            seg_iter, _info = self._fast.transcribe(audio, **fast_kwargs)  # type: ignore[union-attr]
         segments: list[dict[str, Any]] = []
         next_report = 0.25
         for s in seg_iter:

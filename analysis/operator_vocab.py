@@ -52,3 +52,39 @@ def correct(text: str) -> str:
     if not text:
         return text
     return _PATTERN.sub(lambda m: ALIASES[m.group(1).lower()], text)
+
+
+# ---------------------------------------------------------------------------
+# Recognizer priming -- the preventive side of this module
+# ---------------------------------------------------------------------------
+# correct() above repairs mis-spellings AFTER transcription, and only the ones
+# that can't be an ordinary English word. The bigger win is biasing Whisper to
+# hear our vocabulary correctly in the FIRST place -- "Twitch"/"Buck"/"Fuze"
+# instead of "with"/"back"/"fuse", the common-word cases correct() deliberately
+# refuses to touch. This text is fed to the recognizer as preceding context:
+# openai-whisper takes it as initial_prompt (biases the first window of each
+# chunk); faster-whisper takes it as hotwords (biases every window, so it holds
+# across a whole match). Keep it well under Whisper's ~224-token prompt window.
+# Operators first (the module's own note: names are where ASR misses); tune the
+# list from real games as the meta/our picks change.
+_PRIMING_OPERATORS = (
+    "Fuze, Thatcher, Thermite, Hibana, Ace, Flores, Twitch, Lion, Nøkk, Zofia, "
+    "Buck, Kali, Dokkaebi, Maverick, Sledge, Montagne, "
+    "Jäger, Bandit, Mute, Smoke, Doc, Rook, Frost, Lesion, Valkyrie, Mira, Kaid, "
+    "Fenrir, Thorn, Aruni, Wamai, Mozzie, Warden, Maestro, Castle, Caveira, Solis, Oryx"
+)
+
+INITIAL_PROMPT = (
+    "Rainbow Six Siege team comms. Operators: " + _PRIMING_OPERATORS + ". "
+    "Callouts: plant the defuser, defuse, drone it, hard breach, soft breach, "
+    "roam, roamer, anchor, rotate, rappel, vault, prefire, spawn peek, reinforce, "
+    "hatch, Fuze charge, site, CCTV."
+)
+
+
+def initial_prompt() -> str:
+    """Priming text biasing the recognizer toward our operators and callouts.
+
+    Pass as openai-whisper's ``initial_prompt`` or faster-whisper's ``hotwords``.
+    """
+    return INITIAL_PROMPT
