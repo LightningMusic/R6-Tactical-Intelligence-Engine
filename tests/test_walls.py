@@ -211,8 +211,8 @@ def test_drone_and_soft_breach_lines():
            2: {"walls": w2, "died": {"Me": 70.0}, "drones": [{"t": 90.0, "prep": False, "who": "Mate", "path_m": 10}]}}
     text = "\n".join(tf.setup_lines(tf.setup(match, ours, pos), {"me": "Alex", "mate": "Sam", "quiet": "Zander"}))
     assert "- Our soft breach opened walls or floors: R01 Sledge." in text
-    # per-player, with the attack-round denominator and the prep caveat
-    assert ("Drones we threw during the action (2 attack round(s), prep drones aren't attributable): "
+    # per-player, with the attack-round denominator and the action-phase caveat
+    assert ("Drones we threw during the action (2 attack round(s), action-phase only): "
             "Alex 1 in 2, Sam 1 in 2.") in text
     # the attacker who never re-droned is named (the Zander signal), prep drones excluded on purpose
     assert "On attack but no drone of theirs went out during the action: Zander (0 of 2)." in text

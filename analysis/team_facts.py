@@ -859,8 +859,7 @@ def setup_lines(s: dict[str, list[dict]], display: Optional[dict[str, str]] = No
             norm(dr["who"]) for x in droned for dr in x["drones"] if dr.get("who"))
         atk_rounds: collections.Counter = collections.Counter(p for x in droned for p in x.get("players", []))
         if throws:
-            line = (f"- Drones we threw during the action ({len(droned)} attack round(s), prep drones aren't "
-                    "attributable): "
+            line = (f"- Drones we threw during the action ({len(droned)} attack round(s), action-phase only): "
                     + ", ".join(f"{name(p)} {k} in {atk_rounds.get(p, k)}" for p, k in throws.most_common()) + ".")
             silent = sorted((p for p in atk_rounds if throws.get(p, 0) == 0),
                             key=lambda p: (-atk_rounds[p], p))
@@ -869,7 +868,7 @@ def setup_lines(s: dict[str, list[dict]], display: Optional[dict[str, str]] = No
                          + ", ".join(f"{name(p)} (0 of {atk_rounds[p]})" for p in silent) + ".")
         else:
             line = (f"- No drone of ours went out during the action in any of the {len(droned)} attack round(s) "
-                    "(prep drones aren't attributable).")
+                    "(action-phase only).")
         blind = [x for x in droned if x["first_death"] is not None
                  and not any(dr["t"] < x["first_death"] for dr in x["drones"])]
         if blind:

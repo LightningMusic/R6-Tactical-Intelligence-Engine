@@ -3,9 +3,14 @@ Drones from a round's .rec replay: the movement packets of drones (flags' low by
 timed with the position decoder's clock.
 
 Who threw a drone during the action phase: it first appears right next to the thrower. Over 141 such drones
-(2026-10-07/08) 128 started within 3 m of exactly one living player (median 0.37 m). Prep drones can't be tied to a
-player (they start outside, ~30 m from anyone, and nothing in the replay links them), so they are only counted.
-Experiments: R6PosDecode-experiment/p70-p75, FINDINGS.md "Drones".
+(2026-10-07/08) 128 started within 3 m of exactly one living player (median 0.37 m). Prep drones start outside
+(~30 m from anyone), so proximity can't place them and they are only counted for now.
+
+The replay DOES carry a drone-owner link (the in-game replay viewer shows each drone's owner): each drone has an
+incoming property 0x080AD3AA from a parent entity (2026-11-23 probe: 307 of these vs <25 for any other hash). That
+parent isn't a controller / loadout / gadget-item, so the chain to the player isn't resolved yet -- decoding it
+(the parent's identity, or the drone's creation record) would attribute prep drones too. Not "impossible", just
+undone. Experiments: R6PosDecode-experiment/p70-p75, FINDINGS.md "Drones".
 """
 from __future__ import annotations
 
