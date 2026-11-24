@@ -1438,6 +1438,11 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
     from analysis import plan_commit as _plan_commit
     plan_commit_data = _plan_commit.plan_commit_summary(events, timeline, ours)
 
+    from analysis import round_detail as _rd
+    plant_timing_out = _rd.plant_timing_lines(_rd.plant_timing(match, ours, events))
+    objective_fit_out = _rd.objective_fit_lines(_rd.objective_fit(match, ours, events))
+    callout_outcome_out = _rd.callout_outcome_lines(_rd.callout_outcomes(timeline))
+
     util_used = util_total = 0
     gaps: list[tuple[str, str, int, int]] = []
     for name, r in table.items():
@@ -1465,6 +1470,11 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
             pos_lines += facing_at_death(match, ours, positions, events, display)
             pos_lines += trade_geometry_lines(trade_geometry(match, ours, positions, events))
             pos_lines += callout_accuracy(timeline, positions, rooms, ours)
+            if places and places[0]:
+                from analysis.round_detail import opening_places, opening_place_lines
+                _lost, _won = opening_places(match, ours, events, positions, places[0], places[1], rooms)
+                pos_lines += opening_place_lines(_lost, _won)
+            pos_lines += _rd.droned_pick_lines(_rd.droned_picks(match, ours, events, positions))
         except Exception:                                  # a nicety: never a reason to lose the debrief
             pos_lines = []
     wall_lines: list[str] = []
@@ -1490,6 +1500,9 @@ def build_match_facts(match: Any, ours: Optional[set[str]], events: dict[int, di
         "clutches": clutch_lines(events, ours, display),
         "objective": objective,
         "objective_lines": objective_lines(objective, display, report_players),
+        "plant_timing_lines": plant_timing_out,
+        "objective_fit_lines": objective_fit_out,
+        "callout_outcome_lines": callout_outcome_out,
         "composition_lines": composition_lines(match, ours),
         "utility": {"measured": measured, "used": util_used, "total": util_total, "gaps": gaps},
         "utility_lines": utility_team_lines(named, display) if measured else [],
@@ -1509,7 +1522,7 @@ def section_body(text: str, header: str) -> str:
 def assemble_report(model_text: str, facts: dict[str, Any], focus: str) -> str:
     """The final debrief: the model writes the summary and the comms paragraph; everything that
     is counted or judged comes from code, in a fixed order."""
-    objective = "\n".join(facts.get("objective_lines") or [])
+    objective = "\n".join((facts.get("objective_lines") or []) + (facts.get("plant_timing_lines") or []))
     utility = []
     if facts.get("utility", {}).get("measured"):
         utility += facts.get("utility_lines") or []
@@ -1518,6 +1531,7 @@ def assemble_report(model_text: str, facts: dict[str, Any], focus: str) -> str:
     utility += facts.get("secondary_lines") or []
     utility += facts.get("secondary_player_lines") or []
     utility += facts.get("composition_lines") or []
+    utility += facts.get("objective_fit_lines") or []
     sections = [
         ("MATCH SUMMARY", section_body(model_text, "MATCH SUMMARY")),
         ("ROUND PATTERNS", facts["round_patterns"]),
@@ -1525,7 +1539,7 @@ def assemble_report(model_text: str, facts: dict[str, Any], focus: str) -> str:
         ("OBJECTIVE PLAY", objective),
         ("PLAN & COMMIT", "\n".join(facts.get("plan_commit_lines") or [])),
         ("POSITIONING", "\n".join(facts.get("positioning_lines") or [])),
-        ("CALLOUTS", "\n".join(facts.get("callout_lines") or [])),
+        ("CALLOUTS", "\n".join((facts.get("callout_lines") or []) + (facts.get("callout_outcome_lines") or []))),
         ("SITE SETUP & BREACHES", "\n".join(facts.get("setup_lines") or [])),
         ("UTILITY & OPERATORS", "\n".join(utility)),
         ("WHAT TO FOCUS ON NEXT", focus),
