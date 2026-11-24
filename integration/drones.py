@@ -2,15 +2,16 @@
 Drones from a round's .rec replay: the movement packets of drones (flags' low byte 0xC0 / 0xE0, see positions.py)
 timed with the position decoder's clock.
 
-Who threw a drone during the action phase: it first appears right next to the thrower. Over 141 such drones
-(2026-10-07/08) 128 started within 3 m of exactly one living player (median 0.37 m). Prep drones start outside
-(~30 m from anyone), so proximity can't place them and they are only counted for now.
-
-The replay DOES carry a drone-owner link (the in-game replay viewer shows each drone's owner): each drone has an
-incoming property 0x080AD3AA from a parent entity (2026-11-23 probe: 307 of these vs <25 for any other hash). That
-parent isn't a controller / loadout / gadget-item, so the chain to the player isn't resolved yet -- decoding it
-(the parent's identity, or the drone's creation record) would attribute prep drones too. Not "impossible", just
-undone. Experiments: R6PosDecode-experiment/p70-p75, FINDINGS.md "Drones".
+Two ways to say whose drone it is:
+  * ACTION phase -- it first appears right next to the thrower (128/141 within 3 m, median 0.37 m): thrower().
+  * Any phase, incl. PREP (which proximity can't place: prep drones spawn ~30 m from anyone) -- the replay's own
+    ownership link, decoded 2026-11-23 and implemented in drone_owners.py:
+        player record  --0xDB2E1510-->  deployable entity  --0x080AD3AA-->  drone
+    read the owner's username off the player record. This is the link the in-game replay viewer uses. Coverage
+    isn't total (a deployable resolves only when its owner record is found with the name local), so a prep drone's
+    `who` can still be None -- that means "unknown", not "nobody". decode_drones uses proximity first for action
+    (no regression) and the link for prep + any action gap; each drone carries who_src = 'prox' | 'link' | None.
+Experiments: R6PosDecode-experiment/p70-p75, FINDINGS.md "Drones".
 """
 from __future__ import annotations
 
@@ -63,14 +64,26 @@ def thrower(positions: dict, t: float, x: float, y: float, z: float) -> Optional
 
 
 def decode_drones(data: bytes, positions: Optional[dict], t_at: Optional[Callable[[int], float]]) -> Optional[list[dict[str, Any]]]:
-    """[{"t", "prep", "who" (or None), "path_m"}] one per drone, in order of appearance."""
+    """[{"t", "prep", "who" (or None), "who_src", "path_m"}] one per drone, in order of appearance.
+
+    who: for an ACTION drone, the thrower it appeared next to (proximity, validated); for a PREP
+    drone, the owner read from the replay's ownership link (drone_owners), which proximity can't give.
+    The link also fills any action drone proximity couldn't place. who_src is 'prox' or 'link'."""
     if t_at is None or not positions:
         return None
+    try:
+        from integration.drone_owners import drone_owner_map
+        owner = drone_owner_map(data, list((positions.get("players") or {}).keys()))
+    except Exception:
+        owner = {}
     out = []
-    for p in drone_tracks(data, t_at).values():
+    for ref, p in drone_tracks(data, t_at).items():
         t0, x, y, z = p[0]
         path = sum(math.dist(a[1:3], b[1:3]) for a, b in zip(p, p[1:]))
         prep = t0 < PREP_SEC - 5
-        out.append({"t": round(t0, 1), "prep": prep, "path_m": round(path, 1),
-                    "who": None if prep else thrower(positions, t0, x, y, z)})
+        who = None if prep else thrower(positions, t0, x, y, z)   # proximity first for action (no regression)
+        src = "prox" if who else None
+        if who is None and ref in owner:                          # the decoded link: all prep, and action gaps
+            who, src = owner[ref], "link"
+        out.append({"t": round(t0, 1), "prep": prep, "path_m": round(path, 1), "who": who, "who_src": src})
     return sorted(out, key=lambda d: d["t"])
