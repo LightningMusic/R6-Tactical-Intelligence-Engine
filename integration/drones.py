@@ -71,13 +71,15 @@ def decode_drones(data: bytes, positions: Optional[dict], t_at: Optional[Callabl
     The link also fills any action drone proximity couldn't place. who_src is 'prox' or 'link'."""
     if t_at is None or not positions:
         return None
+    tracks = drone_tracks(data, t_at)
+    prep_refs = [ref for ref, p in tracks.items() if p[0][0] < PREP_SEC - 5]
     try:
         from integration.drone_owners import drone_owner_map
-        owner = drone_owner_map(data, list((positions.get("players") or {}).keys()))
+        owner = drone_owner_map(data, list((positions.get("players") or {}).keys()), prep_refs)
     except Exception:
         owner = {}
     out = []
-    for ref, p in drone_tracks(data, t_at).items():
+    for ref, p in tracks.items():
         t0, x, y, z = p[0]
         path = sum(math.dist(a[1:3], b[1:3]) for a, b in zip(p, p[1:]))
         prep = t0 < PREP_SEC - 5
