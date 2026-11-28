@@ -72,6 +72,15 @@ def serve_film() -> HTMLResponse:
     return HTMLResponse(content=_FILM_HTML_PATH.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
 
 
+_REPLAY_HTML_PATH = Path(__file__).parent / "static" / "replay.html"
+
+
+@router.get("/replay", response_class=HTMLResponse, include_in_schema=False)
+def serve_replay() -> HTMLResponse:
+    """Round playback: scrub through a round with every operator moving (uses the dashboard's saved key)."""
+    return HTMLResponse(content=_REPLAY_HTML_PATH.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+
+
 _JOIN_HTML_PATH = Path(__file__).parent / "static" / "join.html"
 
 # The recorder page handles a bearer-like invite token (kept in the URL

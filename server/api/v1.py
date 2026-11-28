@@ -555,6 +555,14 @@ def film_get(match_id: int, player: str = "", _client: str = Depends(verify_api_
     return film.film(match_id, player or None)
 
 
+@router.get("/replay")
+def replay_get(match_id: int, round: int = 0, _client: str = Depends(verify_api_token)) -> dict:
+    """Full movement playback for one round (every player's trace); ?round omitted picks the first.
+    The result lists every round with traces so the /replay page can offer a round picker."""
+    from server.services import replay
+    return replay.replay_round(match_id, round or None)
+
+
 # ── Floor-plan backdrop image per map+floor ──────────────────────────────────
 
 @router.get("/rooms/backdrop")
