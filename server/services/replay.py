@@ -47,9 +47,13 @@ def _round(match, rn: int, pos_round: dict, ours: set, ev: dict) -> dict:
         })
     drones = [{"t": round(d["t"], 1), "prep": bool(d.get("prep"))} for d in (pos_round.get("drones") or [])]
     linked = sum(1 for d in (pos_round.get("drones") or []) if d.get("who"))
+    gadgets = [{"t": g.get("t"), "x": g.get("x"), "y": g.get("y"), "z": g.get("z"),
+                "type": g.get("type") or "gadget", "ours": _norm(g.get("who")) in ours}
+               for g in (pos_round.get("gadgets") or [])]          # owner handle dropped; type is operator-derived
     site = next((r.site for r in match.rounds if int(r.round_number) == rn), "")
     return {"map": match.map, "round": rn, "site": site, "def_team": pos_round.get("def_team"),
             "our_team": our_team, "players": out_players, "drones": drones, "drones_linked": linked,
+            "gadgets": gadgets,
             "plant_clock": ev.get("plant_clock"), "planted_by_us": ev.get("planted_by_us")}
 
 

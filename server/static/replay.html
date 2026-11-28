@@ -151,6 +151,13 @@
     for(var gx=0;gx<=W;gx+=42){ctx.beginPath();ctx.moveTo(gx,0);ctx.lineTo(gx,H);ctx.stroke();}
     for(var gy=0;gy<=H;gy+=42){ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(W,gy);ctx.stroke();}
     var players=state.data.players,T=state.t;
+    (state.data.gadgets||[]).forEach(function(gd){
+      if(gd.t==null||gd.t>T)return;
+      var onFloor=state.floor==='all'||floorOf(gd.z)===state.floor, sp=project(gd.x,gd.y,W,H), col=gd.ours?getCSS('--us'):getCSS('--them');
+      ctx.save();ctx.translate(sp[0],sp[1]);ctx.rotate(Math.PI/4);
+      ctx.globalAlpha=onFloor?0.5:0.12;ctx.fillStyle=col;ctx.fillRect(-3.5,-3.5,7,7);ctx.restore();
+      if(onFloor){ctx.globalAlpha=0.75;ctx.font='9px system-ui';ctx.textAlign='center';ctx.textBaseline='top';ctx.fillStyle=getCSS('--muted');ctx.fillText(gd.type,sp[0],sp[1]+5);}
+      ctx.globalAlpha=1;});
     players.forEach(function(p){var cur=posAt(p,T);if(!cur||cur.dead)return;
       if(state.floor!=='all'&&floorOf(cur.z)!==state.floor)return;
       ctx.strokeStyle=(p.team===state.ourTeam)?getCSS('--us-dim'):getCSS('--them-dim');ctx.lineWidth=2;ctx.beginPath();
@@ -213,7 +220,7 @@
     EL('meta').innerHTML=esc(d.map)+' <span class="sep">/</span> R'+d.round+' <span class="sep">/</span> '+esc(d.site||'site')
       +' <span class="sep">/</span> vs '+esc(mm.opponent||'?')+' '+esc(mm.score||'')
       +' <span class="sep">/</span> <span class="side">we '+(state.ourTeam==d.def_team?'defend':'attack')+'</span>';
-    EL('srcnote').textContent='positions @~1Hz · facing from decoded yaw · '+(d.drones||[]).length+' drones ('+(d.drones_linked||0)+' owner-linked)';
+    EL('srcnote').textContent='positions @~1Hz · facing from decoded yaw · '+(d.drones||[]).length+' drones ('+(d.drones_linked||0)+' owner-linked) · '+((d.gadgets||[]).length)+' gadgets placed';
     seek.value=0; buildSpeeds(); buildFloors(); buildTicks(); fit(); draw();
     EL('stage').hidden=false; EL('controls').hidden=false;
   }

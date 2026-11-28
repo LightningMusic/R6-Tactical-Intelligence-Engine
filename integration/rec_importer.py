@@ -267,6 +267,14 @@ class RecImporter:
                 round_obj.positions["drones"] = drones
         except Exception as e:                                       # noqa: BLE001 - optional enrichment
             self._log(f"  (drone data unavailable for {rec_file.name}: {e})")
+        try:
+            from integration.gadgets import decode_gadgets
+            op_of = {p["username"].lower(): (p.get("operator") or "") for p in round_obj.raw_player_stats}
+            gadgets = decode_gadgets(data, round_obj.positions, t_at, op_of)
+            if gadgets is not None:
+                round_obj.positions["gadgets"] = gadgets
+        except Exception as e:                                       # noqa: BLE001 - optional enrichment
+            self._log(f"  (gadget data unavailable for {rec_file.name}: {e})")
 
     @classmethod
     def timeline_round(cls, data: dict, round_number: int) -> dict:
